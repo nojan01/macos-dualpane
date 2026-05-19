@@ -1,0 +1,22 @@
+# Node / Vite
+node_modules
+dist
+dist-ssr
+*.local
+
+# IDE
+.vscode/*
+!.vscode/extensions.json
+.idea
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# macOS
+.DS_Store
+
+# Rust / Tauri
+src-tauri/target
+src-tauri/gen/schemas

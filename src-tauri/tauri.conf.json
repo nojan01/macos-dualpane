@@ -1,0 +1,49 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "DualBeam",
+  "version": "0.1.0",
+  "identifier": "com.nojan.dualbeam",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": "npm run build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "withGlobalTauri": false,
+    "windows": [
+      {
+        "title": "DualBeam",
+        "width": 1280,
+        "height": 800,
+        "minWidth": 900,
+        "minHeight": 500,
+        "resizable": true,
+        "center": true,
+        "dragDropEnabled": true
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["dmg", "app"],
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns"
+    ],
+    "category": "Utility",
+    "shortDescription": "Dual-Pane File Manager",
+    "longDescription": "Schlanker Dateimanager mit zwei Panes im Stil von Commander One / ForkLift.",
+    "copyright": "Copyright © 2026 N.J. — MIT License",
+    "license": "MIT",
+    "licenseFile": "../LICENSE",
+    "macOS": {
+      "minimumSystemVersion": "12.0"
+    }
+  }
+}

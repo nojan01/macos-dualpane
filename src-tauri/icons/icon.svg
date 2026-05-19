@@ -1,0 +1,32 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#3a5dbf"/>
+      <stop offset="1" stop-color="#1e3a7a"/>
+    </linearGradient>
+    <linearGradient id="paneL" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#f4f4f4"/>
+      <stop offset="1" stop-color="#d0d4dc"/>
+    </linearGradient>
+    <linearGradient id="paneR" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#fafafa"/>
+      <stop offset="1" stop-color="#c6cad3"/>
+    </linearGradient>
+  </defs>
+  <rect x="32" y="32" width="448" height="448" rx="96" fill="url(#bg)"/>
+  <rect x="84"  y="120" width="160" height="272" rx="14" fill="url(#paneL)"/>
+  <rect x="268" y="120" width="160" height="272" rx="14" fill="url(#paneR)"/>
+  <g fill="#5a6478">
+    <rect x="100" y="148" width="128" height="10" rx="3"/>
+    <rect x="100" y="172" width="100" height="8" rx="3"/>
+    <rect x="100" y="192" width="118" height="8" rx="3"/>
+    <rect x="100" y="212" width="84"  height="8" rx="3"/>
+  </g>
+  <g fill="#5a6478">
+    <rect x="284" y="148" width="128" height="10" rx="3"/>
+    <rect x="284" y="172" width="110" height="8" rx="3"/>
+    <rect x="284" y="192" width="92"  height="8" rx="3"/>
+    <rect x="284" y="212" width="120" height="8" rx="3"/>
+  </g>
+  <path d="M236 252 h40 m-12 -12 l12 12 -12 12" stroke="#ffffff" stroke-width="8" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>
