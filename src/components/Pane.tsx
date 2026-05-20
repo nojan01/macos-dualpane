@@ -1,4 +1,4 @@
-import { For, Show, createEffect, createSignal } from "solid-js";
+import { For, Show, createEffect, createMemo, createSignal, onCleanup, onMount } from "solid-js";
 import {
   state, setActive, selectOnly, toggleSelect, selectRange,
   loadPane, setSort, selTick, setFilter, focusFilterTick,
@@ -12,7 +12,7 @@ import {
 import {
   startPointerDrag, hoverTarget, dragEffect,
 } from "../dnd";
-import { openDefault, quickLook, mountDmg, findDmgMount, detachDmg } from "../ipc";
+import { openDefault, quickLook, mountDmg, findDmgMount, detachDmg, openUrl } from "../ipc";
 import { askConfirm } from "./Dialogs";
 import { openProperties } from "./PropertiesDialog";
 import { openRenameDialog } from "../rename";
@@ -45,6 +45,54 @@ export function Pane(props: { id: PaneId }) {
 
   let rowsEl: HTMLDivElement | undefined;
   let filterEl: HTMLInputElement | undefined;
+  let scrollEl: HTMLDivElement | undefined;
+
+  const VIRT_THRESHOLD = 500;
+  const ROW_H = 22;
+  const OVERSCAN = 10;
+  const [scrollTop, setScrollTop] = createSignal(0);
+  const [viewH, setViewH] = createSignal(600);
+
+  const virt = createMemo(() => {
+    const entries = pane().entries;
+    if (entries.length <= VIRT_THRESHOLD) {
+      return { enabled: false, items: entries, start: 0, padTop: 0, padBot: 0 };
+    }
+    const start = Math.max(0, Math.floor(scrollTop() / ROW_H) - OVERSCAN);
+    const visible = Math.ceil(viewH() / ROW_H) + 2 * OVERSCAN;
+    const end = Math.min(entries.length, start + visible);
+    return {
+      enabled: true,
+      items: entries.slice(start, end),
+      start,
+      padTop: start * ROW_H,
+      padBot: (entries.length - end) * ROW_H,
+    };
+  });
+
+  function onScroll(ev: Event) {
+    const el = ev.currentTarget as HTMLDivElement;
+    setScrollTop(el.scrollTop);
+    setViewH(el.clientHeight);
+  }
+
+  onMount(() => {
+    if (scrollEl) {
+      setViewH(scrollEl.clientHeight);
+      const ro = new ResizeObserver(() => {
+        if (scrollEl) setViewH(scrollEl.clientHeight);
+      });
+      ro.observe(scrollEl);
+      onCleanup(() => ro.disconnect());
+    }
+  });
+
+  // Bei cwd-Wechsel Scroll zurücksetzen, damit Windowing-Index stimmt.
+  createEffect(() => {
+    pane().cwd;
+    if (scrollEl) scrollEl.scrollTop = 0;
+    setScrollTop(0);
+  });
 
   createEffect(() => {
     const sig = focusFilterTick();
@@ -260,7 +308,7 @@ export function Pane(props: { id: PaneId }) {
           <button class="filter-clear" title={t("pane.filter.clear")} onClick={() => setFilter(id, "")}>✕</button>
         </Show>
       </div>
-      <div class="table-scroll">
+      <div class="table-scroll" ref={scrollEl} onScroll={onScroll}>
       <div class="rows" ref={rowsEl} tabIndex={-1} onContextMenu={onEmptyContextMenu}>
       <div class="col-header">
         <div onClick={() => setSort(id, "name")}>
@@ -280,31 +328,55 @@ export function Pane(props: { id: PaneId }) {
         </Show>
       </div>
         <Show when={pane().error}>
-          <div class="error">{pane().error}</div>
+          <div class="error">
+            {(() => {
+              const msg = pane().error || "";
+              const perm = /permission denied|operation not permitted|os error 1\b|os error 13\b|EACCES|EPERM/i.test(msg);
+              if (!perm) return <span>{msg}</span>;
+              return (
+                <>
+                  <div>{t("pane.error.permission")}</div>
+                  <div style={{ "font-size": "11px", opacity: "0.7", "margin-top": "4px" }}>{msg}</div>
+                  <button
+                    style={{ "margin-top": "6px" }}
+                    onClick={() => {
+                      void openUrl("x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles");
+                    }}
+                  >
+                    {t("pane.error.openSettings")}
+                  </button>
+                </>
+              );
+            })()}
+          </div>
         </Show>
-        <For each={pane().entries}>
+        <Show when={virt().enabled}>
+          <div style={{ height: `${virt().padTop}px` }} />
+        </Show>
+        <For each={virt().items}>
           {(e, i) => {
             // selTick als unsichtbare Abhängigkeit, damit Set-Mutationen Re-render auslösen
             selTick();
-            const isCursor = () => pane().cursor === i() && isActive();
+            const idx = () => virt().start + i();
+            const isCursor = () => pane().cursor === idx() && isActive();
             const isSel = () => pane().selected.has(e.path);
             const cmp = () => compareStatus(id, e);
             return (
               <div
                 class={`row ${isCursor() ? "cursor" : ""} ${isSel() ? "selected" : ""} ${
-                  hoverTarget()?.pane === id && hoverTarget()?.folderIdx === i()
+                  hoverTarget()?.pane === id && hoverTarget()?.folderIdx === idx()
                     ? "dnd-over"
                     : ""
                 } ${cmp() ? `cmp-${cmp()}` : ""}`}
-                onMouseDown={(ev) => onRowMouseDown(ev, i())}
-                onClick={(ev) => onRowClick(ev, i())}
-                onDblClick={(ev) => onRowDblClick(ev, i())}
-                onContextMenu={(ev) => onRowContextMenu(ev, i())}
+                onMouseDown={(ev) => onRowMouseDown(ev, idx())}
+                onClick={(ev) => onRowClick(ev, idx())}
+                onDblClick={(ev) => onRowDblClick(ev, idx())}
+                onContextMenu={(ev) => onRowContextMenu(ev, idx())}
               >
                 <div class="name">
                   <span class="icon">{e.isDir && e.name.toLowerCase().endsWith(".app") ? "🟦" : e.isDir ? "📁" : e.isSymlink ? "🔗" : "📄"}</span>
                   <Show
-                    when={state.editing && state.editing.pane === id && state.editing.idx === i()}
+                    when={state.editing && state.editing.pane === id && state.editing.idx === idx()}
                     fallback={<span>{e.name}</span>}
                   >
                     <input
@@ -352,6 +424,9 @@ export function Pane(props: { id: PaneId }) {
             );
           }}
         </For>
+        <Show when={virt().enabled}>
+          <div style={{ height: `${virt().padBot}px` }} />
+        </Show>
       </div>
       </div>
       <Show when={menu()}>

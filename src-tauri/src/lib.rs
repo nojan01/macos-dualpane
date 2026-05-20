@@ -194,6 +194,21 @@ fn open_default(path: String) -> Result<(), String> {
         })
 }
 
+#[tauri::command]
+fn open_url(url: String) -> Result<(), String> {
+    std::process::Command::new("open")
+        .arg(&url)
+        .status()
+        .map_err(|e| e.to_string())
+        .and_then(|s| {
+            if s.success() {
+                Ok(())
+            } else {
+                Err(format!("open exit {:?}", s.code()))
+            }
+        })
+}
+
 // ---------- Single-shot file ops ----------
 
 #[tauri::command]
@@ -1430,6 +1445,7 @@ pub fn run() {
             home_dir,
             list_dir,
             open_default,
+            open_url,
             create_dir,
             create_file,
             create_symlink,

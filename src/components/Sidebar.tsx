@@ -1,5 +1,5 @@
 import { For, Show, createEffect, createSignal, onMount, onCleanup } from "solid-js";
-import { state, loadPane, volumesTick } from "../state";
+import { state, loadPane, volumesTick, handleVolumeGone } from "../state";
 import {
   homeDir,
   listVolumes,
@@ -145,6 +145,7 @@ export function Sidebar() {
     if (!ok) return;
     try {
       await ejectVolume(vol.path);
+      await handleVolumeGone(vol.path);
       await refreshVols();
     } catch (err: any) {
       await askConfirm({

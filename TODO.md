@@ -30,11 +30,6 @@
 - Globaler Shortcut zum Fokussieren der App
 - Dock-Badge bei laufenden Jobs
 
-## Robustheit
-- Watcher beider Panes beim Auswerfen eines Volumes proaktiv aufräumen
-- Virtualisierte Liste (Windowing) für sehr große Verzeichnisse (>10k Einträge)
-- Zugriffsfehler (Sandbox, Full-Disk-Access) freundlicher melden + Link in die Systemeinstellungen
-
 ## Sonstiges
 - Tastatur-Cheatsheet (Cmd+/)
 - Weitere Sprachen (FR/ES) — i18n-Gerüst steht

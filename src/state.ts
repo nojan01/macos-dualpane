@@ -1,7 +1,7 @@
 import { createSignal } from "solid-js";
 import { createStore, type SetStoreFunction } from "solid-js/store";
 import type { Entry, PaneId, SortKey, SortDir } from "./types";
-import { listDir, watchPath, pathExists, homeDir } from "./ipc";
+import { listDir, watchPath, pathExists, homeDir, unwatchPane } from "./ipc";
 
 export type PaneState = {
   cwd: string;
@@ -174,6 +174,18 @@ export async function loadPane(pane: PaneId, path: string) {
 
 export async function refreshPane(pane: PaneId) {
   await loadPane(pane, state[pane].cwd);
+}
+
+export async function handleVolumeGone(volPath: string) {
+  const norm = volPath.endsWith("/") ? volPath : volPath + "/";
+  const panes: PaneId[] = ["left", "right"];
+  for (const pane of panes) {
+    const cwd = state[pane].cwd;
+    if (cwd === volPath || cwd.startsWith(norm)) {
+      try { await unwatchPane(pane); } catch {}
+      await loadPane(pane, cwd);
+    }
+  }
 }
 
 export function setActive(pane: PaneId) {

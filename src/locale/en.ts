@@ -87,6 +87,8 @@ export const en: Record<string, string> = {
   "pane.dmg.eject": "Eject",
   "pane.dmg.openInstead": "Open",
   "pane.dmg.failed": "DMG action failed",
+  "pane.error.permission": "Access denied. The app likely lacks permission for this folder.",
+  "pane.error.openSettings": "Open System Settings",
 
   // Preview
   "preview.title": "Preview",

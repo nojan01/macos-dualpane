@@ -9,6 +9,10 @@ export async function openDefault(path: string): Promise<void> {
   return invoke<void>("open_default", { path });
 }
 
+export async function openUrl(url: string): Promise<void> {
+  return invoke<void>("open_url", { url });
+}
+
 export async function homeDir(): Promise<string> {
   return invoke<string>("home_dir");
 }
