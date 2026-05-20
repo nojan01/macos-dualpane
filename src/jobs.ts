@@ -11,11 +11,13 @@ import {
   createFile,
   renamePath,
   moveToTrash,
+  forceDeleteAdmin,
   pathExists,
   zipCreate,
   zipExtract,
   createSymlink,
   createFinderAlias,
+  tmListWipeableVolumes,
   type JobItem,
   type JobKind,
 } from "./ipc";
@@ -214,6 +216,29 @@ export async function deleteSelected(skipConfirm = false) {
   const pane = state.active;
   const sel = selectedEntries(pane);
   if (sel.length === 0) return;
+
+  // Sperre: TM-Backup-Volumes / TM-Strukturen nur über den TM-Dialog löschen.
+  try {
+    const tmVols = await tmListWipeableVolumes();
+    const tmMounts = tmVols.map((v) => v.path.replace(/\/+$/, ""));
+    const TM_MARKER_RE = /(\.backupbundle($|\/)|\.inprogress($|\/)|\.previous($|\/)|\/Backups\.backupdb($|\/)|com\.apple\.TimeMachine)/i;
+    const hits = sel.some((e) => {
+      if (tmMounts.some((m) => e.path === m || e.path.startsWith(m + "/"))) return true;
+      return TM_MARKER_RE.test(e.path);
+    });
+    if (hits) {
+      await askConfirm({
+        title: t("tm.blockDeleteTitle"),
+        message: t("tm.blockDeleteMsg"),
+        okLabel: "OK",
+        cancelLabel: " ",
+      });
+      return;
+    }
+  } catch {
+    // Wenn die TM-Abfrage fehlschlägt, normaler Lösch-Flow.
+  }
+
   if (!skipConfirm) {
     const ok = await askConfirm({
       title: t("jobs.trash.title"),
@@ -229,7 +254,26 @@ export async function deleteSelected(skipConfirm = false) {
   try {
     await moveToTrash(sel.map((e) => e.path));
   } catch (e: any) {
-    alert(t("common.error", { msg: e?.message ?? e }));
+    const raw = e?.message ?? String(e);
+    const isProtected = raw.includes("NEEDS_ADMIN");
+    const retry = await askConfirm({
+      title: t("jobs.trash.title"),
+      message: isProtected
+        ? t("jobs.trash.protectedAdmin", {
+            count: String(sel.length),
+            name: sel[0].name,
+          })
+        : t("jobs.trash.forceAdmin", { msg: raw }),
+      okLabel: t("jobs.trash.deleteAsAdmin"),
+      danger: true,
+    });
+    if (retry) {
+      try {
+        await forceDeleteAdmin(sel.map((e) => e.path));
+      } catch (e2: any) {
+        alert(t("common.error", { msg: e2?.message ?? e2 }));
+      }
+    }
   }
   await refreshPane(pane);
 }

@@ -299,6 +299,8 @@ fn rename_path(old_path: String, new_path: String) -> Result<(), String> {
 
 #[tauri::command]
 fn move_to_trash(paths: Vec<String>) -> Result<(), String> {
+    use std::os::macos::fs::MetadataExt;
+    const PROTECT_MASK: u32 = 0x0002 | 0x0004 | 0x00020000 | 0x00040000 | 0x00080000 | 0x00100000;
     for p in &paths {
         let full = expand_tilde(p);
         // Symlinks: das `trash`-Crate folgt auf macOS teilweise dem Ziel
@@ -313,7 +315,68 @@ fn move_to_trash(paths: Vec<String>) -> Result<(), String> {
                 .map_err(|e| format!("{}: {}", full.display(), e))?;
             continue;
         }
+        let needs_admin = std::fs::symlink_metadata(&full)
+            .map(|m| (m.st_flags() & PROTECT_MASK) != 0)
+            .unwrap_or(false)
+            || full.file_name().and_then(|n| n.to_str())
+                .map(|n| n.ends_with(".inprogress"))
+                .unwrap_or(false);
+        if needs_admin {
+            return Err(format!("NEEDS_ADMIN: {}", full.display()));
+        }
         trash::delete(&full).map_err(|e| format!("{}: {}", full.display(), e))?;
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn force_delete_admin(paths: Vec<String>) -> Result<(), String> {
+    use std::io::Write;
+    let mut log = std::fs::OpenOptions::new().create(true).append(true)
+        .open("/tmp/dualbeam-delete.log").ok();
+    let logln = |log: &mut Option<std::fs::File>, s: &str| {
+        if let Some(f) = log.as_mut() { let _ = writeln!(f, "{}", s); }
+    };
+    logln(&mut log, &format!("=== ts={} ===", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)));
+    logln(&mut log, &format!("paths: {:?}", paths));
+    if paths.is_empty() { return Ok(()); }
+    let mut parts: Vec<String> = Vec::with_capacity(paths.len() * 6);
+    for p in &paths {
+        let full = expand_tilde(p);
+        let s = full.to_string_lossy().into_owned();
+        logln(&mut log, &format!("expanded: {} exists_before={}", s, full.exists()));
+        if s.is_empty() || s == "/" {
+            return Err(format!("Unerlaubter Pfad: {}", s));
+        }
+        let parent = full.parent()
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "/".into());
+        let q = shell_single_quote(&s);
+        let qp = shell_single_quote(&parent);
+        parts.push(format!(
+            "/usr/bin/tmutil delete -p {q} 2>&1; if [ -e {q} ]; then /bin/chmod -N {qp} 2>&1; /usr/bin/chflags nouchg,noschg,nouappnd,nosappnd,nouunlnk,nosunlnk {qp} 2>&1; /usr/bin/xattr -rc {q} 2>&1; /bin/chmod -RN {q} 2>&1; /bin/chmod -R u+rwX {q} 2>&1; /usr/bin/chflags -R nouchg,noschg,nouappnd,nosappnd,nouunlnk,nosunlnk {q} 2>&1; /bin/rm -rfv {q} 2>&1; fi; echo \"final-exit=$?\"; /bin/ls -lad {q} 2>&1 || echo gone",
+            q = q, qp = qp
+        ));
+    }
+    let cmd = parts.join(" ; ");
+    logln(&mut log, &format!("cmd: {}", cmd));
+    let result = run_with_admin(&cmd);
+    match &result {
+        Ok(out) => logln(&mut log, &format!("admin OK out:\n{}", out)),
+        Err(e) => logln(&mut log, &format!("admin ERR: {}", e)),
+    }
+    let out = result?;
+    let mut still: Vec<String> = Vec::new();
+    for p in &paths {
+        let full = expand_tilde(p);
+        let ex = full.exists();
+        logln(&mut log, &format!("after: {} exists_after={}", full.display(), ex));
+        if ex {
+            still.push(full.to_string_lossy().into_owned());
+        }
+    }
+    if !still.is_empty() {
+        return Err(format!("Nicht gelöscht:\n{}\n\nAusgabe:\n{}", still.join("\n"), out.trim()));
     }
     Ok(())
 }
@@ -1325,6 +1388,519 @@ fn base64_encode(input: &[u8]) -> String {
     out
 }
 
+// ---------------- Time Machine ----------------
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TmDestination {
+    pub name: String,
+    pub id: String,
+    pub mount_point: String,
+    pub kind: String,
+}
+
+fn shell_single_quote(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('\'');
+    for ch in s.chars() {
+        if ch == '\'' { out.push_str("'\\''"); } else { out.push(ch); }
+    }
+    out.push('\'');
+    out
+}
+
+fn escape_for_applescript(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for ch in s.chars() {
+        match ch {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            _ => out.push(ch),
+        }
+    }
+    out
+}
+
+fn run_with_admin(shell_cmd: &str) -> Result<String, String> {
+    let script = format!(
+        "do shell script \"{}\" with administrator privileges",
+        escape_for_applescript(shell_cmd)
+    );
+    let output = std::process::Command::new("osascript")
+        .arg("-e")
+        .arg(&script)
+        .output()
+        .map_err(|e| e.to_string())?;
+    if !output.status.success() {
+        let err = String::from_utf8_lossy(&output.stderr).into_owned();
+        return Err(if err.is_empty() { "Befehl fehlgeschlagen".into() } else { err });
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+#[tauri::command]
+fn tm_list_destinations() -> Result<Vec<TmDestination>, String> {
+    let output = std::process::Command::new("tmutil")
+        .arg("destinationinfo")
+        .output()
+        .map_err(|e| e.to_string())?;
+    if !output.status.success() {
+        return Err(String::from_utf8_lossy(&output.stderr).into_owned());
+    }
+    let text = String::from_utf8_lossy(&output.stdout).into_owned();
+    let mut dests: Vec<TmDestination> = Vec::new();
+    let mut name = String::new();
+    let mut id = String::new();
+    let mut mount = String::new();
+    let mut kind = String::new();
+    let push = |dests: &mut Vec<TmDestination>, name: &mut String, id: &mut String, mount: &mut String, kind: &mut String| {
+        if !name.is_empty() || !mount.is_empty() || !id.is_empty() {
+            dests.push(TmDestination {
+                name: std::mem::take(name),
+                id: std::mem::take(id),
+                mount_point: std::mem::take(mount),
+                kind: std::mem::take(kind),
+            });
+        }
+    };
+    for line in text.lines() {
+        let line = line.trim_end();
+        if line.starts_with("====") {
+            push(&mut dests, &mut name, &mut id, &mut mount, &mut kind);
+            continue;
+        }
+        if let Some(idx) = line.find(':') {
+            let key = line[..idx].trim();
+            let val = line[idx + 1..].trim().to_string();
+            match key {
+                "Name" => name = val,
+                "ID" => id = val,
+                "Mount Point" => mount = val,
+                "Kind" => kind = val,
+                _ => {}
+            }
+        }
+    }
+    push(&mut dests, &mut name, &mut id, &mut mount, &mut kind);
+    Ok(dests)
+}
+
+#[tauri::command]
+fn tm_list_backups(mount_point: Option<String>) -> Result<Vec<String>, String> {
+    let mut cmd = std::process::Command::new("tmutil");
+    cmd.arg("listbackups");
+    if let Some(mp) = mount_point.as_ref() {
+        if !mp.is_empty() {
+            cmd.arg("-d").arg(mp);
+        }
+    }
+    let output = cmd.output().map_err(|e| e.to_string())?;
+    if !output.status.success() {
+        let err = String::from_utf8_lossy(&output.stderr).into_owned();
+        return Err(if err.is_empty() { "tmutil listbackups fehlgeschlagen".into() } else { err });
+    }
+    let text = String::from_utf8_lossy(&output.stdout).into_owned();
+    let mut result: Vec<String> = text.lines().map(|l| l.trim().to_string()).filter(|l| !l.is_empty()).collect();
+
+    if let Some(mp) = mount_point.as_ref() {
+        if !mp.is_empty() {
+            if let Ok(entries) = std::fs::read_dir(mp) {
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    if path.is_dir() {
+                        if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                            if name.ends_with(".inprogress") {
+                                let s = path.to_string_lossy().into_owned();
+                                if !result.contains(&s) { result.push(s); }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    Ok(result)
+}
+
+#[tauri::command]
+fn tm_delete_backup(backup_path: String) -> Result<(), String> {
+    if backup_path.is_empty() {
+        return Err("Pfad ist leer".into());
+    }
+    let path_exists = || std::path::Path::new(&backup_path).exists();
+    let mut log = String::new();
+
+    let tmutil_cmd = format!("/usr/bin/tmutil delete -p {}", shell_single_quote(&backup_path));
+    match run_with_admin(&tmutil_cmd) {
+        Ok(s) => log.push_str(s.trim()),
+        Err(e) => log.push_str(e.trim()),
+    }
+    if !path_exists() { return Ok(()); }
+
+    let rm_cmd = format!("/bin/rm -rf {}", shell_single_quote(&backup_path));
+    match run_with_admin(&rm_cmd) {
+        Ok(s) => { log.push('\n'); log.push_str(s.trim()); }
+        Err(e) => { log.push('\n'); log.push_str(e.trim()); }
+    }
+    if !path_exists() { return Ok(()); }
+
+    Err(format!("Pfad {} konnte nicht gelöscht werden.\n{}", backup_path, log.trim()))
+}
+
+#[tauri::command]
+fn tm_wipe_volume(mount_point: String) -> Result<String, String> {
+    if mount_point.is_empty() {
+        return Err("Mountpoint ist leer".into());
+    }
+    let p = std::path::Path::new(&mount_point);
+    if !p.is_dir() {
+        return Err(format!("Mountpoint nicht gefunden: {}", mount_point));
+    }
+    // Sicherheitscheck 1: nur unterhalb /Volumes/ und nicht /Volumes selbst
+    if !mount_point.starts_with("/Volumes/") || mount_point == "/Volumes" || mount_point == "/Volumes/" {
+        return Err("Nur Volumes unterhalb /Volumes dürfen gelöscht werden".into());
+    }
+    let name = p.file_name().and_then(|s| s.to_str()).unwrap_or("").to_string();
+    if name.is_empty() {
+        return Err("Volume-Name konnte nicht ermittelt werden".into());
+    }
+    // Sicherheitscheck 2: System-/Boot-Volumes hart ablehnen.
+    // Niemals systemrelevante Namen zulassen.
+    let blocked_names = [
+        "Macintosh HD",
+        "Macintosh HD - Data",
+        "Preboot",
+        "Recovery",
+        "VM",
+        "Update",
+        "xarts",
+        "iSCPreboot",
+        "Hardware",
+    ];
+    if blocked_names.iter().any(|n| n.eq_ignore_ascii_case(&name)) {
+        return Err(format!("Sicherheits-Stopp: '{}' ist ein System-Volume und darf nicht gelöscht werden.", name));
+    }
+    // Auflösen: falls /Volumes/<name> ein Symlink auf / ist (Boot-Volume), ablehnen.
+    if let Ok(canon) = std::fs::canonicalize(p) {
+        let cs = canon.to_string_lossy();
+        if cs == "/" {
+            return Err("Sicherheits-Stopp: dieser Mountpoint zeigt auf das Boot-Volume (/).".into());
+        }
+    }
+    // diskutil info abfragen und auf Boot/System/Internal prüfen.
+    let info_out = std::process::Command::new("/usr/sbin/diskutil")
+        .args(["info", &mount_point])
+        .output()
+        .map_err(|e| format!("diskutil info: {}", e))?;
+    if !info_out.status.success() {
+        return Err(format!(
+            "diskutil info fehlgeschlagen: {}",
+            String::from_utf8_lossy(&info_out.stderr).trim()
+        ));
+    }
+    let info = String::from_utf8_lossy(&info_out.stdout).into_owned();
+    let lower = info.to_lowercase();
+    // Mountpoint /
+    for line in info.lines() {
+        let l = line.trim();
+        if let Some(v) = l.strip_prefix("Mount Point:") {
+            if v.trim() == "/" {
+                return Err("Sicherheits-Stopp: Mountpoint ist / (Boot-Volume).".into());
+            }
+        }
+    }
+    // Boot/System-Indikatoren
+    let danger_markers = [
+        "volume role:                system",
+        "volume role:                data",
+        "volume role:                preboot",
+        "volume role:                recovery",
+        "volume role:                vm",
+        "volume role:                update",
+        "volume role:                hardware",
+        "volume role:                xart",
+        "signed system volume:       yes",
+    ];
+    // Toleranter Vergleich: Marker ohne mehrfache Spaces
+    let normalized: String = lower.split_whitespace().collect::<Vec<_>>().join(" ");
+    for m in danger_markers.iter() {
+        let mn: String = m.split_whitespace().collect::<Vec<_>>().join(" ");
+        if normalized.contains(&mn) {
+            return Err(format!(
+                "Sicherheits-Stopp: Volume '{}' ist als System-/Boot-Volume markiert und wird nicht gelöscht.",
+                name
+            ));
+        }
+    }
+    // Internal=Yes wird NICHT mehr blockiert — interne TM-Volumes (z.B. zweite SSD)
+    // sind erlaubt, sofern sie keine System-/Boot-Rolle haben (oben bereits geprüft).
+
+    // APFS eraseVolume (recreate volume) — funktioniert bei APFS-Volumes inkl. TM
+    let cmd = format!(
+        "/usr/sbin/diskutil eraseVolume APFS {} {} 2>&1",
+        shell_single_quote(&name),
+        shell_single_quote(&mount_point)
+    );
+    let out = run_with_admin(&cmd).map_err(|e| e)?;
+    Ok(out)
+}
+
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct TmVolume {
+    pub name: String,
+    pub path: String,
+    /// "active" = registered TM destination, "former" = ex-TM, never "none" in returned list
+    pub kind: String,
+    pub has_backupdb: bool,
+    pub role_backup: bool,
+    pub registered: bool,
+}
+
+fn diskutil_info(mount_point: &str) -> Option<String> {
+    let out = std::process::Command::new("/usr/sbin/diskutil")
+        .args(["info", mount_point])
+        .output().ok()?;
+    if !out.status.success() { return None; }
+    Some(String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+fn volume_uuid(info: &str) -> Option<String> {
+    for line in info.lines() {
+        let l = line.trim();
+        if let Some(v) = l.strip_prefix("Volume UUID:") {
+            return Some(v.trim().to_string());
+        }
+    }
+    None
+}
+
+fn registered_tm_uuids() -> Vec<String> {
+    let out = match std::process::Command::new("/usr/bin/tmutil")
+        .args(["destinationinfo", "-X"]).output() {
+        Ok(o) if o.status.success() => o,
+        _ => return Vec::new(),
+    };
+    let s = String::from_utf8_lossy(&out.stdout);
+    let mut uuids = Vec::new();
+    let mut in_id = false;
+    for line in s.lines() {
+        let t = line.trim();
+        if in_id {
+            if let Some(v) = t.strip_prefix("<string>").and_then(|s| s.strip_suffix("</string>")) {
+                uuids.push(v.to_string());
+            }
+            in_id = false;
+        } else if t == "<key>ID</key>" {
+            in_id = true;
+        }
+    }
+    uuids
+}
+
+fn is_system_name(name: &str) -> bool {
+    let blocked = [
+        "Macintosh HD","Macintosh HD - Data","Preboot","Recovery","VM",
+        "Update","xarts","iSCPreboot","Hardware",
+    ];
+    blocked.iter().any(|n| n.eq_ignore_ascii_case(name))
+}
+
+fn info_has_system_role(info: &str) -> bool {
+    let normalized: String = info.to_lowercase().split_whitespace()
+        .collect::<Vec<_>>().join(" ");
+    let markers = [
+        "volume role: system","volume role: data","volume role: preboot",
+        "volume role: recovery","volume role: vm","volume role: update",
+        "volume role: hardware","volume role: xart",
+        "signed system volume: yes",
+    ];
+    markers.iter().any(|m| normalized.contains(m))
+}
+
+fn classify_tm_volume(mount_point: &str, registered: &[String]) -> Option<TmVolume> {
+    use std::fs;
+    let p = std::path::Path::new(mount_point);
+    let name = p.file_name().and_then(|s| s.to_str())?.to_string();
+    if is_system_name(&name) { return None; }
+    let info = diskutil_info(mount_point)?;
+    if info_has_system_role(&info) { return None; }
+    let normalized: String = info.to_lowercase().split_whitespace()
+        .collect::<Vec<_>>().join(" ");
+    let role_backup = normalized.contains("volume role: backup")
+        || normalized.contains("apfs role: backup");
+    let has_backupdb = p.join("Backups.backupdb").is_dir();
+    let has_manifest = p.join("backup_manifest.plist").is_file();
+    let has_tm_dir_marker = fs::read_dir(p).ok().map_or(false, |rd| {
+        rd.flatten().any(|e| {
+            let n = e.file_name();
+            let s = n.to_string_lossy();
+            s.ends_with(".inprogress") || s.ends_with(".previous")
+                || s.ends_with(".backupbundle")
+        })
+    });
+    let uuid = volume_uuid(&info);
+
+    // Robust: Vergleiche alle Mountpoints aus tmutil destinationinfo nach canonicalize
+    let is_registered = if let Some(u) = uuid.as_ref() {
+        registered.iter().any(|r| r.eq_ignore_ascii_case(u))
+    } else {
+        false
+    };
+
+    // Zusätzlich: Wenn der aktuelle Mountpoint (z.B. /Volumes/Backup01 1) mit einem TM-Mountpoint (z.B. /Volumes/Backup01) auf dasselbe Device zeigt, als registered markieren
+    let tm_mounts = get_tm_mountpoints();
+    let this_canon = fs::canonicalize(mount_point).ok();
+    let mut registered_by_mount = false;
+    if let Some(this_canon) = &this_canon {
+        for tm in &tm_mounts {
+            if let Ok(tm_canon) = fs::canonicalize(tm) {
+                if tm_canon == *this_canon {
+                    registered_by_mount = true;
+                    break;
+                }
+            }
+        }
+    }
+
+    // Noch robuster: Wenn der aktuelle Mountpoint exakt als String in get_tm_mountpoints() vorkommt, ist es ein aktives TM-Volume
+    let mut registered_by_mount_str = false;
+    for tm in &tm_mounts {
+        // Vergleiche nach canonicalize, aber auch als String (z.B. /Volumes/Backup01 1)
+        if tm == mount_point {
+            registered_by_mount_str = true;
+            break;
+        }
+    }
+    let is_registered = is_registered || registered_by_mount || registered_by_mount_str;
+
+    // NEU: Wenn der Mountpoint exakt in get_tm_mountpoints() steht, immer listen
+    let is_tm = role_backup || has_backupdb || has_manifest
+        || has_tm_dir_marker || is_registered || registered_by_mount_str;
+    if !is_tm { return None; }
+    let is_active = is_registered || registered_by_mount_str;
+    Some(TmVolume {
+        name,
+        path: mount_point.to_string(),
+        kind: if is_active { "active".to_string() } else { "former".to_string() },
+        has_backupdb: has_backupdb || has_manifest || has_tm_dir_marker,
+        role_backup,
+        registered: is_active,
+    })
+}
+
+// Extrahiere alle Mountpoints aus tmutil destinationinfo
+fn get_tm_mountpoints() -> Vec<String> {
+    let output = std::process::Command::new("tmutil")
+        .arg("destinationinfo")
+        .output();
+    if let Ok(output) = output {
+        if output.status.success() {
+            let text = String::from_utf8_lossy(&output.stdout);
+            let mut mounts = Vec::new();
+            for line in text.lines() {
+                if let Some(mp) = line.strip_prefix("Mount Point:") {
+                    let m = mp.trim();
+                    if !m.is_empty() {
+                        mounts.push(m.to_string());
+                    }
+                }
+            }
+            return mounts;
+        }
+    }
+    Vec::new()
+}
+
+#[tauri::command]
+fn tm_list_wipeable_volumes() -> Result<Vec<TmVolume>, String> {
+    let all = list_volumes()?;
+    let registered = registered_tm_uuids();
+    Ok(all.into_iter()
+        .filter_map(|v| classify_tm_volume(&v.path, &registered))
+        .collect())
+}
+
+fn list_local_snapshots_raw() -> Result<Vec<String>, String> {
+    let output = std::process::Command::new("tmutil")
+        .args(["listlocalsnapshots", "/"])
+        .output()
+        .map_err(|e| e.to_string())?;
+    if !output.status.success() {
+        return Err(String::from_utf8_lossy(&output.stderr).into_owned());
+    }
+    let text = String::from_utf8_lossy(&output.stdout).into_owned();
+    let mut snaps: Vec<String> = Vec::new();
+    for line in text.lines() {
+        let line = line.trim();
+        if let Some(rest) = line.strip_prefix("com.apple.TimeMachine.") {
+            let date = rest.trim_end_matches(".local").to_string();
+            if !date.is_empty() { snaps.push(date); }
+        }
+    }
+    Ok(snaps)
+}
+
+#[tauri::command]
+fn tm_list_local_snapshots() -> Result<Vec<String>, String> {
+    list_local_snapshots_raw()
+}
+
+#[tauri::command]
+fn tm_delete_local_snapshot(date: String) -> Result<(), String> {
+    if date.is_empty() {
+        return Err("Datum ist leer".into());
+    }
+
+    let still_present = || -> Result<bool, String> {
+        Ok(list_local_snapshots_raw()?.iter().any(|s| s == &date))
+    };
+
+    let mut last_output = String::new();
+
+    // 1) ohne Admin versuchen
+    let out = std::process::Command::new("tmutil")
+        .args(["deletelocalsnapshots", &date])
+        .output()
+        .map_err(|e| e.to_string())?;
+    last_output.push_str(&String::from_utf8_lossy(&out.stdout));
+    last_output.push_str(&String::from_utf8_lossy(&out.stderr));
+    if !still_present()? {
+        return Ok(());
+    }
+
+    // 2) mit Admin via osascript (Passwort-Dialog)
+    let admin_cmd = format!(
+        "/usr/bin/tmutil deletelocalsnapshots {}",
+        shell_single_quote(&date)
+    );
+    match run_with_admin(&admin_cmd) {
+        Ok(s) => last_output = format!("{}\n{}", last_output.trim(), s.trim()),
+        Err(e) => last_output = format!("{}\n{}", last_output.trim(), e.trim()),
+    }
+    if !still_present()? {
+        return Ok(());
+    }
+
+    // 3) Fallback: thinlocalsnapshots für diesen Zeitstempel mit purge=4 als Admin
+    //    (wird bei "in use"-Snapshots manchmal nötig)
+    let thin_cmd = format!(
+        "/usr/bin/tmutil thinlocalsnapshots / 999999999999 4"
+    );
+    if let Ok(s) = run_with_admin(&thin_cmd) {
+        last_output = format!("{}\n{}", last_output.trim(), s.trim());
+    }
+    if !still_present()? {
+        return Ok(());
+    }
+
+    Err(format!(
+        "Snapshot {} konnte nicht gelöscht werden.\n{}",
+        date,
+        last_output.trim()
+    ))
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -1452,6 +2028,7 @@ pub fn run() {
             create_finder_alias,
             rename_path,
             move_to_trash,
+            force_delete_admin,
             path_exists,
             list_volumes,
             eject_volume,
@@ -1475,6 +2052,13 @@ pub fn run() {
             open_terminal,
             get_properties,
             set_permissions,
+            tm_list_destinations,
+            tm_list_backups,
+            tm_delete_backup,
+            tm_wipe_volume,
+            tm_list_wipeable_volumes,
+            tm_list_local_snapshots,
+            tm_delete_local_snapshot,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -12,6 +12,7 @@ import { SearchDialog } from "./components/SearchDialog";
 import { Dialogs } from "./components/Dialogs";
 import { PropertiesDialog } from "./components/PropertiesDialog";
 import { JobBar } from "./components/JobBar";
+import { TimeMachineDialog, openTimeMachine } from "./components/TimeMachineDialog";
 import { loadPane, state, setActive, setState, refreshPane, toggleCompareMode } from "./state";
 import { homeDir, openTerminal, type JobProgress, type PaneChanged } from "./ipc";
 import { attachKeymap } from "./keymap";
@@ -305,6 +306,13 @@ export function App() {
         <div class="spacer" />
         <button
           class="tb-glyph"
+          onClick={() => openTimeMachine()}
+          title={t("toolbar.timeMachine")}
+        >
+          <span style="font-size:16px;line-height:1">🕒</span>
+        </button>
+        <button
+          class="tb-glyph"
           onClick={() => cycleThemeMode()}
           title={t("toolbar.themeTitle", { label: themeLabel(themeMode()) })}
         >
@@ -337,6 +345,7 @@ export function App() {
       <SearchDialog />
       <Dialogs />
       <PropertiesDialog />
+      <TimeMachineDialog />
       <div class="resize-grip" aria-hidden="true" />
     </div>
   );

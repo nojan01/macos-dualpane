@@ -41,6 +41,10 @@ export async function moveToTrash(paths: string[]): Promise<void> {
   return invoke<void>("move_to_trash", { paths });
 }
 
+export async function forceDeleteAdmin(paths: string[]): Promise<void> {
+  return invoke<void>("force_delete_admin", { paths });
+}
+
 export async function pathExists(path: string): Promise<boolean> {
   return invoke<boolean>("path_exists", { path });
 }
@@ -184,6 +188,50 @@ export async function getProperties(path: string): Promise<Properties> {
 
 export async function setPermissions(path: string, mode: number): Promise<void> {
   return invoke<void>("set_permissions", { path, mode });
+}
+
+export type TmDestination = {
+  name: string;
+  id: string;
+  mountPoint: string;
+  kind: string;
+};
+
+export async function tmListDestinations(): Promise<TmDestination[]> {
+  return invoke<TmDestination[]>("tm_list_destinations");
+}
+
+export async function tmListBackups(mountPoint?: string | null): Promise<string[]> {
+  return invoke<string[]>("tm_list_backups", { mountPoint: mountPoint ?? null });
+}
+
+export async function tmDeleteBackup(backupPath: string): Promise<void> {
+  return invoke<void>("tm_delete_backup", { backupPath });
+}
+
+export async function tmWipeVolume(mountPoint: string): Promise<string> {
+  return invoke<string>("tm_wipe_volume", { mountPoint });
+}
+
+export type TmVolume = {
+  name: string;
+  path: string;
+  kind: "active" | "former";
+  hasBackupdb: boolean;
+  roleBackup: boolean;
+  registered: boolean;
+};
+
+export async function tmListWipeableVolumes(): Promise<TmVolume[]> {
+  return invoke<TmVolume[]>("tm_list_wipeable_volumes");
+}
+
+export async function tmListLocalSnapshots(): Promise<string[]> {
+  return invoke<string[]>("tm_list_local_snapshots");
+}
+
+export async function tmDeleteLocalSnapshot(date: string): Promise<void> {
+  return invoke<void>("tm_delete_local_snapshot", { date });
 }
 
 export type PaneChanged = { paneId: string; path: string };
