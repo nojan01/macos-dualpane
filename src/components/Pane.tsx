@@ -7,19 +7,23 @@ import {
 import {
   commitRename, cancelRename, selectedEntries,
   beginRename, makeFolder, makeFile, startTransfer, deleteSelected,
-  duplicateSelected, archiveAction, createLinksInOther,
+  duplicateSelected, archiveAction, createLinksInOther, pasteFromClipboard,
 } from "../jobs";
 import {
   startPointerDrag, hoverTarget, dragEffect,
 } from "../dnd";
-import { openDefault, quickLook, mountDmg, findDmgMount, detachDmg, openUrl } from "../ipc";
+import { openDefault, quickLook, mountDmg, findDmgMount, detachDmg, openUrl, clipboardWriteFiles, dragIconPath, openTerminal, openInEditor } from "../ipc";
+import { openSearch } from "./SearchDialog";
+import { startDrag } from "@crabnebula/tauri-plugin-drag";
 import { askConfirm } from "./Dialogs";
 import { openProperties } from "./PropertiesDialog";
+import { syncToOther } from "../sync";
 import { openRenameDialog } from "../rename";
 import type { PaneId } from "../types";
 import { PathBar } from "./PathBar";
 import { TabBar } from "./TabBar";
-import { t } from "../i18n";
+import { FileIcon } from "./FileIcon";
+import { t, errMsg } from "../i18n";
 
 function fmtSize(n: number, isDir: boolean): string {
   if (isDir) return "—";
@@ -124,11 +128,11 @@ export function Pane(props: { id: PaneId }) {
       const mp = await mountDmg(filePath);
       bumpVolumes();
       await loadPane(id, mp);
-    } catch (err: any) {
+    } catch (err) {
       console.error("mountDmg:", err);
       await askConfirm({
         title: t("pane.dmg.failed"),
-        message: String(err?.message ?? err),
+        message: errMsg(err),
         okLabel: t("common.ok"),
         cancelLabel: t("common.close"),
       });
@@ -154,6 +158,33 @@ export function Pane(props: { id: PaneId }) {
 
   const onRowDblClick = (_ev: MouseEvent, idx: number) => {
     void activate(idx);
+  };
+
+  const onRowDragStart = (ev: DragEvent, idx: number) => {
+    const p = pane();
+    const e = p.entries[idx];
+    if (!e) {
+      ev.preventDefault();
+      return;
+    }
+    if (!p.selected.has(e.path)) selectOnly(id, idx);
+    const items = selectedEntries(id);
+    if (items.length === 0) {
+      ev.preventDefault();
+      return;
+    }
+    // HTML5-Drag verhindern und nativen macOS-Drag via tauri-plugin-drag starten.
+    // Konflikte (Überschreiben) übernimmt das Drop-Ziel (z. B. Finder) selbst.
+    ev.preventDefault();
+    const paths = items.map((it) => it.path);
+    void (async () => {
+      try {
+        const icon = await dragIconPath();
+        await startDrag({ item: paths, icon, mode: "copy" });
+      } catch (e) {
+        console.error("native drag failed", e);
+      }
+    })();
   };
 
   const onRowMouseDown = (ev: MouseEvent, idx: number) => {
@@ -234,6 +265,7 @@ export function Pane(props: { id: PaneId }) {
   const actMove = async () => { closeMenu(); await startTransfer("move"); };
   const actSymlink = async () => { closeMenu(); await createLinksInOther("symlink"); };
   const actAlias = async () => { closeMenu(); await createLinksInOther("alias"); };
+  const actSync = async () => { closeMenu(); await syncToOther(); };
   const actMountDmg = async () => {
     closeMenu();
     const e = firstSel();
@@ -247,6 +279,7 @@ export function Pane(props: { id: PaneId }) {
   const actRefresh = async () => { closeMenu(); await refreshPane(id); };
   const actToggleHidden = () => { closeMenu(); toggleHidden(); };
   const actTogglePreview = () => { closeMenu(); togglePreview(); };
+  const actPaste = async () => { closeMenu(); await pasteFromClipboard(id); };
   const actProperties = () => {
     closeMenu();
     const e = firstSel();
@@ -270,6 +303,29 @@ export function Pane(props: { id: PaneId }) {
       try { document.execCommand("copy"); } catch { /* ignore */ }
       document.body.removeChild(ta);
     }
+  };
+
+  const actCopyFiles = async () => {
+    closeMenu();
+    const paths = sel().map((e) => e.path);
+    if (paths.length === 0) return;
+    try { await clipboardWriteFiles(paths); }
+    catch (e) { console.error("clipboardWriteFiles failed", e); }
+  };
+
+  const actOpenTerminal = async () => {
+    closeMenu();
+    const e = firstSel();
+    const target = e ? e.path : state[id].cwd;
+    try { await openTerminal(target); }
+    catch (err) { console.error("openTerminal failed", err); }
+  };
+  const actOpenInEditor = async () => {
+    closeMenu();
+    const e = firstSel();
+    if (!e) return;
+    try { await openInEditor(e.path); }
+    catch (err) { console.error("openInEditor failed", err); }
   };
 
   return (
@@ -307,8 +363,13 @@ export function Pane(props: { id: PaneId }) {
         <Show when={pane().filter}>
           <button class="filter-clear" title={t("pane.filter.clear")} onClick={() => setFilter(id, "")}>✕</button>
         </Show>
+        <button
+          class="filter-search"
+          title={t("pane.filter.searchRecursive")}
+          onClick={() => { setActive(id); openSearch(); }}
+        >🔎</button>
       </div>
-      <div class="table-scroll" ref={scrollEl} onScroll={onScroll}>
+      <div class="table-scroll" ref={scrollEl} onScroll={onScroll} onContextMenu={onEmptyContextMenu}>
       <div class="rows" ref={rowsEl} tabIndex={-1} onContextMenu={onEmptyContextMenu}>
       <div class="col-header">
         <div onClick={() => setSort(id, "name")}>
@@ -336,9 +397,9 @@ export function Pane(props: { id: PaneId }) {
               return (
                 <>
                   <div>{t("pane.error.permission")}</div>
-                  <div style={{ "font-size": "11px", opacity: "0.7", "margin-top": "4px" }}>{msg}</div>
+                  <div class="pane-error-detail">{msg}</div>
                   <button
-                    style={{ "margin-top": "6px" }}
+                    class="pane-error-btn"
                     onClick={() => {
                       void openUrl("x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles");
                     }}
@@ -351,7 +412,7 @@ export function Pane(props: { id: PaneId }) {
           </div>
         </Show>
         <Show when={virt().enabled}>
-          <div style={{ height: `${virt().padTop}px` }} />
+          <div class="virt-pad" ref={(el) => createEffect(() => el.style.setProperty("--vh", `${virt().padTop}px`))} />
         </Show>
         <For each={virt().items}>
           {(e, i) => {
@@ -372,9 +433,14 @@ export function Pane(props: { id: PaneId }) {
                 onClick={(ev) => onRowClick(ev, idx())}
                 onDblClick={(ev) => onRowDblClick(ev, idx())}
                 onContextMenu={(ev) => onRowContextMenu(ev, idx())}
+                draggable={true}
+                onDragStart={(ev) => onRowDragStart(ev, idx())}
               >
                 <div class="name">
-                  <span class="icon">{e.isDir && e.name.toLowerCase().endsWith(".app") ? "🟦" : e.isDir ? "📁" : e.isSymlink ? "🔗" : "📄"}</span>
+                  <FileIcon
+                    path={e.path}
+                    fallback={e.isDir && e.name.toLowerCase().endsWith(".app") ? "🟦" : e.isDir ? "📁" : e.isSymlink ? "🔗" : "📄"}
+                  />
                   <Show
                     when={state.editing && state.editing.pane === id && state.editing.idx === idx()}
                     fallback={<span>{e.name}</span>}
@@ -425,7 +491,7 @@ export function Pane(props: { id: PaneId }) {
           }}
         </For>
         <Show when={virt().enabled}>
-          <div style={{ height: `${virt().padBot}px` }} />
+          <div class="virt-pad" ref={(el) => createEffect(() => el.style.setProperty("--vh", `${virt().padBot}px`))} />
         </Show>
       </div>
       </div>
@@ -438,11 +504,12 @@ export function Pane(props: { id: PaneId }) {
               onContextMenu={(ev) => { ev.preventDefault(); closeMenu(); }}
             />
             <div
-              class="ctx-menu"
-              style={{ left: `${m().x}px`, top: `${m().y}px` }}
+              class="ctx-menu ctx-pos"
               onMouseDown={(ev) => ev.stopPropagation()}
               onContextMenu={(ev) => ev.preventDefault()}
               ref={(el) => {
+                el.style.setProperty("--cx", `${m().x}px`);
+                el.style.setProperty("--cy", `${m().y}px`);
                 queueMicrotask(() => {
                   const r = el.getBoundingClientRect();
                   const pad = 8;
@@ -481,6 +548,11 @@ export function Pane(props: { id: PaneId }) {
               <div class="ctx-item" onClick={() => void actAlias()}>
                 {id === "left" ? t("pane.ctx.aliasToRight") : t("pane.ctx.aliasToLeft")}
               </div>
+              <Show when={sel().length === 1 && firstSel()?.isDir}>
+                <div class="ctx-item" onClick={() => void actSync()}>
+                  {id === "left" ? t("pane.ctx.syncToRight") : t("pane.ctx.syncToLeft")}
+                </div>
+              </Show>
               <div class="ctx-sep" />
               <div class="ctx-item" onClick={() => void actArchive()}>
                 {isZipSel() ? t("pane.ctx.extract") : t("pane.ctx.zip")}
@@ -504,15 +576,27 @@ export function Pane(props: { id: PaneId }) {
                 {sel().length > 1 ? t("pane.ctx.trashN", { count: sel().length }) : t("pane.ctx.trash")}
               </div>
               <div class="ctx-sep" />
+              <div class="ctx-item" onClick={() => void actCopyFiles()}>
+                {sel().length > 1 ? t("pane.ctx.copyN", { count: sel().length }) : t("pane.ctx.copy")}
+              </div>
+              <div class="ctx-item" onClick={() => void actPaste()}>{t("pane.ctx.paste")}</div>
               <div class="ctx-item" onClick={() => void actCopyPath()}>
                 {sel().length > 1 ? t("pane.ctx.copyPathN", { count: sel().length }) : t("pane.ctx.copyPath")}
               </div>
+              <Show when={sel().length === 1 && !firstSel()?.isDir}>
+                <div class="ctx-item" onClick={() => void actOpenInEditor()}>{t("pane.ctx.openInEditor")}</div>
+              </Show>
+              <div class="ctx-item" onClick={() => void actOpenTerminal()}>{t("pane.ctx.openTerminal")}</div>
               <div class="ctx-item" onClick={actProperties}>{t("pane.ctx.properties")}</div>
             </Show>
             <Show when={m().kind === "empty"}>
+              <div class="ctx-item" onClick={() => void actPaste()}>{t("pane.ctx.paste")}</div>
+              <div class="ctx-sep" />
               <div class="ctx-item" onClick={() => void actNewFolder()}>{t("pane.ctx.newFolder")}</div>
               <div class="ctx-item" onClick={() => void actNewFile()}>{t("pane.ctx.newFile")}</div>
               <div class="ctx-item" onClick={() => void actRefresh()}>{t("pane.ctx.refresh")}</div>
+              <div class="ctx-sep" />
+              <div class="ctx-item" onClick={() => void actOpenTerminal()}>{t("pane.ctx.openTerminal")}</div>
               <div class="ctx-sep" />
               <div class="ctx-item" onClick={actToggleHidden}>
                 {state.showHidden ? t("pane.ctx.hiddenHide") : t("pane.ctx.hiddenShow")}

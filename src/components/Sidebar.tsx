@@ -6,11 +6,14 @@ import {
   ejectVolume,
   loadFavorites,
   saveFavorites,
+  listNetworkBookmarks,
+  mountNetworkUrl,
   type Volume,
   type Favorite,
+  type NetworkBookmark,
 } from "../ipc";
 import { askConfirm } from "./Dialogs";
-import { t } from "../i18n";
+import { t, errMsg } from "../i18n";
 
 function basename(p: string): string {
   const trimmed = p.endsWith("/") ? p.slice(0, -1) : p;
@@ -24,6 +27,8 @@ type VolMenu = { vol: Volume; x: number; y: number } | null;
 export function Sidebar() {
   const [favs, setFavs] = createSignal<Favorite[]>([]);
   const [vols, setVols] = createSignal<Volume[]>([]);
+  const [bookmarks, setBookmarks] = createSignal<NetworkBookmark[]>([]);
+  const [mounting, setMounting] = createSignal<string | null>(null);
   const [editIdx, setEditIdx] = createSignal<number | null>(null);
   const [editValue, setEditValue] = createSignal("");
   const [menu, setMenu] = createSignal<Menu>(null);
@@ -37,13 +42,38 @@ export function Sidebar() {
     } catch {
       setVols([]);
     }
+    try {
+      setBookmarks(await listNetworkBookmarks());
+    } catch {
+      setBookmarks([]);
+    }
+  }
+
+  async function mountBookmark(b: NetworkBookmark) {
+    if (mounting()) return;
+    setMounting(b.url);
+    try {
+      await mountNetworkUrl(b.url);
+      await refreshVols();
+      const fresh = bookmarks().find((x) => x.url === b.url);
+      if (fresh?.connected) go(fresh.mountPath);
+    } catch (err) {
+      await askConfirm({
+        title: t("sidebar.mountFailed"),
+        message: errMsg(err),
+        okLabel: t("common.ok"),
+        cancelLabel: t("common.close"),
+      });
+    } finally {
+      setMounting(null);
+    }
   }
 
   async function persist(next: Favorite[]) {
     setFavs(next);
     try {
       await saveFavorites(next);
-    } catch (err: any) {
+    } catch (err) {
       console.error("saveFavorites:", err);
     }
   }
@@ -147,10 +177,10 @@ export function Sidebar() {
       await ejectVolume(vol.path);
       await handleVolumeGone(vol.path);
       await refreshVols();
-    } catch (err: any) {
+    } catch (err) {
       await askConfirm({
         title: t("sidebar.ejectFailed"),
-        message: String(err),
+        message: errMsg(err),
         okLabel: t("common.ok"),
         cancelLabel: t("common.close"),
       });
@@ -171,10 +201,6 @@ export function Sidebar() {
     }
     await refreshVols();
     const t = setInterval(refreshVols, 5000);
-    createEffect(() => {
-      volumesTick();
-      void refreshVols();
-    });
     window.addEventListener("click", onGlobalClick);
     window.addEventListener("keydown", onGlobalKey);
     onCleanup(() => {
@@ -182,6 +208,11 @@ export function Sidebar() {
       window.removeEventListener("click", onGlobalClick);
       window.removeEventListener("keydown", onGlobalKey);
     });
+  });
+
+  createEffect(() => {
+    volumesTick();
+    void refreshVols();
   });
 
   const go = (path: string) => loadPane(state.active, path);
@@ -239,8 +270,8 @@ export function Sidebar() {
           )}
         </For>
         <div class="sb-section">{t("sidebar.volumes")}</div>
-        <Show when={vols().length > 0} fallback={<div class="sb-empty">{t("sidebar.none")}</div>}>
-          <For each={vols()}>
+        <Show when={vols().filter((v) => v.kind !== "network").length > 0} fallback={<div class="sb-empty">{t("sidebar.none")}</div>}>
+          <For each={vols().filter((v) => v.kind !== "network")}>
             {(v) => (
               <div
                 class={`sb-item ${state[state.active].cwd === v.path ? "active" : ""}`}
@@ -254,11 +285,42 @@ export function Sidebar() {
             )}
           </For>
         </Show>
+        <Show when={vols().some((v) => v.kind === "network" && !bookmarks().some((b) => b.mountPath === v.path)) || bookmarks().length > 0}>
+          <div class="sb-section sb-section-spaced">{t("sidebar.network")}</div>
+          <For each={bookmarks()}>
+            {(b) => (
+              <div
+                class={`sb-item ${state[state.active].cwd === b.mountPath ? "active" : ""} ${b.connected ? "" : "disconnected"}`}
+                onClick={() => (b.connected ? go(b.mountPath) : mountBookmark(b))}
+                title={b.connected ? b.mountPath : `${b.url} — ${t("sidebar.clickToMount")}`}
+              >
+                <span class="sb-icon">{b.connected ? "🌐" : "🔌"}</span>
+                <span class="sb-label">{b.name}</span>
+                <Show when={mounting() === b.url}>
+                  <span class="sb-spin">…</span>
+                </Show>
+              </div>
+            )}
+          </For>
+          <For each={vols().filter((v) => v.kind === "network" && !bookmarks().some((b) => b.mountPath === v.path))}>
+            {(v) => (
+              <div
+                class={`sb-item ${state[state.active].cwd === v.path ? "active" : ""}`}
+                onClick={() => go(v.path)}
+                onContextMenu={(ev) => openVolMenu(v, ev)}
+                title={v.path}
+              >
+                <span class="sb-icon">🌐</span>
+                <span class="sb-label">{v.name}</span>
+              </div>
+            )}
+          </For>
+        </Show>
         <Show when={menu()}>
           {(m) => (
             <div
-              class="ctx-menu"
-              style={{ left: `${m().x}px`, top: `${m().y}px` }}
+              class="ctx-menu sidebar-ctx"
+              ref={(el) => { el.style.setProperty("--cx", `${m().x}px`); el.style.setProperty("--cy", `${m().y}px`); }}
               onClick={(e) => e.stopPropagation()}
             >
               <div
@@ -287,8 +349,8 @@ export function Sidebar() {
         <Show when={volMenu()}>
           {(m) => (
             <div
-              class="ctx-menu"
-              style={{ left: `${m().x}px`, top: `${m().y}px` }}
+              class="ctx-menu sidebar-ctx"
+              ref={(el) => { el.style.setProperty("--cx", `${m().x}px`); el.style.setProperty("--cy", `${m().y}px`); }}
               onClick={(e) => e.stopPropagation()}
             >
               <div

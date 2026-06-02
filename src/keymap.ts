@@ -1,7 +1,7 @@
 import { state, setActive, setCursor, selectOnly, loadPane, toggleHidden, refreshPane, setFilter, requestFocusFilter, toggleSidebar, togglePreview, toggleHelp, newTab, closeActiveTab, switchTab } from "./state";
-import { openDefault, quickLook } from "./ipc";
+import { openDefault, quickLook, clipboardWriteFiles } from "./ipc";
 import { openProperties } from "./components/PropertiesDialog";
-import { startTransfer, deleteSelected, makeFolder, beginRename, duplicateSelected, archiveAction } from "./jobs";
+import { startTransfer, deleteSelected, makeFolder, beginRename, duplicateSelected, archiveAction, pasteFromClipboard } from "./jobs";
 import { openRenameDialog } from "./rename";
 import { openSearch } from "./components/SearchDialog";
 import type { PaneId } from "./types";
@@ -31,6 +31,35 @@ async function goUp(pane: PaneId) {
   const p = state[pane];
   const parent = parentDir(p.cwd);
   if (parent !== p.cwd) await loadPane(pane, parent);
+}
+
+// Type-ahead: getippte Buchstaben springen zum nächsten passenden Eintrag.
+const TYPE_AHEAD_RESET_MS = 800;
+let typeAheadBuffer = "";
+let typeAheadAt = 0;
+
+function typeAhead(pane: PaneId, ch: string) {
+  const now = Date.now();
+  if (now - typeAheadAt > TYPE_AHEAD_RESET_MS) typeAheadBuffer = "";
+  typeAheadAt = now;
+
+  const p = state[pane];
+  const n = p.entries.length;
+  if (n === 0) return;
+
+  // Wiederholt man denselben Buchstaben, zyklisch zum nächsten Treffer springen.
+  const sameChar = typeAheadBuffer.length === 1 && typeAheadBuffer === ch.toLowerCase();
+  typeAheadBuffer = sameChar ? typeAheadBuffer : typeAheadBuffer + ch.toLowerCase();
+  const prefix = typeAheadBuffer;
+
+  const start = sameChar ? p.cursor + 1 : p.cursor;
+  for (let i = 0; i < n; i++) {
+    const idx = (start + i) % n;
+    if (p.entries[idx].name.toLowerCase().startsWith(prefix)) {
+      selectOnly(pane, idx);
+      return;
+    }
+  }
 }
 
 export function attachKeymap() {
@@ -158,6 +187,22 @@ export function attachKeymap() {
           ev.preventDefault();
           await duplicateSelected();
           return;
+        case "c":
+        case "C": {
+          ev.preventDefault();
+          const sel = p.entries.filter((e) => p.selected.has(e.path));
+          const items = sel.length > 0 ? sel : (p.entries[p.cursor] ? [p.entries[p.cursor]] : []);
+          if (items.length === 0) return;
+          try { await clipboardWriteFiles(items.map((e) => e.path)); }
+          catch (e) { console.error("clipboardWriteFiles failed", e); }
+          return;
+        }
+        case "v":
+        case "V": {
+          ev.preventDefault();
+          await pasteFromClipboard(pane);
+          return;
+        }
         case "b":
           ev.preventDefault();
           toggleSidebar();
@@ -208,6 +253,12 @@ export function attachKeymap() {
         switchTab(pane, parseInt(ev.key, 10) - 1);
         return;
       }
+    }
+
+    // Type-ahead: einzelnes druckbares Zeichen ohne Modifier -> zum Eintrag springen.
+    if (!ev.metaKey && !ev.ctrlKey && !ev.altKey && ev.key.length === 1 && ev.key !== " ") {
+      typeAhead(pane, ev.key);
+      return;
     }
   });
 }

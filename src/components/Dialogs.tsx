@@ -69,6 +69,42 @@ function resolveConfirm(v: boolean) {
   r?.(v);
 }
 
+// ----- Notify (Alert) -----
+type NotifyState = {
+  title: string;
+  message?: string;
+  okLabel: string;
+  danger: boolean;
+};
+const [notifyState, setNotifyState] = createSignal<NotifyState | null>(null);
+let notifyResolve: (() => void) | null = null;
+
+export function notify(opts: {
+  title: string;
+  message?: string;
+  okLabel?: string;
+  danger?: boolean;
+}): Promise<void> {
+  setNotifyState({
+    title: opts.title,
+    message: opts.message,
+    okLabel: opts.okLabel ?? "OK",
+    danger: !!opts.danger,
+  });
+  return new Promise((res) => { notifyResolve = res; });
+}
+
+/** Bequemer Helfer für Fehlermeldungen. */
+export function notifyError(message: string): Promise<void> {
+  return notify({ title: t("common.errorTitle"), message, danger: true });
+}
+
+function resolveNotify() {
+  setNotifyState(null);
+  const r = notifyResolve; notifyResolve = null;
+  r?.();
+}
+
 export function Dialogs() {
   return (
     <>
@@ -138,6 +174,29 @@ export function Dialogs() {
                   onClick={() => resolveConfirm(true)}
                 >{s().okLabel}</button>
                 <button class="secondary" onClick={() => resolveConfirm(false)}>{s().cancelLabel}</button>
+              </div>
+            </div>
+          </div>
+        )}
+      </Show>
+
+      <Show when={notifyState()}>
+        {(s) => (
+          <div class="modal-backdrop" onMouseDown={() => resolveNotify()}>
+            <div
+              class="modal"
+              onMouseDown={(e) => e.stopPropagation()}
+              tabIndex={-1}
+              ref={(el) => queueMicrotask(() => el?.focus())}
+              onKeyDown={(ev) => {
+                ev.stopPropagation();
+                if (ev.key === "Enter" || ev.key === "Escape") { ev.preventDefault(); resolveNotify(); }
+              }}
+            >
+              <h2>{s().title}</h2>
+              <Show when={s().message}><p class="pre-wrap">{s().message}</p></Show>
+              <div class="modal-actions">
+                <button class={s().danger ? "danger" : ""} onClick={() => resolveNotify()}>{s().okLabel}</button>
               </div>
             </div>
           </div>

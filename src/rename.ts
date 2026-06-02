@@ -4,7 +4,7 @@ import { state, setState, refreshPane } from "./state";
 import type { Entry, PaneId } from "./types";
 import { renamePath, pathExists } from "./ipc";
 import { selectedEntries } from "./jobs";
-import { t } from "./i18n";
+import { t, errMsg } from "./i18n";
 
 export type Scope = "full" | "base" | "ext";
 export type ReplaceMode = "all" | "first" | "last" | "start" | "end";
@@ -196,8 +196,8 @@ function applyOp(base: string, ext: string, op: Op, index: number): { base: stri
         const flags = (op.mode === "all" ? "g" : "") + (op.caseSensitive ? "" : "i");
         const re = new RegExp(f, flags);
         return { v: target.replace(re, repl) };
-      } catch (e: any) {
-        return { v: target, err: `Regex: ${e?.message ?? e}` };
+      } catch (e) {
+        return { v: target, err: `Regex: ${errMsg(e)}` };
       }
     }
     if (op.kind === "add") {
@@ -306,9 +306,9 @@ export async function applyRename(): Promise<{ ok: boolean; message?: string }> 
         await renamePath(p.src.path, joinPath(sess.dir, p.newName));
       }
     }
-  } catch (err: any) {
+  } catch (err) {
     await refreshPane(sess.pane);
-    return { ok: false, message: t("common.error", { msg: err?.message ?? err }) };
+    return { ok: false, message: t("common.error", { msg: errMsg(err) }) };
   }
 
   const newPaths = new Set(previews.map((p) => joinPath(sess.dir, p.newName)));

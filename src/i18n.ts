@@ -26,7 +26,9 @@ function load(): LangMode {
   try {
     const v = localStorage.getItem(STORAGE_KEY);
     if (v === "auto" || v === "de" || v === "en") return v;
-  } catch {}
+  } catch {
+    // localStorage nicht verfügbar – Standard "auto".
+  }
   return "auto";
 }
 
@@ -41,7 +43,9 @@ function apply(m: LangMode) {
   setResolved(r);
   try {
     document.documentElement.lang = r;
-  } catch {}
+  } catch {
+    // DOM evtl. nicht bereit – unkritisch.
+  }
   for (const l of listeners) l(m, r);
 }
 
@@ -52,7 +56,9 @@ export function initI18n() {
     window.addEventListener("languagechange", () => {
       if (mode() === "auto") apply("auto");
     });
-  } catch {}
+  } catch {
+    // Kein window/Event-Support – Systemwechsel wird dann nicht beobachtet.
+  }
 }
 
 export function getLangMode(): LangMode {
@@ -66,7 +72,9 @@ export function getResolvedLang(): ResolvedLang {
 export function setLangMode(m: LangMode) {
   try {
     localStorage.setItem(STORAGE_KEY, m);
-  } catch {}
+  } catch {
+    // Persistenz fehlgeschlagen – nicht kritisch.
+  }
   apply(m);
 }
 
@@ -107,4 +115,16 @@ export function t(key: string, params?: Record<string, string | number>): string
 /** Locale für Intl-APIs (Datumsformat etc.) */
 export function intlLocale(): string {
   return resolved() === "de" ? "de-DE" : "en-US";
+}
+
+/** Wandelt einen unbekannten Fehlerwert (catch) in eine lesbare Meldung um. */
+export function errMsg(e: unknown): string {
+  if (e instanceof Error) return e.message;
+  if (typeof e === "string") return e;
+  if (e == null) return String(e);
+  try {
+    return typeof e === "object" ? JSON.stringify(e) : String(e);
+  } catch {
+    return String(e);
+  }
 }

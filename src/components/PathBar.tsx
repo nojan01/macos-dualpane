@@ -17,8 +17,21 @@ function segments(path: string): { label: string; path: string }[] {
 export function PathBar(props: { id: PaneId }) {
   const id = props.id;
   const segs = () => segments(state[id].cwd);
+  const goUp = () => {
+    const cwd = state[id].cwd;
+    if (!cwd || cwd === "/") return;
+    const idx = cwd.lastIndexOf("/");
+    const parent = idx <= 0 ? "/" : cwd.slice(0, idx);
+    loadPane(id, parent);
+  };
   return (
     <div class="path-bar" onMouseDown={() => setActive(id)}>
+      <button
+        class="path-up"
+        title="Übergeordneter Ordner"
+        onClick={(e) => { e.stopPropagation(); goUp(); }}
+        disabled={!state[id].cwd || state[id].cwd === "/"}
+      >↑</button>
       <For each={segs()}>
         {(s, i) => (
           <>

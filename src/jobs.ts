@@ -1,9 +1,10 @@
 // Orchestriert Datei-Operationen: Konfliktprüfung, Job-Lauf, Refresh.
 import { createSignal } from "solid-js";
-import { state, setState, refreshPane } from "./state";
-import { askPrompt, askConfirm } from "./components/Dialogs";
+import { state, setState, refreshPane, loadPane } from "./state";
+import { askPrompt, askConfirm, notifyError } from "./components/Dialogs";
 import type { Entry, PaneId } from "./types";
-import { t } from "./i18n";
+import { t, errMsg } from "./i18n";
+import { joinPath, splitName, uniqueName } from "./paths";
 import {
   checkConflicts,
   runJob,
@@ -17,34 +18,12 @@ import {
   zipExtract,
   createSymlink,
   createFinderAlias,
-  tmListWipeableVolumes,
+  clipboardReadFiles,
   type JobItem,
   type JobKind,
 } from "./ipc";
 
 const newJobId = () => `job-${Date.now()}-${Math.floor(Math.random() * 1e6)}`;
-
-function joinPath(dir: string, name: string): string {
-  if (dir.endsWith("/")) return dir + name;
-  return dir + "/" + name;
-}
-
-function splitName(name: string): { base: string; ext: string } {
-  const i = name.lastIndexOf(".");
-  if (i <= 0 || i === name.length - 1) return { base: name, ext: "" };
-  return { base: name.slice(0, i), ext: name.slice(i) };
-}
-
-async function uniqueName(dir: string, name: string): Promise<string> {
-  const { base, ext } = splitName(name);
-  let candidate = `${base} copy${ext}`;
-  let n = 2;
-  while (await pathExists(joinPath(dir, candidate))) {
-    candidate = `${base} copy ${n}${ext}`;
-    n++;
-  }
-  return candidate;
-}
 
 export function selectedEntries(pane: PaneId) {
   const p = state[pane];
@@ -60,7 +39,7 @@ export type ConflictPrompt = { count: number; sample: string[] } | null;
 export const [conflictPrompt, setConflictPrompt] = createSignal<ConflictPrompt>(null);
 let pendingResolve: ((c: ConflictChoice) => void) | null = null;
 
-function askConflict(count: number, sample: string[]): Promise<ConflictChoice> {
+export function askConflict(count: number, sample: string[]): Promise<ConflictChoice> {
   setConflictPrompt({ count, sample });
   return new Promise<ConflictChoice>((resolve) => {
     pendingResolve = resolve;
@@ -83,6 +62,7 @@ export async function transferEntries(
   srcEntries: Entry[],
   dstCwd: string,
   refreshPanes: PaneId[] = ["left", "right"],
+  conflictMode: "ask" | "skip" | "overwrite" = "ask",
 ) {
   if (state.job) return;
   if (srcEntries.length === 0) return;
@@ -102,7 +82,10 @@ export async function transferEntries(
 
   const conflicts = await checkConflicts(items);
   if (conflicts.length > 0) {
-    const choice = await askConflict(
+    let choice: ConflictChoice;
+    if (conflictMode === "skip") choice = "skip";
+    else if (conflictMode === "overwrite") choice = "overwrite";
+    else choice = await askConflict(
       conflicts.length,
       conflicts.slice(0, 5).map((p) => p.split("/").pop() || p),
     );
@@ -133,8 +116,8 @@ export async function transferEntries(
   setState("job", { id, kind, done: 0, total: 0, current: "" });
   try {
     await runJob(id, kind, items);
-  } catch (e: any) {
-    alert(t("common.error", { msg: e?.message ?? e }));
+  } catch (e) {
+    await notifyError(t("common.error", { msg: errMsg(e) }));
   } finally {
     setState("job", null);
     for (const p of refreshPanes) await refreshPane(p);
@@ -148,7 +131,7 @@ export async function startTransfer(kind: JobKind) {
   const srcCwd = state[srcPane].cwd;
   const dstCwd = state[dstPane].cwd;
   if (srcCwd === dstCwd) {
-    alert(t("jobs.sameSrcDst"));
+    await notifyError(t("jobs.sameSrcDst"));
     return;
   }
   const sel = selectedEntries(srcPane);
@@ -163,7 +146,7 @@ export async function createLinksInOther(kind: "symlink" | "alias") {
   const srcCwd = state[srcPane].cwd;
   const dstCwd = state[dstPane].cwd;
   if (srcCwd === dstCwd) {
-    alert(t("jobs.sameSrcDst"));
+    await notifyError(t("jobs.sameSrcDst"));
     return;
   }
   const sel = selectedEntries(srcPane);
@@ -178,11 +161,11 @@ export async function createLinksInOther(kind: "symlink" | "alias") {
     try {
       if (kind === "symlink") await createSymlink(e.path, dst);
       else await createFinderAlias(e.path, dst);
-    } catch (err: any) {
-      errors.push(`${e.name}: ${err?.message ?? err}`);
+    } catch (err) {
+      errors.push(`${e.name}: ${errMsg(err)}`);
     }
   }
-  if (errors.length) alert(errors.join("\n"));
+  if (errors.length) await notifyError(errors.join("\n"));
   await refreshPane(dstPane);
 }
 
@@ -203,8 +186,8 @@ export async function duplicateSelected() {
   setState("job", { id, kind: "copy", done: 0, total: 0, current: "" });
   try {
     await runJob(id, "copy", items);
-  } catch (err: any) {
-    alert(t("common.error", { msg: err?.message ?? err }));
+  } catch (err) {
+    await notifyError(t("common.error", { msg: errMsg(err) }));
   } finally {
     setState("job", null);
     await refreshPane(pane);
@@ -216,28 +199,6 @@ export async function deleteSelected(skipConfirm = false) {
   const pane = state.active;
   const sel = selectedEntries(pane);
   if (sel.length === 0) return;
-
-  // Sperre: TM-Backup-Volumes / TM-Strukturen nur über den TM-Dialog löschen.
-  try {
-    const tmVols = await tmListWipeableVolumes();
-    const tmMounts = tmVols.map((v) => v.path.replace(/\/+$/, ""));
-    const TM_MARKER_RE = /(\.backupbundle($|\/)|\.inprogress($|\/)|\.previous($|\/)|\/Backups\.backupdb($|\/)|com\.apple\.TimeMachine)/i;
-    const hits = sel.some((e) => {
-      if (tmMounts.some((m) => e.path === m || e.path.startsWith(m + "/"))) return true;
-      return TM_MARKER_RE.test(e.path);
-    });
-    if (hits) {
-      await askConfirm({
-        title: t("tm.blockDeleteTitle"),
-        message: t("tm.blockDeleteMsg"),
-        okLabel: "OK",
-        cancelLabel: " ",
-      });
-      return;
-    }
-  } catch {
-    // Wenn die TM-Abfrage fehlschlägt, normaler Lösch-Flow.
-  }
 
   if (!skipConfirm) {
     const ok = await askConfirm({
@@ -253,8 +214,8 @@ export async function deleteSelected(skipConfirm = false) {
   }
   try {
     await moveToTrash(sel.map((e) => e.path));
-  } catch (e: any) {
-    const raw = e?.message ?? String(e);
+  } catch (e) {
+    const raw = errMsg(e);
     const isProtected = raw.includes("NEEDS_ADMIN");
     const retry = await askConfirm({
       title: t("jobs.trash.title"),
@@ -270,8 +231,8 @@ export async function deleteSelected(skipConfirm = false) {
     if (retry) {
       try {
         await forceDeleteAdmin(sel.map((e) => e.path));
-      } catch (e2: any) {
-        alert(t("common.error", { msg: e2?.message ?? e2 }));
+      } catch (e2) {
+        await notifyError(t("common.error", { msg: errMsg(e2) }));
       }
     }
   }
@@ -291,8 +252,8 @@ export async function makeFolder() {
   const full = joinPath(state[pane].cwd, name);
   try {
     await createDir(full);
-  } catch (e: any) {
-    alert(t("common.error", { msg: e?.message ?? e }));
+  } catch (e) {
+    await notifyError(t("common.error", { msg: errMsg(e) }));
     return;
   }
   await refreshPane(pane);
@@ -311,8 +272,8 @@ export async function makeFile() {
   const full = joinPath(state[pane].cwd, name);
   try {
     await createFile(full);
-  } catch (e: any) {
-    alert(t("common.error", { msg: e?.message ?? e }));
+  } catch (e) {
+    await notifyError(t("common.error", { msg: errMsg(e) }));
     return;
   }
   await refreshPane(pane);
@@ -338,8 +299,8 @@ export async function commitRename(newName: string) {
   const newPath = parent + newName;
   try {
     await renamePath(e.path, newPath);
-  } catch (err: any) {
-    alert(t("common.error", { msg: err?.message ?? err }));
+  } catch (err) {
+    await notifyError(t("common.error", { msg: errMsg(err) }));
   }
   await refreshPane(ed.pane);
 }
@@ -377,8 +338,8 @@ export async function archiveAction() {
     const dstDir = joinPath(p.cwd, target);
     try {
       await zipExtract(entry.path, dstDir);
-    } catch (err: any) {
-      alert(t("jobs.extractFailed", { msg: err?.message ?? err }));
+    } catch (err) {
+      await notifyError(t("jobs.extractFailed", { msg: errMsg(err) }));
     }
     await refreshPane(pane);
     return;
@@ -390,8 +351,58 @@ export async function archiveAction() {
   const dst = joinPath(p.cwd, name);
   try {
     await zipCreate(sel.map((e) => e.path), dst);
-  } catch (err: any) {
-    alert(t("jobs.zipFailed", { msg: err?.message ?? err }));
+  } catch (err) {
+    await notifyError(t("jobs.zipFailed", { msg: errMsg(err) }));
   }
   await refreshPane(pane);
+}
+
+export async function pasteFromClipboard(targetPane: PaneId = state.active) {
+  if (state.job) return;
+  let paths: string[] = [];
+  try {
+    paths = await clipboardReadFiles();
+  } catch (e) {
+    console.error("clipboardReadFiles failed", e);
+    return;
+  }
+  if (!paths || paths.length === 0) return;
+  const dstCwd = state[targetPane].cwd;
+  const entries: Entry[] = paths.map((p) => {
+    const clean = p.replace(/\/+$/, "");
+    const name = clean.split("/").pop() || clean;
+    return {
+      name,
+      path: clean,
+      isDir: false,
+      isSymlink: false,
+      size: 0,
+      mtime: 0,
+      ext: "",
+      hidden: name.startsWith("."),
+    };
+  });
+  await transferEntries("copy", entries, dstCwd, [targetPane]);
+}
+
+// Synchronisiert von einer Pane zur anderen.
+// direction: "right" = links -> rechts; "left" = rechts -> links.
+// In "nav"-Modus wird nur das Verzeichnis im Ziel-Pane gewechselt.
+// In "merge"-Modus werden fehlende Einträge der Quelle ins Ziel kopiert
+// (vorhandene Dateien werden übersprungen).
+export async function syncPanes(direction: "left" | "right") {
+  const src: PaneId = direction === "right" ? "left" : "right";
+  const dst: PaneId = direction === "right" ? "right" : "left";
+  const srcCwd = state[src].cwd;
+  if (!srcCwd) return;
+  if (state.syncMode === "nav") {
+    await loadPane(dst, srcCwd);
+    return;
+  }
+  // merge
+  const entries = state[src].entriesRaw;
+  if (!entries || entries.length === 0) return;
+  const dstCwd = state[dst].cwd;
+  if (srcCwd === dstCwd) return;
+  await transferEntries("copy", entries, dstCwd, [src, dst], "skip");
 }

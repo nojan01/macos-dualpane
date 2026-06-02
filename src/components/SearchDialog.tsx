@@ -2,9 +2,14 @@ import { createSignal, For, Show, onCleanup } from "solid-js";
 import { state, loadPane, selectOnly } from "../state";
 import { searchInDir } from "../ipc";
 import type { Entry } from "../types";
-import { t } from "../i18n";
+import { t, errMsg } from "../i18n";
 
 export const [searchOpen, setSearchOpen] = createSignal(false);
+
+/** Maximale Anzahl Suchtreffer. */
+const SEARCH_RESULT_LIMIT = 1000;
+/** Verzögerung (ms) bis die Suche nach der Eingabe startet. */
+const SEARCH_DEBOUNCE_MS = 250;
 
 export function openSearch() {
   setSearchOpen(true);
@@ -22,7 +27,7 @@ export function SearchDialog() {
   const [busy, setBusy] = createSignal(false);
   const [info, setInfo] = createSignal("");
   let inputEl: HTMLInputElement | undefined;
-  let timer: any = null;
+  let timer: ReturnType<typeof setTimeout> | null = null;
 
   const close = () => {
     setSearchOpen(false);
@@ -44,11 +49,11 @@ export function SearchDialog() {
     setBusy(true);
     setInfo(t("search.searchingIn", { path: root }));
     try {
-      const list = await searchInDir(root, q, state.showHidden, 1000);
+      const list = await searchInDir(root, q, state.showHidden, SEARCH_RESULT_LIMIT);
       setResults(list);
-      setInfo(list.length >= 1000 ? t("search.hitsMax", { count: list.length }) : t("search.hits", { count: list.length }));
-    } catch (e: any) {
-      setInfo(t("common.error", { msg: e?.message ?? e }));
+      setInfo(list.length >= SEARCH_RESULT_LIMIT ? t("search.hitsMax", { count: list.length }) : t("search.hits", { count: list.length }));
+    } catch (e) {
+      setInfo(t("common.error", { msg: errMsg(e) }));
     } finally {
       setBusy(false);
     }
@@ -57,7 +62,7 @@ export function SearchDialog() {
   const onInput = (ev: InputEvent) => {
     setQuery((ev.currentTarget as HTMLInputElement).value);
     if (timer) clearTimeout(timer);
-    timer = setTimeout(run, 250);
+    timer = setTimeout(run, SEARCH_DEBOUNCE_MS);
   };
 
   const reveal = async (e: Entry) => {

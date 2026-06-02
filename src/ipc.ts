@@ -49,7 +49,7 @@ export async function pathExists(path: string): Promise<boolean> {
   return invoke<boolean>("path_exists", { path });
 }
 
-export type Volume = { name: string; path: string };
+export type Volume = { name: string; path: string; kind: "local" | "network" };
 
 export async function listVolumes(): Promise<Volume[]> {
   return invoke<Volume[]>("list_volumes");
@@ -57,6 +57,16 @@ export async function listVolumes(): Promise<Volume[]> {
 
 export async function ejectVolume(path: string): Promise<void> {
   return invoke<void>("eject_volume", { path });
+}
+
+export type NetworkBookmark = { name: string; url: string; mountPath: string; connected: boolean };
+
+export async function listNetworkBookmarks(): Promise<NetworkBookmark[]> {
+  return invoke<NetworkBookmark[]>("list_network_bookmarks");
+}
+
+export async function mountNetworkUrl(url: string): Promise<string> {
+  return invoke<string>("mount_network_url", { url });
 }
 
 export async function mountDmg(path: string): Promise<string> {
@@ -88,6 +98,13 @@ export async function runJob(jobId: string, kind: JobKind, items: JobItem[]): Pr
 
 export async function cancelJob(jobId: string): Promise<void> {
   return invoke<void>("cancel_job", { jobId });
+}
+
+export type SyncAction = "copy" | "update" | "delete";
+export type SyncEntry = { rel: string; action: SyncAction; isDir: boolean; size: number };
+
+export async function syncPreview(src: string, dst: string, deleteExtra: boolean): Promise<SyncEntry[]> {
+  return invoke<SyncEntry[]>("sync_preview", { src, dst, deleteExtra });
 }
 
 export type JobProgress = {
@@ -149,16 +166,33 @@ export async function previewInfo(path: string): Promise<PreviewInfo> {
   return invoke<PreviewInfo>("preview_info", { path });
 }
 
-export async function readTextPreview(path: string, maxBytes = 65536): Promise<string> {
+/** Maximale Anzahl Bytes, die für die Textvorschau gelesen werden. */
+export const TEXT_PREVIEW_MAX_BYTES = 65536;
+/** Kantenlänge (px) für Bild-Thumbnails in der Vorschau. */
+export const IMAGE_THUMB_SIZE = 256;
+
+export async function readTextPreview(path: string, maxBytes = TEXT_PREVIEW_MAX_BYTES): Promise<string> {
   return invoke<string>("read_text_preview", { path, maxBytes });
 }
 
-export async function readImageThumb(path: string, size = 256): Promise<string> {
+export async function readImageThumb(path: string, size = IMAGE_THUMB_SIZE): Promise<string> {
   return invoke<string>("read_image_thumb", { path, size });
+}
+
+export async function readFileIcon(path: string, size = 32): Promise<string> {
+  return invoke<string>("read_file_icon", { path, size });
 }
 
 export async function openTerminal(path: string): Promise<void> {
   return invoke<void>("open_terminal", { path });
+}
+
+export async function openInEditor(path: string): Promise<void> {
+  return invoke<void>("open_in_editor", { path });
+}
+
+export async function setDockBadge(label: string | null): Promise<void> {
+  return invoke<void>("set_dock_badge", { label });
 }
 
 export type Properties = {
@@ -205,8 +239,8 @@ export async function tmListBackups(mountPoint?: string | null): Promise<string[
   return invoke<string[]>("tm_list_backups", { mountPoint: mountPoint ?? null });
 }
 
-export async function tmDeleteBackup(backupPath: string): Promise<void> {
-  return invoke<void>("tm_delete_backup", { backupPath });
+export async function tmDeleteBackup(backupPath: string, password: string): Promise<string> {
+  return invoke<string>("tm_delete_backup", { backupPath, password });
 }
 
 export async function tmWipeVolume(mountPoint: string): Promise<string> {
@@ -232,6 +266,26 @@ export async function tmListLocalSnapshots(): Promise<string[]> {
 
 export async function tmDeleteLocalSnapshot(date: string): Promise<void> {
   return invoke<void>("tm_delete_local_snapshot", { date });
+}
+
+export async function clipboardWriteFiles(paths: string[]): Promise<void> {
+  return invoke<void>("clipboard_write_files", { paths });
+}
+
+export async function clipboardReadFiles(): Promise<string[]> {
+  return invoke<string[]>("clipboard_read_files");
+}
+
+export async function dragIconPath(): Promise<string> {
+  return invoke<string>("drag_icon_path");
+}
+
+export async function startPromiseDrag(paths: string[]): Promise<void> {
+  return invoke<void>("start_promise_drag", { paths });
+}
+
+export async function resolvePromiseDrop(id: number, action: "overwrite" | "cancel" | "keep_both"): Promise<void> {
+  return invoke<void>("resolve_promise_drop", { id, action });
 }
 
 export type PaneChanged = { paneId: string; path: string };

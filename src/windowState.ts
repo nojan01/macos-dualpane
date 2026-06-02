@@ -39,7 +39,9 @@ export async function attachWindowState() {
       if (persisted.x != null && persisted.y != null) {
         await w.setPosition(new LogicalPosition(persisted.x, persisted.y));
       }
-    } catch {}
+    } catch {
+      // Fenstergeometrie konnte nicht wiederhergestellt werden – unkritisch.
+    }
   }
 
   const dpr = () => window.devicePixelRatio || 1;
@@ -54,7 +56,9 @@ export async function attachWindowState() {
         x: Math.round(pos.x / d),
         y: Math.round(pos.y / d),
       });
-    } catch {}
+    } catch {
+      // Fenstergröße nicht abrufbar – Speichern wird übersprungen.
+    }
   };
 
   await w.onResized(() => { void capture(); });

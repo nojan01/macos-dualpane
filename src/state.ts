@@ -2,6 +2,7 @@ import { createSignal } from "solid-js";
 import { createStore, type SetStoreFunction } from "solid-js/store";
 import type { Entry, PaneId, SortKey, SortDir } from "./types";
 import { listDir, watchPath, pathExists, homeDir, unwatchPane } from "./ipc";
+import { errMsg } from "./i18n";
 
 export type PaneState = {
   cwd: string;
@@ -36,6 +37,7 @@ export type AppState = {
   helpVisible: boolean;
   extendedView: boolean;
   compareMode: boolean;
+  syncMode: "nav" | "merge";
   sidebarWidth: number;
   previewWidth: number;
   paneSplit: number; // 0..1 Anteil der linken Pane an der verfügbaren Pane-Breite
@@ -77,6 +79,7 @@ export const [state, setState] = createStore<AppState>({
   helpVisible: false,
   extendedView: false,
   compareMode: false,
+  syncMode: "nav",
   sidebarWidth: 200,
   previewWidth: 280,
   paneSplit: 0.5,
@@ -110,9 +113,14 @@ function applyFilter(raw: Entry[], filter: string): Entry[] {
 
 export function sortEntries(entries: Entry[], key: SortKey, dir: SortDir): Entry[] {
   const sign = dir === "asc" ? 1 : -1;
+  const group = (e: Entry) => {
+    if (e.isDir && e.ext !== "app") return 0; // Ordner
+    if (e.isDir && e.ext === "app") return 1; // Apps
+    return 2;                                  // Dateien
+  };
   return [...entries].sort((a, b) => {
-    // Ordner immer vor Dateien
-    if (a.isDir !== b.isDir) return a.isDir ? -1 : 1;
+    const ga = group(a), gb = group(b);
+    if (ga !== gb) return ga - gb;
     let cmp = 0;
     switch (key) {
       case "name":
@@ -167,8 +175,8 @@ export async function loadPane(pane: PaneId, path: string) {
     syncActiveTab(pane);
     bumpSel();
     watchPath(pane, target).catch(() => {});
-  } catch (e: any) {
-    setState(pane, { loading: false, error: String(e?.message ?? e) });
+  } catch (e) {
+    setState(pane, { loading: false, error: errMsg(e) });
   }
 }
 

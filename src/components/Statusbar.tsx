@@ -28,7 +28,7 @@ export function Statusbar() {
     <div class="statusbar">
       {stats().total}{t("status.items")}
       {stats().selCount > 0 && <>{t("status.selected", { count: stats().selCount, size: fmtBytes(stats().bytes) })}</>}
-      <span style="margin-left:auto;color:var(--text-dim)">
+      <span class="status-right">
         {state.active === "left"
           ? t("status.activeLeft", { hidden: state.showHidden ? t("status.hiddenOn") : t("status.hiddenOff") })
           : t("status.activeRight", { hidden: state.showHidden ? t("status.hiddenOn") : t("status.hiddenOff") })}
@@ -108,7 +108,7 @@ export function FnBar() {
       <button class="fn-btn" title={t("fn.hidden.title")} onClick={() => toggleHidden()}>
         <b>⌘.</b> {t("fn.hidden")}
       </button>
-      <span style="margin-left:auto;padding:0 8px;color:var(--text-dim);opacity:0.7;font-size:11px;white-space:nowrap" title="DualBeam — MIT License">
+      <span class="fn-copyright" title="DualBeam — MIT License">
         © 2026 N.J. · MIT
       </span>
     </div>

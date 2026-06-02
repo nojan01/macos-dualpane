@@ -1,7 +1,7 @@
 import { Show, createEffect, createSignal, on, onCleanup } from "solid-js";
 import { state, selTick } from "../state";
 import { previewInfo, readTextPreview, readImageThumb, type PreviewInfo } from "../ipc";
-import { t } from "../i18n";
+import { t, errMsg } from "../i18n";
 
 function formatSize(n: number): string {
   if (n < 1024) return `${n} B`;
@@ -68,14 +68,14 @@ export function PreviewPane() {
               const url = await readImageThumb(path, 256);
               if (my !== token) return;
               setThumb(url);
-            } catch (e: any) {
+            } catch (e) {
               if (my !== token) return;
-              setErr(String(e));
+              setErr(errMsg(e));
             }
           }
-        } catch (e: any) {
+        } catch (e) {
           if (my !== token) return;
-          setErr(String(e));
+          setErr(errMsg(e));
           setInfo(null);
         } finally {
           if (my === token) setLoading(false);

@@ -12,6 +12,7 @@
     "core:window:allow-inner-size",
     "core:window:allow-inner-position",
     "core:window:allow-scale-factor",
-    "opener:default"
+    "opener:default",
+    "drag:default"
   ]
 }

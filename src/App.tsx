@@ -1,4 +1,4 @@
-import { createSignal, onMount } from "solid-js";
+import { createSignal, createEffect, onMount } from "solid-js";
 import { listen } from "@tauri-apps/api/event";
 import { cycleThemeMode, getThemeMode, onThemeChange, themeIcon, themeLabel, setThemeMode, type ThemeMode } from "./theme";
 import { cycleLangMode, getLangMode, onLangChange, langIcon, langLabel, setLangMode, type LangMode, t } from "./i18n";
@@ -10,16 +10,17 @@ import { ConflictDialog } from "./components/ConflictDialog";
 import { RenameDialog } from "./components/RenameDialog";
 import { SearchDialog } from "./components/SearchDialog";
 import { Dialogs } from "./components/Dialogs";
+import { SyncDialog } from "./components/SyncDialog";
 import { PropertiesDialog } from "./components/PropertiesDialog";
 import { JobBar } from "./components/JobBar";
-import { TimeMachineDialog, openTimeMachine } from "./components/TimeMachineDialog";
 import { loadPane, state, setActive, setState, refreshPane, toggleCompareMode } from "./state";
-import { homeDir, openTerminal, type JobProgress, type PaneChanged } from "./ipc";
+import { homeDir, openTerminal, setDockBadge, type JobProgress, type PaneChanged } from "./ipc";
 import { attachKeymap } from "./keymap";
 import { setHoverTarget, setDragEffect, defaultDragMode, toggleDefaultDragMode } from "./dnd";
-import { transferEntries } from "./jobs";
+import { transferEntries, syncPanes } from "./jobs";
 import { loadPersisted, applyPersisted, attachPersist } from "./persist";
 import { attachWindowState } from "./windowState";
+import { attachPromiseDropHandler } from "./promiseDrop";
 import type { Entry, PaneId } from "./types";
 
 type TauriDragPos = { x: number; y: number };
@@ -108,7 +109,13 @@ export function App() {
   onMount(async () => {
     attachKeymap();
     void attachWindowState();
-    await listen<JobProgress>("job-progress", (ev) => {
+    void attachPromiseDropHandler();
+    // Dock-Badge bei laufenden Jobs.
+    createEffect(() => {
+      const job = state.job;
+      const label = job && job.total > 0 ? `${job.done}/${job.total}` : job ? "…" : null;
+      void setDockBadge(label).catch(() => {});
+    });    await listen<JobProgress>("job-progress", (ev) => {
       const p = ev.payload;
       if (p.finished) {
         setState("job", null);
@@ -306,28 +313,46 @@ export function App() {
         <div class="spacer" />
         <button
           class="tb-glyph"
-          onClick={() => openTimeMachine()}
-          title={t("toolbar.timeMachine")}
+          onClick={() => syncPanes("left")}
+          title={state.syncMode === "nav" ? "Verzeichnis nach links übernehmen" : "Inhalte nach links spiegeln (fehlende Dateien kopieren)"}
         >
-          <span style="font-size:16px;line-height:1">🕒</span>
+          <span class="tb-icon-text">←</span>
         </button>
+        <button
+          class="tb-glyph"
+          onClick={() => syncPanes("right")}
+          title={state.syncMode === "nav" ? "Verzeichnis nach rechts übernehmen" : "Inhalte nach rechts spiegeln (fehlende Dateien kopieren)"}
+        >
+          <span class="tb-icon-text">→</span>
+        </button>
+        <button
+          class="tb-glyph"
+          classList={{ active: state.syncMode === "merge" }}
+          onClick={() => setState("syncMode", state.syncMode === "nav" ? "merge" : "nav")}
+          title={state.syncMode === "nav"
+            ? "Sync-Modus: Navigation (nur Verzeichnis übernehmen) – klicken für Merge"
+            : "Sync-Modus: Merge (Dateien kopieren) – klicken für Navigation"}
+        >
+          <span class="tb-icon-text">{state.syncMode === "nav" ? "↔" : "⇄"}</span>
+        </button>
+        <div class="spacer" />
         <button
           class="tb-glyph"
           onClick={() => cycleThemeMode()}
           title={t("toolbar.themeTitle", { label: themeLabel(themeMode()) })}
         >
-          <span style="font-size:16px;line-height:1">{themeIcon(themeMode())}</span>
+          <span class="tb-icon">{themeIcon(themeMode())}</span>
         </button>
         <button
           class="tb-glyph"
           onClick={() => cycleLangMode()}
           title={t("toolbar.langTitle", { label: langLabel(langMode()) })}
         >
-          <span style="font-size:14px;line-height:1;font-weight:600">{langIcon(langMode())}</span>
+          <span class="tb-icon-text">{langIcon(langMode())}</span>
         </button>
       </div>
-      <div class={`panes ${state.sidebarVisible ? "" : "no-sidebar"} ${state.previewVisible ? "with-preview" : ""}`}
-        style={{ "grid-template-columns": panesTemplate() }}>
+      <div class={`panes panes-grid ${state.sidebarVisible ? "" : "no-sidebar"} ${state.previewVisible ? "with-preview" : ""}`}
+        ref={(el) => createEffect(() => el.style.setProperty("--panes-tpl", panesTemplate()))}>
         {state.sidebarVisible && <Sidebar />}
         {state.sidebarVisible && <div class="splitter" onMouseDown={(ev) => startColResize(ev, "sidebar")} />}
         <Pane id="left" />
@@ -344,8 +369,8 @@ export function App() {
       <RenameDialog />
       <SearchDialog />
       <Dialogs />
+      <SyncDialog />
       <PropertiesDialog />
-      <TimeMachineDialog />
       <div class="resize-grip" aria-hidden="true" />
     </div>
   );

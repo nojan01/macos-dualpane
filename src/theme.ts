@@ -30,14 +30,15 @@ export function initTheme() {
     if (saved === "auto" || saved === "light" || saved === "dark") {
       currentMode = saved;
     }
-  } catch {}
+  } catch {
+    // localStorage nicht verfügbar (z. B. Privatmodus) – Standard beibehalten.
+  }
   apply(currentMode);
 
   if (window.matchMedia) {
     const mq = window.matchMedia("(prefers-color-scheme: light)");
     const onChange = () => { if (currentMode === "auto") apply(currentMode); };
-    if (mq.addEventListener) mq.addEventListener("change", onChange);
-    else if ((mq as any).addListener) (mq as any).addListener(onChange);
+    mq.addEventListener("change", onChange);
   }
 }
 
@@ -45,7 +46,9 @@ export function getThemeMode(): ThemeMode { return currentMode; }
 
 export function setThemeMode(mode: ThemeMode) {
   currentMode = mode;
-  try { localStorage.setItem(KEY, mode); } catch {}
+  try { localStorage.setItem(KEY, mode); } catch {
+    // Persistenz fehlgeschlagen – nicht kritisch, Theme wird trotzdem angewandt.
+  }
   apply(mode);
 }
 

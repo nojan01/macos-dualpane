@@ -259,10 +259,24 @@ body.col-resizing * { cursor: col-resize !important; user-select: none !importan
 .path-bar .seg { color: var(--text); }
 .path-bar .seg:hover { text-decoration: underline; }
 .path-bar .sep { color: var(--text-dim); margin: 0 2px; }
+.path-bar .path-up {
+  background: transparent;
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  padding: 0 6px;
+  margin-right: 6px;
+  font: inherit;
+  line-height: 1.4;
+  cursor: pointer;
+}
+.path-bar .path-up:hover:not(:disabled) { background: var(--row-cursor); }
+.path-bar .path-up:disabled { opacity: 0.4; cursor: default; }
 
 .col-header {
   display: grid;
-  grid-template-columns: var(--row-cols);
+  grid-template-columns: subgrid;
+  grid-column: 1 / -1;
   align-items: center;
   background: var(--header);
   font-size: 11px;
@@ -290,18 +304,23 @@ body.col-resizing * { cursor: col-resize !important; user-select: none !importan
   min-height: 0;
 }
 .rows {
-  display: block;
-  width: 100%;
+  display: grid;
+  grid-auto-rows: min-content;
+  width: max-content;
+  min-width: 100%;
   outline: none;
-  --row-cols: minmax(0, 1fr) minmax(70px, max-content) minmax(140px, max-content);
+  --row-cols: max-content minmax(70px, max-content) minmax(140px, max-content);
+  grid-template-columns: var(--row-cols);
 }
 .pane.extended .rows {
-  --row-cols: minmax(0, 1fr) minmax(70px, max-content) minmax(140px, max-content) minmax(80px, max-content) minmax(140px, max-content) minmax(100px, max-content) minmax(110px, max-content);
+  --row-cols: max-content minmax(70px, max-content) minmax(140px, max-content) minmax(80px, max-content) minmax(140px, max-content) minmax(100px, max-content) minmax(110px, max-content);
 }
+.rows > *:not(.row):not(.col-header) { grid-column: 1 / -1; }
 
 .row {
   display: grid;
-  grid-template-columns: var(--row-cols);
+  grid-template-columns: subgrid;
+  grid-column: 1 / -1;
   align-items: center;
   cursor: default;
   white-space: nowrap;
@@ -325,6 +344,7 @@ body.col-resizing * { cursor: col-resize !important; user-select: none !importan
 .row .size, .row .mtime { color: var(--text-dim); font-variant-numeric: tabular-nums; font-family: var(--mono); font-size: 12px; }
 .row .icon { display: inline-block; width: 16px; text-align: center; margin-right: 6px; }
 .row .icon img.app-icon { width: 16px; height: 16px; vertical-align: middle; display: inline-block; }
+.row .name img.file-icon { width: 16px; height: 16px; vertical-align: middle; display: inline-block; margin-right: 6px; object-fit: contain; }
 
 /* Erweiterte Ansicht: zusätzliche Spalten Art/Erstellt/Eigentümer/Rechte */
 .pane.extended .row .kind,
@@ -439,6 +459,7 @@ body.col-resizing * { cursor: col-resize !important; user-select: none !importan
 }
 .modal h2 { margin: 0 0 8px; font-size: 15px; }
 .modal p { margin: 0 0 10px; font-size: 13px; }
+.modal p.pre-wrap { white-space: pre-wrap; }
 .modal-list {
   margin: 0 0 14px;
   padding-left: 18px;
@@ -452,6 +473,21 @@ body.col-resizing * { cursor: col-resize !important; user-select: none !importan
   gap: 8px;
   justify-content: flex-end;
   flex-wrap: wrap;
+}
+.sync-option {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: #ccc;
+  margin: 4px 0 16px;
+  cursor: pointer;
+}
+.sync-option input {
+  cursor: pointer;
+}
+.modal-list .danger {
+  color: #e07a7a;
 }
 .modal-actions button {
   background: #4a90e2;
@@ -633,7 +669,25 @@ body.dragging * {
   justify-content: space-between;
 }
 .sb-section ~ .sb-section {
-  margin-top: 14px;
+  margin-top: 22px;
+  border-top: 1px solid var(--border);
+  padding-top: 10px;
+}
+.sb-section-spaced {
+  margin-top: 22px !important;
+  border-top: 1px solid var(--border);
+  padding-top: 10px !important;
+}
+.sb-item.disconnected {
+  opacity: 0.55;
+}
+.sb-item.disconnected .sb-icon {
+  filter: grayscale(1);
+}
+.sb-spin {
+  margin-left: auto;
+  font-size: 14px;
+  color: var(--text-dim);
 }
 .sb-add {
   background: transparent;
@@ -696,6 +750,15 @@ body.dragging * {
   font-size: 12px;
 }
 .filter-clear:hover { color: var(--text); }
+.filter-search {
+  background: transparent;
+  border: none;
+  color: var(--text-dim);
+  cursor: pointer;
+  padding: 2px 6px;
+  font-size: 14px;
+}
+.filter-search:hover { color: var(--text); }
 
 /* ---------- Iteration 7a: Tabs ---------- */
 .tab-bar {
@@ -1184,3 +1247,23 @@ body.dragging * {
   cursor: not-allowed;
 }
 .rn-buttons button:disabled { opacity: 0.6; cursor: not-allowed; }
+
+/* utility classes replacing inline styles */
+.pane-error-detail { font-size: 11px; opacity: 0.7; margin-top: 4px; }
+.pane-error-btn { margin-top: 6px; }
+.virt-pad { height: var(--vh, 0px); grid-column: 1 / -1; }
+.ctx-pos { left: var(--cx, 0px); top: var(--cy, 0px); }
+.tb-icon { font-size: 16px; line-height: 1; }
+.tb-icon-text { font-size: 14px; line-height: 1; font-weight: 600; }
+.panes-grid { grid-template-columns: var(--panes-tpl); }
+.status-right { margin-left: auto; color: var(--text-dim); }
+.fn-copyright {
+  margin-left: auto;
+  padding: 0 8px;
+  color: var(--text-dim);
+  opacity: 0.7;
+  font-size: 11px;
+  white-space: nowrap;
+}
+.jobbar-fill { width: var(--pct, 0%); }
+.sidebar-ctx { left: var(--cx, 0px); top: var(--cy, 0px); }

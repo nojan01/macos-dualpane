@@ -30,7 +30,26 @@
 - Globaler Shortcut zum Fokussieren der App
 - Dock-Badge bei laufenden Jobs
 
+## Netzwerk / Remote
+- ✅ **Verzeichnis-Synchronisation aktiver Pane → anderer Pane** (mit Vorschau, Update-/Lösch-Erkennung; funktioniert mit einem im Finder gemounteten HiDrive-Volume)
+- WebDAV-Unterstützung als zweiter Pane-Backend-Typ neben lokalem FS (links lokal, rechts Remote)
+  - Ziel-Storage: **IONOS HiDrive** (WebDAV-Endpoint `https://webdav.hidrive.ionos.com/`, Login mit HiDrive-Benutzername + Passwort/App-Passwort, HTTPS Pflicht)
+  - Rust-Seite: Crate `reqwest_dav` oder `hyper` mit WebDAV-Methoden (`PROPFIND`, `MKCOL`, `MOVE`, `COPY`, `PUT`, `GET`, `DELETE`, `LOCK`)
+  - TS-Alternative: npm `webdav` (CORS-Problem, daher besser via Tauri-Command)
+  - Auth: HiDrive-App-Passwort statt Hauptpasswort verwenden; Credentials im macOS-Keychain ablegen
+  - Verbindungs-Profile speichern (Name, URL, Benutzer, Root-Pfad)
+  - Optional später: eingebauter WebDAV-Server (Rust `dav-server`) für P2P-Austausch im LAN — vom macOS Finder direkt mountbar
+  - Stolpersteine bei HiDrive: viele kleine Dateien = viele HTTPS-Roundtrips (langsam); Range-Requests für große Dateien nutzen; ggf. Rate-Limits / Quota beachten; Locking nur bei Multi-User nötig
+  - Referenz: manuelle Einrichtung in macOS (zur Validierung / als UX-Vorbild)
+    1. Finder → Menü **Gehe zu** → **Mit Server verbinden…** (Cmd+K)
+    2. Serveradresse: `https://webdav.hidrive.ionos.com/`
+    3. Verbinden als: **Registrierter Benutzer**
+    4. HiDrive-Benutzername + Passwort eingeben
+    5. **Passwort im Schlüsselbund sichern** aktivieren
+    6. **Verbinden** → Finder öffnet das Netzlaufwerk
+
 ## Sonstiges
 - Tastatur-Cheatsheet (Cmd+/)
 - Weitere Sprachen (FR/ES) — i18n-Gerüst steht
 - Automatische Updates (Tauri Updater) + signierte/notarisierte DMG
+- Signierter Privileged Helper (SMAppService) für Time-Machine-Löschvorgänge: ersetzt den Terminal.app-Umweg, vermeidet das kurze Aufblitzen eines Terminal-Fensters, behält FDA-Vererbung und macht das Passwort-Handling über XPC sauberer (kein temp-File auf Disk).
