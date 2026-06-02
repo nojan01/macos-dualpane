@@ -484,3 +484,79 @@ int db_file_icon_png(const char *path, int size, unsigned char **out_png,
     *out_len = (int)len;
     return 0;
 }
+
+#pragma mark - Edit menu cleanup
+
+// macOS automatically injects text-service items (AutoFill, Writing Tools,
+// Substitutions, Transformations, Speech, Emoji & Symbols, Start Dictation)
+// into any standard Edit menu. We keep only the classic editing commands.
+static BOOL db_is_kept_edit_item(NSMenuItem *item) {
+    if (item.isSeparatorItem) return NO;
+    SEL a = item.action;
+    if (a == NULL) return NO; // submenu parents like AutoFill / Writing Tools
+    static NSArray<NSString *> *keep = nil;
+    if (keep == nil) {
+        keep = @[ @"undo:", @"redo:", @"cut:", @"copy:", @"paste:",
+                  @"pasteAsPlainText:", @"delete:", @"selectAll:" ];
+    }
+    return [keep containsObject:NSStringFromSelector(a)];
+}
+
+static void db_trim_edit_menu(NSMenu *menu) {
+    if (menu == nil) return;
+    NSArray<NSMenuItem *> *items = [menu.itemArray copy];
+    for (NSMenuItem *item in items) {
+        if (!db_is_kept_edit_item(item)) {
+            [menu removeItem:item];
+        }
+    }
+}
+
+@interface DBEditMenuCleaner : NSObject <NSMenuDelegate>
+@property (weak) id<NSMenuDelegate> original;
+@end
+
+@implementation DBEditMenuCleaner
+- (void)menuNeedsUpdate:(NSMenu *)menu {
+    if ([self.original respondsToSelector:@selector(menuNeedsUpdate:)]) {
+        [self.original menuNeedsUpdate:menu];
+    }
+    db_trim_edit_menu(menu);
+}
+@end
+
+static DBEditMenuCleaner *g_edit_cleaner = nil;
+
+static NSMenu *db_find_edit_menu(void) {
+    NSMenu *main = [NSApp mainMenu];
+    if (main == nil) return nil;
+    for (NSMenuItem *top in main.itemArray) {
+        NSMenu *sub = top.submenu;
+        if (sub == nil) continue;
+        for (NSMenuItem *it in sub.itemArray) {
+            if (it.action == @selector(paste:)) return sub;
+        }
+    }
+    return nil;
+}
+
+void db_clean_edit_menu(void) {
+    void (^work)(void) = ^{
+        NSUserDefaults *d = [NSUserDefaults standardUserDefaults];
+        [d setBool:YES forKey:@"NSDisabledDictationMenuItem"];
+        [d setBool:YES forKey:@"NSDisabledCharacterPaletteMenuItem"];
+
+        NSMenu *edit = db_find_edit_menu();
+        if (edit == nil) return;
+        db_trim_edit_menu(edit);
+        if (g_edit_cleaner == nil) {
+            g_edit_cleaner = [[DBEditMenuCleaner alloc] init];
+        }
+        if (edit.delegate != (id)g_edit_cleaner) {
+            g_edit_cleaner.original = edit.delegate;
+            edit.delegate = g_edit_cleaner;
+        }
+    };
+    if ([NSThread isMainThread]) work();
+    else dispatch_sync(dispatch_get_main_queue(), work);
+}

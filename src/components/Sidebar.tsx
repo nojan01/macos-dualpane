@@ -281,6 +281,16 @@ export function Sidebar() {
               >
                 <span class="sb-icon">💽</span>
                 <span class="sb-label">{v.name}</span>
+                <button
+                  class="sb-eject"
+                  title={t("sidebar.eject")}
+                  onClick={(ev) => {
+                    ev.stopPropagation();
+                    void doEject(v);
+                  }}
+                >
+                  ⏏
+                </button>
               </div>
             )}
           </For>
@@ -312,6 +322,16 @@ export function Sidebar() {
               >
                 <span class="sb-icon">🌐</span>
                 <span class="sb-label">{v.name}</span>
+                <button
+                  class="sb-eject"
+                  title={t("sidebar.eject")}
+                  onClick={(ev) => {
+                    ev.stopPropagation();
+                    void doEject(v);
+                  }}
+                >
+                  ⏏
+                </button>
               </div>
             )}
           </For>

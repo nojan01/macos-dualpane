@@ -2422,19 +2422,12 @@ pub fn run() {
                 let app_menu = SubmenuBuilder::new(app, "DualBeam")
                     .about(Some(about_meta))
                     .separator()
-                    .services()
-                    .separator()
                     .hide()
-                    .hide_others()
-                    .show_all()
                     .separator()
                     .quit()
                     .build()?;
 
                 let edit_menu = SubmenuBuilder::new(app, "Bearbeiten")
-                    .undo()
-                    .redo()
-                    .separator()
                     .cut()
                     .copy()
                     .paste()
@@ -2488,6 +2481,11 @@ pub fn run() {
                     .item(&window_menu)
                     .build()?;
                 app.set_menu(menu)?;
+
+                // macOS injiziert automatisch Text-Service-Einträge (AutoFill,
+                // Writing Tools, Emoji & Symbole, Diktat …) ins Bearbeiten-Menü.
+                // Diese hier entfernen, nur Standard-Befehle behalten.
+                promise_drag::clean_edit_menu();
 
                 app.on_menu_event(move |app_handle, event| {
                     let id = event.id().as_ref();

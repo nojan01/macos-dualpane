@@ -35,6 +35,12 @@ void db_set_dock_badge(const char *label);
 int db_file_icon_png(const char *path, int size, unsigned char **out_png,
                      int *out_len, const char **out_err);
 
+/* Remove macOS-injected text-service items (AutoFill, Writing Tools, Emoji &
+ * Symbols, Start Dictation, Substitutions, Speech, ...) from the app's Edit
+ * menu, keeping only the standard Cut/Copy/Paste/Select All entries.
+ * Must be called on the main thread after the app menu has been installed. */
+void db_clean_edit_menu(void);
+
 #ifdef __cplusplus
 }
 #endif

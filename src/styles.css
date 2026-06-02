@@ -714,6 +714,22 @@ body.dragging * {
 .sb-item.active { background: var(--row-selected); color: #fff; }
 .sb-icon { width: 16px; text-align: center; }
 .sb-label { overflow: hidden; text-overflow: ellipsis; }
+.sb-eject {
+  margin-left: auto;
+  flex: none;
+  background: transparent;
+  border: none;
+  color: var(--text-dim);
+  font-size: 14px;
+  line-height: 1;
+  padding: 2px 5px;
+  border-radius: 4px;
+  cursor: pointer;
+  opacity: 0.65;
+}
+.sb-item:hover .sb-eject { opacity: 1; }
+.sb-eject:hover { color: var(--accent); background: var(--row-selected); }
+.sb-item.active .sb-eject { color: #fff; opacity: 1; }
 .sb-empty {
   padding: 2px 14px;
   color: var(--text-dim);
