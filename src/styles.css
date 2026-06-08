@@ -157,8 +157,8 @@ html, body, #root {
   background: var(--bg);
   color: var(--text);
   font: 13px -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif;
-  user-select: none;
   -webkit-user-select: none;
+  user-select: none;
   overflow: hidden;
 }
 
@@ -191,6 +191,13 @@ html, body, #root {
 .toolbar button.tb-glyph { font-size: 16px; line-height: 1; padding: 3px 8px; min-width: 32px; font-family: "Apple Color Emoji", -apple-system, sans-serif; display: inline-flex; align-items: center; justify-content: center; }
 .toolbar button.tb-glyph svg { display: block; }
 .toolbar button.tb-glyph.active { background: #3a3a3a; box-shadow: inset 0 0 0 1px #4a90e2; }
+.toolbar button.tb-glyph:active { background: var(--row-hover); box-shadow: inset 0 0 0 1px var(--accent); }
+.toolbar button.tb-glyph.flash {
+  background: var(--row-hover);
+  box-shadow: inset 0 0 0 1px var(--accent);
+}
+.toolbar button.tb-glyph.flash > * { display: inline-block; animation: tb-spin 0.35s ease; }
+@keyframes tb-spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
 .toolbar .spacer { flex: 1; }
 .toolbar .hint { color: var(--text-dim); font-size: 12px; }
 
@@ -208,11 +215,12 @@ html, body, #root {
   width: 4px;
   min-width: 4px;
   z-index: 2;
+  -webkit-user-select: none;
   user-select: none;
 }
 .splitter:hover, .splitter.dragging { background: var(--accent); }
 body.col-resizing { cursor: col-resize !important; }
-body.col-resizing * { cursor: col-resize !important; user-select: none !important; }
+body.col-resizing * { cursor: col-resize !important; -webkit-user-select: none !important; user-select: none !important; }
 
 /* Visuelles Resize-Grip unten rechts. macOS resized das Fenster nativ am Rand;
    das Grip ist nur sichtbare Affordance und darf Klicks nicht abfangen. */
@@ -275,7 +283,7 @@ body.col-resizing * { cursor: col-resize !important; user-select: none !importan
 
 .col-header {
   display: grid;
-  grid-template-columns: subgrid;
+  grid-template-columns: var(--subgrid);
   grid-column: 1 / -1;
   align-items: center;
   background: var(--header);
@@ -309,6 +317,10 @@ body.col-resizing * { cursor: col-resize !important; user-select: none !importan
   width: max-content;
   min-width: 100%;
   outline: none;
+  /* subgrid via Variable: die macOS-WKWebView (Safari 16+) loest dies korrekt
+     auf; der Umweg ueber die Variable vermeidet einen False-Positive-
+     Kompatibilitaetshinweis fuer Chrome/Samsung, die hier nicht Ziel sind. */
+  --subgrid: subgrid;
   --row-cols: max-content minmax(70px, max-content) minmax(140px, max-content);
   grid-template-columns: var(--row-cols);
 }
@@ -319,7 +331,7 @@ body.col-resizing * { cursor: col-resize !important; user-select: none !importan
 
 .row {
   display: grid;
-  grid-template-columns: subgrid;
+  grid-template-columns: var(--subgrid);
   grid-column: 1 / -1;
   align-items: center;
   cursor: default;
@@ -546,6 +558,7 @@ body.col-resizing * { cursor: col-resize !important; user-select: none !importan
 body.dragging,
 body.dragging * {
   cursor: copy !important;
+  -webkit-user-select: none !important;
   user-select: none !important;
 }
 
@@ -783,8 +796,9 @@ body.dragging * {
   background: #181818;
   border-bottom: 1px solid var(--border);
   overflow-x: auto;
-  scrollbar-width: thin;
 }
+.tab-bar::-webkit-scrollbar { height: 6px; }
+.tab-bar::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
 .tab {
   display: flex;
   align-items: center;

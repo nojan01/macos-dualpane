@@ -48,6 +48,7 @@ const SHORTCUTS: { key: string; descKey: string }[] = [
   { key: "Tab", descKey: "hb.switchPane" },
   { key: "↵", descKey: "hb.open" },
   { key: "⌫", descKey: "hb.up" },
+  { key: "⌘N", descKey: "hb.newWindow" },
   { key: "⌘T", descKey: "hb.newTab" },
   { key: "⌘W", descKey: "hb.closeTab" },
   { key: "⌘1…9", descKey: "hb.switchTab" },

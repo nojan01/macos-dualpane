@@ -184,6 +184,14 @@ export async function refreshPane(pane: PaneId) {
   await loadPane(pane, state[pane].cwd);
 }
 
+// Aktualisiert beide Panes. Damit wird auch ein im inaktiven Pane geöffnetes
+// Netzlaufwerk (z. B. HiDrive/WebDAV) neu eingelesen. Jeder loadPane-Aufruf
+// löst im Backend ein frisches read_dir aus, was bei webdavfs einen neuen
+// PROPFIND und damit einen serverseitigen Refresh bewirkt.
+export async function refreshAll() {
+  await Promise.all([refreshPane("left"), refreshPane("right")]);
+}
+
 export async function handleVolumeGone(volPath: string) {
   const norm = volPath.endsWith("/") ? volPath : volPath + "/";
   const panes: PaneId[] = ["left", "right"];

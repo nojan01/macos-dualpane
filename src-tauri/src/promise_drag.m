@@ -1,5 +1,6 @@
 #import <Cocoa/Cocoa.h>
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
+#import <objc/runtime.h>
 #include "promise_drag.h"
 
 static db_drop_callback g_callback = NULL;
@@ -555,6 +556,62 @@ void db_clean_edit_menu(void) {
         if (edit.delegate != (id)g_edit_cleaner) {
             g_edit_cleaner.original = edit.delegate;
             edit.delegate = g_edit_cleaner;
+        }
+    };
+    if ([NSThread isMainThread]) work();
+    else dispatch_sync(dispatch_get_main_queue(), work);
+}
+
+#pragma mark - Dock menu
+
+// Right-clicking the Dock icon shows a menu. macOS queries the app delegate's
+// -applicationDockMenu: method for it. wry's delegate does not implement that
+// method, so we add it at runtime and return our own menu with a
+// "New Window" entry, mirroring Finder's behaviour.
+static db_dock_callback g_dock_cb = NULL;
+static NSString *g_dock_title = nil;
+
+@interface DBDockTarget : NSObject
+- (void)dbNewWindow:(id)sender;
+@end
+
+@implementation DBDockTarget
+- (void)dbNewWindow:(id)sender {
+    if (g_dock_cb) g_dock_cb();
+}
+@end
+
+static DBDockTarget *g_dock_target = nil;
+
+static NSMenu *db_dock_menu_imp(id self, SEL _cmd, NSApplication *sender) {
+    (void)self; (void)_cmd; (void)sender;
+    NSMenu *menu = [[NSMenu alloc] init];
+    NSString *title = g_dock_title.length > 0 ? g_dock_title : @"New Window";
+    NSMenuItem *item = [[NSMenuItem alloc] initWithTitle:title
+                                                  action:@selector(dbNewWindow:)
+                                           keyEquivalent:@""];
+    item.target = g_dock_target;
+    [menu addItem:item];
+    return menu;
+}
+
+void db_install_dock_menu(const char *title, db_dock_callback cb) {
+    NSString *t = (title && title[0] != '\0')
+        ? [NSString stringWithUTF8String:title]
+        : nil;
+    void (^work)(void) = ^{
+        g_dock_cb = cb;
+        g_dock_title = t;
+        if (g_dock_target == nil) g_dock_target = [[DBDockTarget alloc] init];
+
+        id delegate = [NSApp delegate];
+        if (delegate == nil) return;
+        Class cls = object_getClass(delegate);
+        SEL sel = @selector(applicationDockMenu:);
+        // Encoding: returns id, args self (id) + _cmd (SEL) + NSApplication* (id).
+        const char *types = "@@:@";
+        if (!class_addMethod(cls, sel, (IMP)db_dock_menu_imp, types)) {
+            class_replaceMethod(cls, sel, (IMP)db_dock_menu_imp, types);
         }
     };
     if ([NSThread isMainThread]) work();

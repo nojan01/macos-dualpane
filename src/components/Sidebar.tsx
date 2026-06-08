@@ -69,6 +69,52 @@ export function Sidebar() {
     }
   }
 
+  async function ejectBookmark(b: NetworkBookmark) {
+    if (mounting()) return;
+    setMounting(b.url);
+    try {
+      await ejectVolume(b.mountPath);
+      await handleVolumeGone(b.mountPath);
+      await refreshVols();
+    } catch (err) {
+      await askConfirm({
+        title: t("sidebar.ejectFailed"),
+        message: errMsg(err),
+        okLabel: t("common.ok"),
+        cancelLabel: t("common.close"),
+      });
+    } finally {
+      setMounting(null);
+    }
+  }
+
+  async function reconnectBookmark(b: NetworkBookmark) {
+    if (mounting()) return;
+    setMounting(b.url);
+    try {
+      // Erst aushängen (Fehler ignorieren, falls schon weg), dann neu mounten.
+      try {
+        await ejectVolume(b.mountPath);
+        await handleVolumeGone(b.mountPath);
+      } catch {
+        /* nicht gemountet oder bereits ausgehängt – weiter mit mount */
+      }
+      await mountNetworkUrl(b.url);
+      await refreshVols();
+      const fresh = bookmarks().find((x) => x.url === b.url);
+      if (fresh?.connected) go(fresh.mountPath);
+    } catch (err) {
+      await askConfirm({
+        title: t("sidebar.mountFailed"),
+        message: errMsg(err),
+        okLabel: t("common.ok"),
+        cancelLabel: t("common.close"),
+      });
+    } finally {
+      setMounting(null);
+    }
+  }
+
   async function persist(next: Favorite[]) {
     setFavs(next);
     try {
@@ -308,6 +354,28 @@ export function Sidebar() {
                 <span class="sb-label">{b.name}</span>
                 <Show when={mounting() === b.url}>
                   <span class="sb-spin">…</span>
+                </Show>
+                <Show when={b.connected && mounting() !== b.url}>
+                  <button
+                    class="sb-eject"
+                    title={t("sidebar.reconnect")}
+                    onClick={(ev) => {
+                      ev.stopPropagation();
+                      void reconnectBookmark(b);
+                    }}
+                  >
+                    ↻
+                  </button>
+                  <button
+                    class="sb-eject"
+                    title={t("sidebar.eject")}
+                    onClick={(ev) => {
+                      ev.stopPropagation();
+                      void ejectBookmark(b);
+                    }}
+                  >
+                    ⏏
+                  </button>
                 </Show>
               </div>
             )}

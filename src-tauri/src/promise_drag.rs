@@ -5,6 +5,7 @@ use std::sync::OnceLock;
 use tauri::{AppHandle, Emitter};
 
 type DropCallback = extern "C" fn(id: u64, src: *const c_char, dest: *const c_char);
+type DockCallback = extern "C" fn();
 
 extern "C" {
     fn db_set_drop_callback(cb: DropCallback);
@@ -25,6 +26,7 @@ extern "C" {
     ) -> c_int;
     fn db_set_dock_badge(label: *const c_char);
     fn db_clean_edit_menu();
+    fn db_install_dock_menu(title: *const c_char, cb: DockCallback);
     fn db_file_icon_png(
         path: *const c_char,
         size: c_int,
@@ -180,6 +182,19 @@ pub fn set_dock_badge(label: Option<String>) {
 /// Symbols, Start Dictation, ...) from the Edit menu. Call after the menu is set.
 pub fn clean_edit_menu() {
     unsafe { db_clean_edit_menu() };
+}
+
+extern "C" fn on_dock_new_window() {
+    if let Some(app) = APP_HANDLE.get() {
+        crate::open_new_window(app);
+    }
+}
+
+/// Install the Dock right-click menu with a "New Window" entry.
+pub fn install_dock_menu(title: &str) {
+    if let Ok(c) = CString::new(title) {
+        unsafe { db_install_dock_menu(c.as_ptr(), on_dock_new_window) };
+    }
 }
 
 pub fn file_icon_png(path: &str, size: u32) -> Result<Vec<u8>, String> {

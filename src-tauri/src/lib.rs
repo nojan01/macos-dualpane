@@ -106,6 +106,26 @@ fn ext_to_kind(ext: &str, is_dir: bool, is_symlink: bool) -> String {
     }
 }
 
+/// Öffnet ein weiteres unabhängiges App-Fenster.
+pub(crate) fn open_new_window(app: &AppHandle) {
+    use std::sync::atomic::AtomicU32;
+    static COUNTER: AtomicU32 = AtomicU32::new(1);
+    let label = format!("win-{}", COUNTER.fetch_add(1, Ordering::Relaxed));
+    let builder = tauri::WebviewWindowBuilder::new(
+        app,
+        &label,
+        tauri::WebviewUrl::App("index.html".into()),
+    )
+    .title("DualBeam")
+    .inner_size(1280.0, 800.0)
+    .min_inner_size(900.0, 500.0)
+    .resizable(true)
+    .center();
+    if let Err(e) = builder.build() {
+        eprintln!("Neues Fenster konnte nicht erstellt werden: {e}");
+    }
+}
+
 fn expand_tilde(p: &str) -> PathBuf {
     if let Some(stripped) = p.strip_prefix("~") {
         if let Some(home) = dirs::home_dir() {
@@ -128,6 +148,7 @@ fn list_dir(path: String, show_hidden: bool) -> Result<Vec<Entry>, String> {
     let p = expand_tilde(&path);
     let read = std::fs::read_dir(&p).map_err(|e| format!("{}: {}", p.display(), e))?;
 
+    use std::os::unix::fs::MetadataExt;
     let mut out: Vec<Entry> = Vec::new();
     for ent in read.flatten() {
         let path = ent.path();
@@ -136,18 +157,28 @@ fn list_dir(path: String, show_hidden: bool) -> Result<Vec<Entry>, String> {
         if hidden && !show_hidden {
             continue;
         }
-        let meta = match ent.metadata() {
-            Ok(m) => m,
-            Err(_) => continue,
-        };
+        // `file_type()` stammt aus dem readdir-d_type und braucht (anders als
+        // `metadata()`) keinen zusätzlichen stat/PROPFIND-Roundtrip. Auf
+        // Netzlaufwerken (WebDAV/SMB) kann `metadata()` zeitweise scheitern;
+        // Einträge dürfen dann NICHT verschwinden – wir fallen auf den
+        // file_type bzw. symlink_metadata zurück.
+        let ft = ent.file_type().ok();
         let symlink_meta = std::fs::symlink_metadata(&path).ok();
-        let is_symlink = symlink_meta
+        let is_symlink = ft
+            .map(|t| t.is_symlink())
+            .or_else(|| symlink_meta.as_ref().map(|m| m.file_type().is_symlink()))
+            .unwrap_or(false);
+        // Für die übrigen Felder die volle Metadata versuchen, sonst auf
+        // symlink_metadata zurückfallen, damit der Eintrag erhalten bleibt.
+        let meta = ent.metadata().ok().or_else(|| symlink_meta.clone());
+        let is_dir = meta
             .as_ref()
-            .map(|m| m.file_type().is_symlink())
+            .map(|m| m.is_dir())
+            .or_else(|| ft.map(|t| t.is_dir()))
             .unwrap_or(false);
         let mtime = meta
-            .modified()
-            .ok()
+            .as_ref()
+            .and_then(|m| m.modified().ok())
             .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
             .map(|d| d.as_secs() as i64)
             .unwrap_or(0);
@@ -156,24 +187,23 @@ fn list_dir(path: String, show_hidden: bool) -> Result<Vec<Entry>, String> {
             .and_then(|s| s.to_str())
             .map(|s| s.to_ascii_lowercase())
             .unwrap_or_default();
-        use std::os::unix::fs::MetadataExt;
-        let mode_bits = meta.mode();
-        let mode_str = mode_to_rwx(mode_bits);
-        let owner = uid_to_name(meta.uid());
-        let group = gid_to_name(meta.gid());
+        let mode_str = meta.as_ref().map(|m| mode_to_rwx(m.mode())).unwrap_or_default();
+        let owner = meta.as_ref().map(|m| uid_to_name(m.uid())).unwrap_or_default();
+        let group = meta.as_ref().map(|m| gid_to_name(m.gid())).unwrap_or_default();
         let birth_time = meta
-            .created()
-            .ok()
+            .as_ref()
+            .and_then(|m| m.created().ok())
             .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
             .map(|d| d.as_secs() as i64)
             .unwrap_or(0);
-        let kind = ext_to_kind(&ext, meta.is_dir(), is_symlink);
+        let size = if is_dir { 0 } else { meta.as_ref().map(|m| m.len()).unwrap_or(0) };
+        let kind = ext_to_kind(&ext, is_dir, is_symlink);
         out.push(Entry {
             name,
             path: path.to_string_lossy().into_owned(),
-            is_dir: meta.is_dir(),
+            is_dir,
             is_symlink,
-            size: if meta.is_dir() { 0 } else { meta.len() },
+            size,
             mtime,
             ext,
             hidden,
@@ -547,6 +577,44 @@ async fn mount_network_url(url: String) -> Result<String, String> {
 #[tauri::command]
 async fn eject_volume(path: String) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
+        // Netzlaufwerke (WebDAV/SMB/NFS/AFP/FTP) kennt `diskutil eject` nicht
+        // ("Failed to find disk"). Sie müssen mit `umount`/`diskutil unmount`
+        // ausgehängt werden. Physische Datenträger dagegen mit `eject`.
+        let fstype = mount_fs_types().get(&path).cloned().unwrap_or_default();
+        let is_network = matches!(
+            fstype.as_str(),
+            "webdav" | "smbfs" | "nfs" | "afpfs" | "ftp" | "cifs"
+        );
+
+        if is_network {
+            // Zuerst der saubere Weg über diskutil, dann Fallback auf umount.
+            let du = std::process::Command::new("diskutil")
+                .args(["unmount", &path])
+                .output()
+                .map_err(|e| format!("diskutil: {}", e))?;
+            if du.status.success() {
+                return Ok(());
+            }
+            let um = std::process::Command::new("/sbin/umount")
+                .arg(&path)
+                .output()
+                .map_err(|e| format!("umount: {}", e))?;
+            if um.status.success() {
+                return Ok(());
+            }
+            // Erzwungenes Aushängen als letzter Versuch (hängende WebDAV-Sitzung).
+            let umf = std::process::Command::new("/sbin/umount")
+                .args(["-f", &path])
+                .output()
+                .map_err(|e| format!("umount -f: {}", e))?;
+            if umf.status.success() {
+                return Ok(());
+            }
+            let err = String::from_utf8_lossy(&umf.stderr);
+            let so = String::from_utf8_lossy(&umf.stdout);
+            return Err(format!("Aushängen fehlgeschlagen: {}{}", err.trim(), so.trim()));
+        }
+
         let out = std::process::Command::new("diskutil")
             .args(["eject", &path])
             .output()
@@ -2466,7 +2534,14 @@ pub fn run() {
                     .item(&lang_en)
                     .build()?;
 
+                let new_window_item = MenuItemBuilder::new("Neues Fenster")
+                    .id("new-window")
+                    .accelerator("CmdOrCtrl+N")
+                    .build(app)?;
+
                 let window_menu = SubmenuBuilder::new(app, "Fenster")
+                    .item(&new_window_item)
+                    .separator()
                     .minimize()
                     .maximize()
                     .separator()
@@ -2487,8 +2562,16 @@ pub fn run() {
                 // Diese hier entfernen, nur Standard-Befehle behalten.
                 promise_drag::clean_edit_menu();
 
+                // Dock-Menü (Rechtsklick aufs Dock-Symbol) mit „Neues Fenster",
+                // analog zum Finder.
+                promise_drag::install_dock_menu("Neues Fenster");
+
                 app.on_menu_event(move |app_handle, event| {
                     let id = event.id().as_ref();
+                    if id == "new-window" {
+                        open_new_window(app_handle);
+                        return;
+                    }
                     let theme = match id {
                         "theme-auto" => Some("auto"),
                         "theme-light" => Some("light"),
@@ -2566,6 +2649,14 @@ pub fn run() {
             promise_drag::start_promise_drag,
             promise_drag::resolve_promise_drop,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while running tauri application")
+        .run(|_app_handle, _event| {
+            #[cfg(target_os = "macos")]
+            if let tauri::RunEvent::Reopen { has_visible_windows, .. } = &_event {
+                if !*has_visible_windows {
+                    open_new_window(_app_handle);
+                }
+            }
+        });
 }

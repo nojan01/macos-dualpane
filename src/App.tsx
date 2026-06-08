@@ -13,7 +13,7 @@ import { Dialogs } from "./components/Dialogs";
 import { SyncDialog } from "./components/SyncDialog";
 import { PropertiesDialog } from "./components/PropertiesDialog";
 import { JobBar } from "./components/JobBar";
-import { loadPane, state, setActive, setState, refreshPane, toggleCompareMode } from "./state";
+import { loadPane, state, setActive, setState, refreshPane, refreshAll, toggleCompareMode } from "./state";
 import { homeDir, openTerminal, setDockBadge, type JobProgress, type PaneChanged } from "./ipc";
 import { attachKeymap } from "./keymap";
 import { setHoverTarget, setDragEffect, defaultDragMode, toggleDefaultDragMode } from "./dnd";
@@ -51,6 +51,14 @@ export function App() {
   onThemeChange((m) => setThemeModeSig(m));
   const [langMode, setLangModeSig] = createSignal<LangMode>(getLangMode());
   onLangChange((m) => setLangModeSig(m));
+
+  // Kurzes visuelles Feedback für den Aktualisieren-Button (kein Toggle-State).
+  const [refreshFlash, setRefreshFlash] = createSignal(false);
+  const doRefresh = () => {
+    setRefreshFlash(true);
+    setTimeout(() => setRefreshFlash(false), 350);
+    void refreshAll();
+  };
 
   const panesTemplate = () => {
     const sw = Math.round(state.sidebarWidth);
@@ -253,10 +261,11 @@ export function App() {
         </button>
         <button
           class="tb-glyph"
-          onClick={() => refreshPane(state.active)}
+          classList={{ flash: refreshFlash() }}
+          onClick={doRefresh}
           title={t("toolbar.refresh")}
         >
-          🔄
+          <span class="tb-ico">🔄</span>
         </button>
         <button
           class="tb-glyph"

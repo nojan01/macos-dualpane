@@ -1,8 +1,20 @@
 import { createEffect } from "solid-js";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import { state, setState, type Tab } from "./state";
 import type { PaneId, SortKey, SortDir } from "./types";
 
-const KEY = "dualbeam:v1";
+// Zustand pro Fenster getrennt speichern. Das Hauptfenster ("main")
+// behält den ursprünglichen Schlüssel; weitere Fenster bekommen einen
+// Suffix mit ihrem Label und starten dadurch unabhängig.
+const BASE_KEY = "dualbeam:v1";
+const KEY = (() => {
+  try {
+    const label = getCurrentWindow().label;
+    return label === "main" ? BASE_KEY : `${BASE_KEY}:${label}`;
+  } catch {
+    return BASE_KEY;
+  }
+})();
 
 type Persisted = {
   version: 1;

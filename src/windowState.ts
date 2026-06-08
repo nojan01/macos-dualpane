@@ -1,6 +1,17 @@
 import { getCurrentWindow, LogicalSize, LogicalPosition } from "@tauri-apps/api/window";
 
-const KEY = "dualbeam:window:v1";
+// Geometrie pro Fenster getrennt speichern. Das Hauptfenster ("main")
+// behält den ursprünglichen Schlüssel, weitere Fenster bekommen einen
+// Suffix mit ihrem Label, damit sie sich nicht gegenseitig überschreiben.
+const BASE_KEY = "dualbeam:window:v1";
+const KEY = (() => {
+  try {
+    const label = getCurrentWindow().label;
+    return label === "main" ? BASE_KEY : `${BASE_KEY}:${label}`;
+  } catch {
+    return BASE_KEY;
+  }
+})();
 
 type WinState = { width: number; height: number; x: number | null; y: number | null };
 

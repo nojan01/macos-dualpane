@@ -41,6 +41,11 @@ int db_file_icon_png(const char *path, int size, unsigned char **out_png,
  * Must be called on the main thread after the app menu has been installed. */
 void db_clean_edit_menu(void);
 
+/* Dock menu (right-click on the Dock icon). cb is invoked on the main thread
+ * when the user picks the "New Window" entry. title is the localized label. */
+typedef void (*db_dock_callback)(void);
+void db_install_dock_menu(const char *title, db_dock_callback cb);
+
 #ifdef __cplusplus
 }
 #endif
