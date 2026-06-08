@@ -1,7 +1,7 @@
-import { createSignal, createEffect, onMount } from "solid-js";
+import { createSignal, createEffect, onMount, onCleanup } from "solid-js";
 import { listen } from "@tauri-apps/api/event";
 import { cycleThemeMode, getThemeMode, onThemeChange, themeIcon, themeLabel, setThemeMode, type ThemeMode } from "./theme";
-import { cycleLangMode, getLangMode, onLangChange, langIcon, langLabel, setLangMode, type LangMode, t } from "./i18n";
+import { cycleLangMode, getLangMode, getResolvedLang, onLangChange, langIcon, langLabel, setLangMode, type LangMode, t } from "./i18n";
 import { Pane } from "./components/Pane";
 import { Sidebar } from "./components/Sidebar";
 import { PreviewPane } from "./components/PreviewPane";
@@ -13,8 +13,10 @@ import { Dialogs } from "./components/Dialogs";
 import { SyncDialog } from "./components/SyncDialog";
 import { PropertiesDialog } from "./components/PropertiesDialog";
 import { JobBar } from "./components/JobBar";
+import { AboutDialog, openAbout } from "./components/AboutDialog";
+import { HelpDialog, openHelp } from "./components/HelpDialog";
 import { loadPane, state, setActive, setState, refreshPane, refreshAll, toggleCompareMode } from "./state";
-import { homeDir, openTerminal, setDockBadge, type JobProgress, type PaneChanged } from "./ipc";
+import { homeDir, openTerminal, setDockBadge, setMenuLanguage, type JobProgress, type PaneChanged } from "./ipc";
 import { attachKeymap } from "./keymap";
 import { setHoverTarget, setDragEffect, defaultDragMode, toggleDefaultDragMode } from "./dnd";
 import { transferEntries, syncPanes } from "./jobs";
@@ -50,7 +52,11 @@ export function App() {
   const [themeMode, setThemeModeSig] = createSignal<ThemeMode>(getThemeMode());
   onThemeChange((m) => setThemeModeSig(m));
   const [langMode, setLangModeSig] = createSignal<LangMode>(getLangMode());
-  onLangChange((m) => setLangModeSig(m));
+  onLangChange((m, r) => {
+    setLangModeSig(m);
+    // Natives macOS-Menü an die neue Sprache anpassen.
+    void setMenuLanguage(r).catch(() => {});
+  });
 
   // Kurzes visuelles Feedback für den Aktualisieren-Button (kein Toggle-State).
   const [refreshFlash, setRefreshFlash] = createSignal(false);
@@ -71,6 +77,60 @@ export function App() {
     parts.push(`${leftFr}fr`, "4px", `${rightFr}fr`);
     if (state.previewVisible) parts.push("4px", `${pw}px`);
     return parts.join(" ");
+  };
+
+  // Richtet die Sync-Symbolgruppe (← → ↔) dynamisch so aus, dass die
+  // tatsächliche Pane-Trennlinie genau zwischen den ersten beiden Pfeilen liegt.
+  let toolbarEl: HTMLDivElement | undefined;
+  let syncCenterEl: HTMLDivElement | undefined;
+  let splitSplitterEl: HTMLDivElement | undefined;
+  let syncRaf = 0;
+  const updateSyncCenter = () => {
+    // Erst nach dem nächsten Layout messen, damit die Splitter-Position aktuell ist.
+    cancelAnimationFrame(syncRaf);
+    syncRaf = requestAnimationFrame(() => {
+      if (!toolbarEl || !syncCenterEl || !splitSplitterEl) return;
+    const tbRect = toolbarEl.getBoundingClientRect();
+    // Tatsächliche Bildschirm-X-Mitte des Pane-Splitters.
+    const splRect = splitSplitterEl.getBoundingClientRect();
+    const dividerX = splRect.left + splRect.width / 2;
+    // `left` bei absoluter Positionierung zählt ab der Padding-Box der Toolbar
+    // (innere Border-Kante) – die Toolbar hat keinen linken Rand, also direkt
+    // relativ zu tbRect.left.
+    let centerX = dividerX - tbRect.left;
+    // Anker = visuelle Mitte zwischen den Zentren von Button 1 (←) und 2 (→).
+    const groupRect = syncCenterEl.getBoundingClientRect();
+    const btn1 = syncCenterEl.children[0] as HTMLElement | undefined;
+    const btn2 = syncCenterEl.children[1] as HTMLElement | undefined;
+    let anchor = groupRect.width / 2;
+    if (btn1 && btn2) {
+      const r1 = btn1.getBoundingClientRect();
+      const r2 = btn2.getBoundingClientRect();
+      const c1 = r1.left + r1.width / 2 - groupRect.left;
+      const c2 = r2.left + r2.width / 2 - groupRect.left;
+      anchor = (c1 + c2) / 2;
+    }
+    // Verschieben begrenzen, damit die Gruppe die benachbarten Buttons nicht
+    // überlagert. Linke Grenze = rechte Kante des letzten linken Buttons,
+    // rechte Grenze = linke Kante des ersten rechten Buttons (je + Abstand).
+    const gap = 8;
+    const groupW = groupRect.width;
+    const spacer = syncCenterEl.previousElementSibling as HTMLElement | null;
+    const lastLeft = (spacer?.previousElementSibling ?? spacer) as HTMLElement | null;
+    const firstRight = syncCenterEl.nextElementSibling as HTMLElement | null;
+    if (lastLeft) {
+      const lr = lastLeft.getBoundingClientRect();
+      const minCenter = lr.right - tbRect.left + gap + anchor;
+      if (centerX < minCenter) centerX = minCenter;
+    }
+    if (firstRight) {
+      const rr = firstRight.getBoundingClientRect();
+      const maxCenter = rr.left - tbRect.left - gap - (groupW - anchor);
+      if (centerX > maxCenter) centerX = maxCenter;
+    }
+    syncCenterEl.style.setProperty("--sync-left", `${centerX}px`);
+    syncCenterEl.style.setProperty("--sync-shift", `-${anchor}px`);
+    });
   };
 
   const startColResize = (ev: MouseEvent, kind: "sidebar" | "split" | "preview") => {
@@ -118,6 +178,20 @@ export function App() {
     attachKeymap();
     void attachWindowState();
     void attachPromiseDropHandler();
+    // Sync-Symbolgruppe an der Pane-Mittellinie ausrichten – reagiert auf
+    // Layout-Änderungen (Sidebar/Preview/Split) und Fenstergröße.
+    createEffect(() => {
+      // Abhängigkeiten lesen, damit der Effekt erneut läuft.
+      void state.sidebarVisible;
+      void state.previewVisible;
+      void state.sidebarWidth;
+      void state.previewWidth;
+      void state.paneSplit;
+      updateSyncCenter();
+    });
+    const onResize = () => updateSyncCenter();
+    window.addEventListener("resize", onResize);
+    onCleanup(() => window.removeEventListener("resize", onResize));
     // Dock-Badge bei laufenden Jobs.
     createEffect(() => {
       const job = state.job;
@@ -227,11 +301,17 @@ export function App() {
       const m = ev.payload as LangMode;
       if (m === "auto" || m === "de" || m === "en") setLangMode(m);
     });
+    // Hilfe via macOS-Menü öffnen
+    await listen("dualbeam://help", () => {
+      void openHelp();
+    });
+    // Natives Menü initial auf die aktuelle Sprache setzen.
+    void setMenuLanguage(getResolvedLang()).catch(() => {});
   });
 
   return (
     <div class="app">
-      <div class="toolbar">
+      <div class="toolbar" ref={(el) => { toolbarEl = el; }}>
         <button
           class="tb-glyph"
           classList={{ active: state.sidebarVisible }}
@@ -288,14 +368,15 @@ export function App() {
           onClick={() => toggleCompareMode()}
           title={t("toolbar.compare")}
         >
-          <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true">
-            <rect x="2" y="4" width="9" height="16" rx="1.6" fill="#5cd0f5" stroke="#2a6fb8" stroke-width="1.2" />
-            <rect x="13" y="4" width="9" height="16" rx="1.6" fill="#2a6fb8" stroke="#0a5a82" stroke-width="1.2" />
-            <path d="M11 12 L13 12" stroke="#e87a2a" stroke-width="2" stroke-linecap="round" />
-            <circle cx="6.5" cy="9" r="1" fill="#fff" />
-            <circle cx="17.5" cy="9" r="1" fill="#fff" />
-            <circle cx="6.5" cy="15" r="1" fill="#fff" />
-            <circle cx="17.5" cy="15" r="1" fill="#fff" />
+          <svg viewBox="0 0 24 24" width="21" height="21" aria-hidden="true">
+            <rect x="1" y="2" width="10" height="20" rx="2" fill="#5cd0f5" stroke="#2a6fb8" stroke-width="1.2" />
+            <rect x="13" y="2" width="10" height="20" rx="2" fill="#2a6fb8" stroke="#0a5a82" stroke-width="1.2" />
+            <line x1="3.5" y1="7" x2="8.5" y2="7" stroke="#0a5a82" stroke-width="1.4" stroke-linecap="round" />
+            <line x1="3.5" y1="11" x2="8.5" y2="11" stroke="#0a5a82" stroke-width="1.4" stroke-linecap="round" />
+            <line x1="3.5" y1="15" x2="6.5" y2="15" stroke="#0a5a82" stroke-width="1.4" stroke-linecap="round" />
+            <line x1="15.5" y1="7" x2="20.5" y2="7" stroke="#cfeefc" stroke-width="1.4" stroke-linecap="round" />
+            <line x1="15.5" y1="11" x2="20.5" y2="11" stroke="#cfeefc" stroke-width="1.4" stroke-linecap="round" />
+            <line x1="15.5" y1="15" x2="18.5" y2="15" stroke="#cfeefc" stroke-width="1.4" stroke-linecap="round" />
           </svg>
         </button>
         <button
@@ -320,31 +401,32 @@ export function App() {
           )}
         </button>
         <div class="spacer" />
-        <button
-          class="tb-glyph"
-          onClick={() => syncPanes("left")}
-          title={state.syncMode === "nav" ? "Verzeichnis nach links übernehmen" : "Inhalte nach links spiegeln (fehlende Dateien kopieren)"}
-        >
-          <span class="tb-icon-text">←</span>
-        </button>
-        <button
-          class="tb-glyph"
-          onClick={() => syncPanes("right")}
-          title={state.syncMode === "nav" ? "Verzeichnis nach rechts übernehmen" : "Inhalte nach rechts spiegeln (fehlende Dateien kopieren)"}
-        >
-          <span class="tb-icon-text">→</span>
-        </button>
-        <button
-          class="tb-glyph"
-          classList={{ active: state.syncMode === "merge" }}
-          onClick={() => setState("syncMode", state.syncMode === "nav" ? "merge" : "nav")}
-          title={state.syncMode === "nav"
-            ? "Sync-Modus: Navigation (nur Verzeichnis übernehmen) – klicken für Merge"
-            : "Sync-Modus: Merge (Dateien kopieren) – klicken für Navigation"}
-        >
-          <span class="tb-icon-text">{state.syncMode === "nav" ? "↔" : "⇄"}</span>
-        </button>
-        <div class="spacer" />
+        <div class="sync-center" ref={(el) => { syncCenterEl = el; queueMicrotask(updateSyncCenter); }}>
+          <button
+            class="tb-glyph"
+            onClick={() => syncPanes("left")}
+            title={state.syncMode === "nav" ? "Verzeichnis nach links übernehmen" : "Inhalte nach links spiegeln (fehlende Dateien kopieren)"}
+          >
+            <span class="tb-icon-text">←</span>
+          </button>
+          <button
+            class="tb-glyph"
+            onClick={() => syncPanes("right")}
+            title={state.syncMode === "nav" ? "Verzeichnis nach rechts übernehmen" : "Inhalte nach rechts spiegeln (fehlende Dateien kopieren)"}
+          >
+            <span class="tb-icon-text">→</span>
+          </button>
+          <button
+            class="tb-glyph"
+            classList={{ active: state.syncMode === "merge" }}
+            onClick={() => setState("syncMode", state.syncMode === "nav" ? "merge" : "nav")}
+            title={state.syncMode === "nav"
+              ? "Sync-Modus: Navigation (nur Verzeichnis übernehmen) – klicken für Merge"
+              : "Sync-Modus: Merge (Dateien kopieren) – klicken für Navigation"}
+          >
+            <span class="tb-icon-text">{state.syncMode === "nav" ? "↔" : "⇄"}</span>
+          </button>
+        </div>
         <button
           class="tb-glyph"
           onClick={() => cycleThemeMode()}
@@ -359,13 +441,27 @@ export function App() {
         >
           <span class="tb-icon-text">{langIcon(langMode())}</span>
         </button>
+        <button
+          class="tb-glyph"
+          onClick={() => void openAbout()}
+          title={t("toolbar.about")}
+        >
+          <span class="tb-icon-text">ℹ</span>
+        </button>
+        <button
+          class="tb-glyph"
+          onClick={() => void openHelp()}
+          title={t("toolbar.help")}
+        >
+          <span class="tb-icon-text">?</span>
+        </button>
       </div>
       <div class={`panes panes-grid ${state.sidebarVisible ? "" : "no-sidebar"} ${state.previewVisible ? "with-preview" : ""}`}
         ref={(el) => createEffect(() => el.style.setProperty("--panes-tpl", panesTemplate()))}>
         {state.sidebarVisible && <Sidebar />}
         {state.sidebarVisible && <div class="splitter" onMouseDown={(ev) => startColResize(ev, "sidebar")} />}
         <Pane id="left" />
-        <div class="splitter" onMouseDown={(ev) => startColResize(ev, "split")} />
+        <div class="splitter" ref={(el) => { splitSplitterEl = el; queueMicrotask(updateSyncCenter); }} onMouseDown={(ev) => startColResize(ev, "split")} />
         <Pane id="right" />
         {state.previewVisible && <div class="splitter" onMouseDown={(ev) => startColResize(ev, "preview")} />}
         {state.previewVisible && <PreviewPane />}
@@ -380,6 +476,8 @@ export function App() {
       <Dialogs />
       <SyncDialog />
       <PropertiesDialog />
+      <AboutDialog />
+      <HelpDialog />
       <div class="resize-grip" aria-hidden="true" />
     </div>
   );

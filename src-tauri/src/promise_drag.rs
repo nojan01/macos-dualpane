@@ -25,7 +25,6 @@ extern "C" {
         out_err: *mut *const c_char,
     ) -> c_int;
     fn db_set_dock_badge(label: *const c_char);
-    fn db_clean_edit_menu();
     fn db_install_dock_menu(title: *const c_char, cb: DockCallback);
     fn db_file_icon_png(
         path: *const c_char,
@@ -176,12 +175,6 @@ pub fn set_dock_badge(label: Option<String>) {
         }
         _ => unsafe { db_set_dock_badge(std::ptr::null()) },
     }
-}
-
-/// Remove macOS-injected text-service items (AutoFill, Writing Tools, Emoji &
-/// Symbols, Start Dictation, ...) from the Edit menu. Call after the menu is set.
-pub fn clean_edit_menu() {
-    unsafe { db_clean_edit_menu() };
 }
 
 extern "C" fn on_dock_new_window() {

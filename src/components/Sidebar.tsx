@@ -13,6 +13,7 @@ import {
   type NetworkBookmark,
 } from "../ipc";
 import { askConfirm } from "./Dialogs";
+import { connectToServer } from "../network";
 import { t, errMsg } from "../i18n";
 
 function basename(p: string): string {
@@ -341,9 +342,11 @@ export function Sidebar() {
             )}
           </For>
         </Show>
-        <Show when={vols().some((v) => v.kind === "network" && !bookmarks().some((b) => b.mountPath === v.path)) || bookmarks().length > 0}>
-          <div class="sb-section sb-section-spaced">{t("sidebar.network")}</div>
-          <For each={bookmarks()}>
+        <div class="sb-section sb-section-spaced">
+          <span>{t("sidebar.network")}</span>
+          <button class="sb-add" title={t("network.connectServer")} onClick={() => void connectToServer()}>＋</button>
+        </div>
+        <For each={bookmarks()}>
             {(b) => (
               <div
                 class={`sb-item ${state[state.active].cwd === b.mountPath ? "active" : ""} ${b.connected ? "" : "disconnected"}`}
@@ -403,7 +406,6 @@ export function Sidebar() {
               </div>
             )}
           </For>
-        </Show>
         <Show when={menu()}>
           {(m) => (
             <div

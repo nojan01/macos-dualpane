@@ -10,6 +10,13 @@ edition = "2021"
 name = "dualbeam_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
+[features]
+# Standard-Build (persönliche Variante) enthält die IONOS-HiDrive-Voreinstellung.
+# Für die öffentliche Version mit `--no-default-features` bauen, dann wird keine
+# personenbezogene Netzwerk-Voreinstellung ins Binary kompiliert.
+default = ["hidrive"]
+hidrive = []
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 cc = "1"

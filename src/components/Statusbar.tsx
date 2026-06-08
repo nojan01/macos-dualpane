@@ -53,6 +53,7 @@ const SHORTCUTS: { key: string; descKey: string }[] = [
   { key: "⌘W", descKey: "hb.closeTab" },
   { key: "⌘1…9", descKey: "hb.switchTab" },
   { key: "⌘B", descKey: "hb.sidebar" },
+  { key: "⌘K", descKey: "hb.connectServer" },
   { key: "⌘I", descKey: "hb.previewToggle" },
   { key: "⌘.", descKey: "hb.hidden" },
   { key: "⌘R", descKey: "hb.refresh" },

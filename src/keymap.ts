@@ -4,6 +4,7 @@ import { openProperties } from "./components/PropertiesDialog";
 import { startTransfer, deleteSelected, makeFolder, beginRename, duplicateSelected, archiveAction, pasteFromClipboard } from "./jobs";
 import { openRenameDialog } from "./rename";
 import { openSearch } from "./components/SearchDialog";
+import { connectToServer } from "./network";
 import type { PaneId } from "./types";
 
 function parentDir(path: string): string {
@@ -118,9 +119,6 @@ export function attachKeymap() {
         ev.preventDefault();
         await startTransfer("copy");
         return;
-        ev.preventDefault();
-        await startTransfer("copy");
-        return;
       case "F6":
         ev.preventDefault();
         await startTransfer("move");
@@ -206,6 +204,11 @@ export function attachKeymap() {
         case "b":
           ev.preventDefault();
           toggleSidebar();
+          return;
+        case "k":
+        case "K":
+          ev.preventDefault();
+          await connectToServer();
           return;
         case "i":
         case "I":

@@ -52,4 +52,6 @@
 - Tastatur-Cheatsheet (Cmd+/)
 - Weitere Sprachen (FR/ES) — i18n-Gerüst steht
 - Automatische Updates (Tauri Updater) + signierte/notarisierte DMG
+  - ✅ In-App-Update-Prüfung + Direkt-Download der `.dmg` (via GitHub-Release, `download_and_open_update`); öffnet die DMG zum manuellen Ziehen in „Programme"
+  - **Nach Signierung/Notarisierung:** Update-Flow auf vollautomatische Installation umstellen — entweder echter Tauri-Updater (signierte `.app.tar.gz` + Update-Signatur, Selbst-Ersetzung ohne Drag-and-Drop) oder still mounten + `ditto`/`rsync` der `.app` nach `/Applications` + Neustart; setzt gültige Developer-ID + Notarisierung voraus, damit Gatekeeper die ersetzte App akzeptiert
 - Signierter Privileged Helper (SMAppService) für Time-Machine-Löschvorgänge: ersetzt den Terminal.app-Umweg, vermeidet das kurze Aufblitzen eines Terminal-Fensters, behält FDA-Vererbung und macht das Passwort-Handling über XPC sauberer (kein temp-File auf Disk).

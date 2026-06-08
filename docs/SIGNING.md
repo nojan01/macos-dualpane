@@ -126,3 +126,27 @@ xcrun stapler validate \
 4. `entitlements.plist` mit Hardened-Runtime-Rechten anlegen und verlinken.
 5. Notarisierungs-Credentials (`APPLE_ID` / `APPLE_PASSWORD` / `APPLE_TEAM_ID`) setzen.
 6. `npm run tauri:build` → fertig signiert & notarisiert.
+
+---
+
+## Build-Varianten: persönlich vs. öffentlich
+
+Es gibt zwei Build-Varianten, gesteuert über das Cargo-Feature `hidrive`:
+
+| Variante | Befehl | IONOS-HiDrive-Voreinstellung |
+| --- | --- | --- |
+| **Persönlich** (Standard) | `npm run tauri:build` | enthalten |
+| **Öffentlich** (Release) | `npm run tauri:build:public` | entfernt |
+
+- Die öffentliche Version wird mit `tauri build --no-default-features` gebaut.
+  Dadurch wird der HiDrive-Code per `#[cfg(feature = "hidrive")]` gar nicht erst
+  einkompiliert – es landet **keine** personenbezogene Voreinstellung im Binary.
+- Die generische Netzwerk-Funktion (beliebige WebDAV/SMB-URL verbinden, mounten,
+  trennen) bleibt in beiden Varianten erhalten; nur das fest vorkonfigurierte
+  HiDrive-Lesezeichen entfällt in der öffentlichen Version.
+- Für die Veröffentlichung **immer** `npm run tauri:build:public` verwenden.
+
+> Hinweis: Sollen beide Varianten parallel auf demselben Mac installierbar sein,
+> in `src-tauri/tauri.conf.json` für die öffentliche Version ggf. eigene
+> `identifier`/`productName` vergeben (sonst überschreiben sie sich gegenseitig).
+

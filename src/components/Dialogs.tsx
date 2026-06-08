@@ -126,7 +126,7 @@ export function Dialogs() {
           };
           return (
             <div class="modal-backdrop" onMouseDown={() => resolvePrompt(null)}>
-              <div class="modal" onMouseDown={(e) => e.stopPropagation()}>
+              <div class="modal" role="dialog" aria-modal="true" aria-label={s().title} onMouseDown={(e) => e.stopPropagation()}>
                 <h2>{s().title}</h2>
                 <Show when={s().label}><p>{s().label}</p></Show>
                 <input
@@ -157,6 +157,9 @@ export function Dialogs() {
           <div class="modal-backdrop" onMouseDown={() => resolveConfirm(false)}>
             <div
               class="modal"
+              role="dialog"
+              aria-modal="true"
+              aria-label={s().title}
               onMouseDown={(e) => e.stopPropagation()}
               tabIndex={-1}
               ref={(el) => queueMicrotask(() => el?.focus())}
@@ -185,6 +188,9 @@ export function Dialogs() {
           <div class="modal-backdrop" onMouseDown={() => resolveNotify()}>
             <div
               class="modal"
+              role="dialog"
+              aria-modal="true"
+              aria-label={s().title}
               onMouseDown={(e) => e.stopPropagation()}
               tabIndex={-1}
               ref={(el) => queueMicrotask(() => el?.focus())}

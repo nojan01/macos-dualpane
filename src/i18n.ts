@@ -117,14 +117,41 @@ export function intlLocale(): string {
   return resolved() === "de" ? "de-DE" : "en-US";
 }
 
-/** Wandelt einen unbekannten Fehlerwert (catch) in eine lesbare Meldung um. */
+/** Wandelt einen unbekannten Fehlerwert (catch) in eine lesbare Meldung um.
+ *  Backend-Fehler können als Code (`err.*`) kommen und werden dann lokalisiert. */
 export function errMsg(e: unknown): string {
-  if (e instanceof Error) return e.message;
-  if (typeof e === "string") return e;
-  if (e == null) return String(e);
-  try {
-    return typeof e === "object" ? JSON.stringify(e) : String(e);
-  } catch {
-    return String(e);
+  let raw: string;
+  if (e instanceof Error) raw = e.message;
+  else if (typeof e === "string") raw = e;
+  else if (e == null) return String(e);
+  else {
+    try {
+      raw = typeof e === "object" ? JSON.stringify(e) : String(e);
+    } catch {
+      return String(e);
+    }
   }
+  return translateErr(raw);
+}
+
+/** Übersetzt einen Backend-Fehler-Code (`err.*`). Codes können Parameter
+ *  tragen, getrennt durch das Unit-Separator-Zeichen (\x1f): `err.foo\x1farg0`.
+ *  Im Übersetzungstext werden {0}, {1} … ersetzt. Unbekannte oder freie
+ *  Texte werden unverändert zurückgegeben. */
+export function translateErr(raw: string): string {
+  const trimmed = raw.trim();
+  const parts = trimmed.split("\x1f");
+  const code = parts[0];
+  if (code.startsWith("err.")) {
+    const r = resolved();
+    const dict = dicts[r];
+    let msg = dict[code] ?? en[code];
+    if (msg !== undefined) {
+      for (let i = 1; i < parts.length; i++) {
+        msg = msg.replace(new RegExp(`\\{${i - 1}\\}`, "g"), parts[i]);
+      }
+      return msg;
+    }
+  }
+  return raw;
 }

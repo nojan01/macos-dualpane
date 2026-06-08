@@ -241,7 +241,7 @@ fn open_url(url: String) -> Result<(), String> {
         || lower.starts_with("mailto:")
         || lower.starts_with("x-apple.systempreferences:");
     if !allowed {
-        return Err("Nicht erlaubtes URL-Schema".into());
+        return Err("err.url.scheme".into());
     }
     std::process::Command::new("open")
         .arg(&url)
@@ -262,7 +262,7 @@ fn open_url(url: String) -> Result<(), String> {
 fn create_dir(path: String) -> Result<(), String> {
     let p = expand_tilde(&path);
     if p.exists() {
-        return Err(format!("Existiert bereits: {}", p.display()));
+        return Err(format!("err.exists\u{1f}{}", p.display()));
     }
     std::fs::create_dir(&p).map_err(|e| format!("{}: {}", p.display(), e))
 }
@@ -271,7 +271,7 @@ fn create_dir(path: String) -> Result<(), String> {
 fn create_file(path: String) -> Result<(), String> {
     let p = expand_tilde(&path);
     if p.exists() {
-        return Err(format!("Existiert bereits: {}", p.display()));
+        return Err(format!("err.exists\u{1f}{}", p.display()));
     }
     std::fs::OpenOptions::new()
         .write(true)
@@ -286,7 +286,7 @@ fn create_symlink(target: String, link_path: String) -> Result<(), String> {
     let t = expand_tilde(&target);
     let l = expand_tilde(&link_path);
     if l.exists() || std::fs::symlink_metadata(&l).is_ok() {
-        return Err(format!("Existiert bereits: {}", l.display()));
+        return Err(format!("err.exists\u{1f}{}", l.display()));
     }
     std::os::unix::fs::symlink(&t, &l).map_err(|e| format!("{}: {}", l.display(), e))
 }
@@ -296,7 +296,7 @@ fn create_finder_alias(target: String, link_path: String) -> Result<(), String> 
     let t = expand_tilde(&target);
     let l = expand_tilde(&link_path);
     if l.exists() || std::fs::symlink_metadata(&l).is_ok() {
-        return Err(format!("Existiert bereits: {}", l.display()));
+        return Err(format!("err.exists\u{1f}{}", l.display()));
     }
     let parent = l
         .parent()
@@ -307,7 +307,7 @@ fn create_finder_alias(target: String, link_path: String) -> Result<(), String> 
         .ok_or_else(|| "Ungültiger Name".to_string())?;
     let esc = |s: &str| -> Result<String, String> {
         if s.contains('\n') || s.contains('\r') || s.contains('\0') {
-            return Err("Ungültiges Zeichen im Pfad/Namen".into());
+            return Err("err.path.invalidChar".into());
         }
         Ok(s.replace('\\', "\\\\").replace('"', "\\\""))
     };
@@ -344,7 +344,7 @@ fn rename_path(old_path: String, new_path: String) -> Result<(), String> {
         return Ok(());
     }
     if b.exists() {
-        return Err(format!("Ziel existiert: {}", b.display()));
+        return Err(format!("err.exists\u{1f}{}", b.display()));
     }
     std::fs::rename(&a, &b).map_err(|e| e.to_string())
 }
@@ -402,7 +402,7 @@ fn force_delete_admin(paths: Vec<String>) -> Result<(), String> {
         let s = full.to_string_lossy().into_owned();
         logln(&mut log, &format!("expanded: {} exists_before={}", s, full.exists()));
         if s.is_empty() || s == "/" {
-            return Err(format!("Unerlaubter Pfad: {}", s));
+            return Err(format!("err.path.forbidden\u{1f}{}", s));
         }
         let parent = full.parent()
             .map(|p| p.to_string_lossy().into_owned())
@@ -473,9 +473,29 @@ fn mount_fs_types() -> std::collections::HashMap<String, String> {
 }
 
 // IONOS HiDrive WebDAV-Netzwerk-Bookmark (Host, Anzeigename, URL an einer Stelle).
+// Nur in der persönlichen Build-Variante (Feature `hidrive`, standardmäßig aktiv).
+// Die öffentliche Version wird mit `--no-default-features` gebaut; dann existiert
+// diese personenbezogene Voreinstellung nicht im Binary.
+#[cfg(feature = "hidrive")]
 const HIDRIVE_HOST: &str = "webdav.hidrive.ionos.com";
+#[cfg(feature = "hidrive")]
 const HIDRIVE_NAME: &str = "IONOS HiDrive";
+#[cfg(feature = "hidrive")]
 const HIDRIVE_URL: &str = "https://webdav.hidrive.ionos.com/";
+
+// Anzeigename für ein gemountetes Volume. In der HiDrive-Variante wird der
+// technische WebDAV-Hostname durch den freundlichen Namen ersetzt.
+#[cfg(feature = "hidrive")]
+fn volume_display_name(name: &str) -> String {
+    match name {
+        HIDRIVE_HOST => HIDRIVE_NAME.to_string(),
+        _ => name.to_string(),
+    }
+}
+#[cfg(not(feature = "hidrive"))]
+fn volume_display_name(name: &str) -> String {
+    name.to_string()
+}
 
 #[tauri::command]
 fn list_volumes() -> Result<Vec<Volume>, String> {
@@ -499,10 +519,7 @@ fn list_volumes() -> Result<Vec<Volume>, String> {
                 _ => "local",
             }
             .to_string();
-            let display = match name.as_str() {
-                HIDRIVE_HOST => HIDRIVE_NAME.to_string(),
-                _ => name,
-            };
+            let display = volume_display_name(&name);
             out.push(Volume {
                 name: display,
                 path: path_str,
@@ -525,11 +542,19 @@ pub struct NetworkBookmark {
 
 fn known_network_bookmarks() -> Vec<(String, String, String)> {
     // (name, url, expected mount path)
-    vec![(
-        HIDRIVE_NAME.into(),
-        HIDRIVE_URL.into(),
-        format!("/Volumes/{}", HIDRIVE_HOST),
-    )]
+    #[cfg(feature = "hidrive")]
+    {
+        vec![(
+            HIDRIVE_NAME.into(),
+            HIDRIVE_URL.into(),
+            format!("/Volumes/{}", HIDRIVE_HOST),
+        )]
+    }
+    // Öffentliche Version: keine vordefinierten Netzwerk-Lesezeichen.
+    #[cfg(not(feature = "hidrive"))]
+    {
+        Vec::new()
+    }
 }
 
 #[tauri::command]
@@ -545,14 +570,20 @@ fn list_network_bookmarks() -> Result<Vec<NetworkBookmark>, String> {
 
 #[tauri::command]
 async fn mount_network_url(url: String) -> Result<String, String> {
-    // Nur http(s) erlauben; anschließend per Finder mounten (nutzt Keychain bzw. Dialog).
+    // Gängige Netzwerk-Protokolle erlauben; anschließend per Finder mounten
+    // (nutzt Keychain bzw. Anmeldedialog). Schemata wie smb://, afp://, nfs://,
+    // ftp(s):// und WebDAV (http(s)/dav(s)) werden von Finders `mount volume`
+    // unterstützt.
     let lower = url.trim().to_lowercase();
-    if !(lower.starts_with("https://") || lower.starts_with("http://")) {
-        return Err("Nur http(s)-URLs erlaubt".into());
+    const ALLOWED: [&str; 8] = [
+        "https://", "http://", "smb://", "afp://", "nfs://", "ftp://", "ftps://", "cifs://",
+    ];
+    if !ALLOWED.iter().any(|p| lower.starts_with(p)) {
+        return Err("err.network.scheme".into());
     }
     // Escape: keine Newlines/Anführungszeichen erlauben — AppleScript-Injection verhindern.
     if url.contains('"') || url.contains('\n') || url.contains('\r') || url.contains('\0') {
-        return Err("Ungültige Zeichen in URL".into());
+        return Err("err.network.badchars".into());
     }
     let script = format!(
         "tell application \"Finder\" to activate\nmount volume \"{}\"",
@@ -566,12 +597,175 @@ async fn mount_network_url(url: String) -> Result<String, String> {
             .map_err(|e| format!("osascript: {}", e))?;
         if !out.status.success() {
             let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
-            return Err(if err.is_empty() { "Mount fehlgeschlagen".into() } else { err });
+            return Err(if err.is_empty() { "err.mount.failed".into() } else { err });
         }
         Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
     })
     .await
     .map_err(|e| e.to_string())?
+}
+
+/// Gibt die in Cargo.toml gepflegte App-Version zurück (für den Über-Dialog).
+#[tauri::command]
+fn app_version() -> String {
+    env!("CARGO_PKG_VERSION").to_string()
+}
+
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateInfo {
+    pub current: String,
+    pub latest: String,
+    pub update_available: bool,
+    pub url: String,
+    /// Direkte Download-URL der `.dmg`-Datei des neuesten Releases (falls vorhanden).
+    pub asset_url: String,
+}
+
+/// Vergleicht zwei Punkt-Versionen (z. B. "0.2.0" > "0.1.9"). Nicht-numerische
+/// Bestandteile werden als 0 gewertet.
+fn version_gt(a: &str, b: &str) -> bool {
+    let parse = |s: &str| -> Vec<u64> {
+        s.split('.')
+            .map(|p| p.trim().chars().take_while(|c| c.is_ascii_digit()).collect::<String>())
+            .map(|p| p.parse::<u64>().unwrap_or(0))
+            .collect()
+    };
+    let va = parse(a);
+    let vb = parse(b);
+    let n = va.len().max(vb.len());
+    for i in 0..n {
+        let x = va.get(i).copied().unwrap_or(0);
+        let y = vb.get(i).copied().unwrap_or(0);
+        if x != y {
+            return x > y;
+        }
+    }
+    false
+}
+
+/// Prüft über die GitHub-Releases-API (per System-`curl`, daher CSP-unabhängig),
+/// ob eine neuere Version verfügbar ist.
+#[tauri::command]
+async fn check_update() -> Result<UpdateInfo, String> {
+    let current = env!("CARGO_PKG_VERSION").to_string();
+    let api = "https://api.github.com/repos/nojan01/macos-dualpane/releases/latest";
+    tauri::async_runtime::spawn_blocking(move || -> Result<UpdateInfo, String> {
+        let out = std::process::Command::new("/usr/bin/curl")
+            .args([
+                "-sSL",
+                "--max-time",
+                "15",
+                "-H",
+                "Accept: application/vnd.github+json",
+                "-H",
+                "User-Agent: DualBeam",
+                api,
+            ])
+            .output()
+            .map_err(|_| "err.update.failed".to_string())?;
+        if !out.status.success() {
+            return Err("err.update.failed".into());
+        }
+        let body = String::from_utf8_lossy(&out.stdout);
+        let v: serde_json::Value =
+            serde_json::from_str(&body).map_err(|_| "err.update.failed".to_string())?;
+        let latest = v
+            .get("tag_name")
+            .and_then(|t| t.as_str())
+            .unwrap_or("")
+            .trim()
+            .trim_start_matches(['v', 'V'])
+            .to_string();
+        let url = v
+            .get("html_url")
+            .and_then(|t| t.as_str())
+            .unwrap_or("https://github.com/nojan01/macos-dualpane/releases")
+            .to_string();
+        // Erste `.dmg`-Datei aus den Release-Assets als direkte Download-URL.
+        let asset_url = v
+            .get("assets")
+            .and_then(|a| a.as_array())
+            .and_then(|arr| {
+                arr.iter().find_map(|asset| {
+                    let dl = asset.get("browser_download_url").and_then(|u| u.as_str())?;
+                    if dl.to_lowercase().ends_with(".dmg") {
+                        Some(dl.to_string())
+                    } else {
+                        None
+                    }
+                })
+            })
+            .unwrap_or_default();
+        if latest.is_empty() {
+            return Err("err.update.failed".into());
+        }
+        let update_available = version_gt(&latest, &current);
+        Ok(UpdateInfo { current, latest, update_available, url, asset_url })
+    })
+    .await
+    .map_err(|_| "err.update.failed".to_string())?
+}
+
+/// Lädt die angegebene `.dmg`-Datei herunter (per System-`curl`, CSP-unabhängig)
+/// in den Downloads-Ordner und öffnet sie anschließend (mountet das Image und
+/// zeigt das Installations-Fenster zum Ziehen in „Programme"). Gibt den Pfad der
+/// heruntergeladenen Datei zurück.
+#[tauri::command]
+async fn download_and_open_update(url: String) -> Result<String, String> {
+    // Nur HTTPS-Downloads von GitHub-Releases zulassen.
+    let ok = url.starts_with("https://github.com/")
+        || url.starts_with("https://objects.githubusercontent.com/")
+        || url.starts_with("https://release-assets.githubusercontent.com/");
+    if !ok || !url.to_lowercase().ends_with(".dmg") {
+        return Err("err.update.failed".into());
+    }
+    tauri::async_runtime::spawn_blocking(move || -> Result<String, String> {
+        // Dateinamen aus der URL ableiten, auf sichere Zeichen beschränken.
+        let raw_name = url.rsplit('/').next().unwrap_or("DualBeam_update.dmg");
+        let safe_name: String = raw_name
+            .chars()
+            .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+            .collect();
+        let file_name = if safe_name.to_lowercase().ends_with(".dmg") && safe_name.len() > 4 {
+            safe_name
+        } else {
+            "DualBeam_update.dmg".to_string()
+        };
+        let home = std::env::var("HOME").map_err(|_| "err.update.failed".to_string())?;
+        let mut dest = std::path::PathBuf::from(home);
+        dest.push("Downloads");
+        if !dest.exists() {
+            dest = std::env::temp_dir();
+        }
+        dest.push(&file_name);
+        let dest_str = dest.to_string_lossy().to_string();
+
+        let out = std::process::Command::new("/usr/bin/curl")
+            .args([
+                "-fsSL",
+                "--max-time",
+                "120",
+                "-H",
+                "User-Agent: DualBeam",
+                "-o",
+                &dest_str,
+                &url,
+            ])
+            .output()
+            .map_err(|_| "err.update.failed".to_string())?;
+        if !out.status.success() {
+            return Err("err.update.failed".into());
+        }
+        // DMG öffnen (mountet das Image, zeigt das Installer-Fenster).
+        std::process::Command::new("/usr/bin/open")
+            .arg(&dest_str)
+            .status()
+            .map_err(|_| "err.update.failed".to_string())?;
+        Ok(dest_str)
+    })
+    .await
+    .map_err(|_| "err.update.failed".to_string())?
 }
 
 #[tauri::command]
@@ -612,7 +806,7 @@ async fn eject_volume(path: String) -> Result<(), String> {
             }
             let err = String::from_utf8_lossy(&umf.stderr);
             let so = String::from_utf8_lossy(&umf.stdout);
-            return Err(format!("Aushängen fehlgeschlagen: {}{}", err.trim(), so.trim()));
+            return Err(format!("err.eject.failed\u{1f}{}{}", err.trim(), so.trim()));
         }
 
         let out = std::process::Command::new("diskutil")
@@ -622,7 +816,7 @@ async fn eject_volume(path: String) -> Result<(), String> {
         if !out.status.success() {
             let err = String::from_utf8_lossy(&out.stderr);
             let so = String::from_utf8_lossy(&out.stdout);
-            return Err(format!("diskutil eject fehlgeschlagen: {}{}", err.trim(), so.trim()));
+            return Err(format!("err.eject.failed\u{1f}{}{}", err.trim(), so.trim()));
         }
         Ok(())
     })
@@ -2464,6 +2658,147 @@ fn tm_delete_local_snapshot(date: String) -> Result<(), String> {
     ))
 }
 
+#[cfg(target_os = "macos")]
+fn detect_menu_lang() -> String {
+    // Nur eine Erstschätzung beim Start — das Frontend korrigiert dies sofort
+    // über `set_menu_language`, sobald die aufgelöste Sprache feststeht.
+    let l = std::env::var("LANG")
+        .or_else(|_| std::env::var("LC_ALL"))
+        .or_else(|_| std::env::var("LC_MESSAGES"))
+        .unwrap_or_default()
+        .to_lowercase();
+    if l.starts_with("de") || l.contains("de_") {
+        "de".into()
+    } else {
+        "en".into()
+    }
+}
+
+/// Baut das native macOS-Menü in der gewünschten Sprache auf und setzt es.
+/// Wird beim Start und bei jedem Sprachwechsel aufgerufen.
+#[cfg(target_os = "macos")]
+fn build_and_set_menu(app: &tauri::AppHandle, lang: &str) -> tauri::Result<()> {
+    use tauri::menu::{
+        AboutMetadataBuilder, MenuBuilder, MenuItemBuilder, PredefinedMenuItem, SubmenuBuilder,
+    };
+
+    let en = lang == "en";
+    let s = |de_s: &'static str, en_s: &'static str| -> &'static str {
+        if en {
+            en_s
+        } else {
+            de_s
+        }
+    };
+
+    let about_meta = AboutMetadataBuilder::new()
+        .name(Some("DualBeam"))
+        .version(Some(env!("CARGO_PKG_VERSION").to_string()))
+        .copyright(Some("Copyright © 2026 N.J. — MIT License"))
+        .authors(Some(vec!["N.J.".to_string()]))
+        .license(Some("MIT"))
+        .comments(Some("Erstellt mit Claude Opus / Built with Claude Opus"))
+        .build();
+
+    let about_item =
+        PredefinedMenuItem::about(app, Some(s("Über DualBeam", "About DualBeam")), Some(about_meta))?;
+    let hide_item = PredefinedMenuItem::hide(app, Some(s("DualBeam ausblenden", "Hide DualBeam")))?;
+    let quit_item = PredefinedMenuItem::quit(app, Some(s("DualBeam beenden", "Quit DualBeam")))?;
+
+    let app_menu = SubmenuBuilder::new(app, "DualBeam")
+        .item(&about_item)
+        .separator()
+        .item(&hide_item)
+        .separator()
+        .item(&quit_item)
+        .build()?;
+
+    let theme_auto = MenuItemBuilder::new(s("Automatisch (System)", "Automatic (system)"))
+        .id("theme-auto")
+        .build(app)?;
+    let theme_light = MenuItemBuilder::new(s("Hell", "Light"))
+        .id("theme-light")
+        .build(app)?;
+    let theme_dark = MenuItemBuilder::new(s("Dunkel", "Dark"))
+        .id("theme-dark")
+        .build(app)?;
+
+    let view_menu = SubmenuBuilder::new(app, s("Ansicht", "View"))
+        .item(&theme_auto)
+        .item(&theme_light)
+        .item(&theme_dark)
+        .build()?;
+
+    let lang_auto = MenuItemBuilder::new("Automatisch (System) / Automatic (system)")
+        .id("lang-auto")
+        .build(app)?;
+    let lang_de = MenuItemBuilder::new("Deutsch").id("lang-de").build(app)?;
+    let lang_en = MenuItemBuilder::new("English").id("lang-en").build(app)?;
+
+    let lang_menu = SubmenuBuilder::new(app, "Sprache / Language")
+        .item(&lang_auto)
+        .item(&lang_de)
+        .item(&lang_en)
+        .build()?;
+
+    let new_window_item = MenuItemBuilder::new(s("Neues Fenster", "New Window"))
+        .id("new-window")
+        .accelerator("CmdOrCtrl+N")
+        .build(app)?;
+    let minimize_item = PredefinedMenuItem::minimize(app, Some(s("Im Dock ablegen", "Minimize")))?;
+    let maximize_item = PredefinedMenuItem::maximize(app, Some(s("Zoomen", "Zoom")))?;
+    let close_item = PredefinedMenuItem::close_window(app, Some(s("Fenster schließen", "Close Window")))?;
+
+    let window_menu = SubmenuBuilder::new(app, s("Fenster", "Window"))
+        .item(&new_window_item)
+        .separator()
+        .item(&minimize_item)
+        .item(&maximize_item)
+        .separator()
+        .item(&close_item)
+        .build()?;
+
+    let help_item = MenuItemBuilder::new(s("DualBeam-Hilfe", "DualBeam Help"))
+        .id("help")
+        .build(app)?;
+    let help_menu = SubmenuBuilder::new(app, s("Hilfe", "Help"))
+        .item(&help_item)
+        .build()?;
+
+    let menu = MenuBuilder::new(app)
+        .item(&app_menu)
+        .item(&view_menu)
+        .item(&lang_menu)
+        .item(&window_menu)
+        .item(&help_menu)
+        .build()?;
+    app.set_menu(menu)?;
+
+    // Dock-Menü-Titel in der aktuellen Sprache setzen.
+    promise_drag::install_dock_menu(s("Neues Fenster", "New Window"));
+    Ok(())
+}
+
+/// Vom Frontend aufgerufen, wenn sich die Sprache ändert — baut das native
+/// macOS-Menü in der neuen Sprache neu auf.
+#[tauri::command]
+fn set_menu_language(app: tauri::AppHandle, lang: String) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        let resolved = if lang == "de" || lang == "en" {
+            lang
+        } else {
+            detect_menu_lang()
+        };
+        build_and_set_menu(&app, &resolved).map_err(|e| e.to_string())?;
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (app, lang);
+    }
+    Ok(())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -2475,101 +2810,19 @@ pub fn run() {
             promise_drag::init(app.handle());
             #[cfg(target_os = "macos")]
             {
-                use tauri::menu::{AboutMetadataBuilder, MenuBuilder, MenuItemBuilder, SubmenuBuilder};
                 use tauri::Emitter;
 
-                let about_meta = AboutMetadataBuilder::new()
-                    .name(Some("DualBeam"))
-                    .version(Some(env!("CARGO_PKG_VERSION").to_string()))
-                    .copyright(Some("Copyright © 2026 N.J. — MIT License"))
-                    .authors(Some(vec!["N.J.".to_string()]))
-                    .license(Some("MIT"))
-                    .comments(Some("Erstellt mit Claude Opus / Built with Claude Opus"))
-                    .build();
-
-                let app_menu = SubmenuBuilder::new(app, "DualBeam")
-                    .about(Some(about_meta))
-                    .separator()
-                    .hide()
-                    .separator()
-                    .quit()
-                    .build()?;
-
-                let edit_menu = SubmenuBuilder::new(app, "Bearbeiten")
-                    .cut()
-                    .copy()
-                    .paste()
-                    .select_all()
-                    .build()?;
-
-                let theme_auto = MenuItemBuilder::new("Automatisch (System)")
-                    .id("theme-auto")
-                    .build(app)?;
-                let theme_light = MenuItemBuilder::new("Hell")
-                    .id("theme-light")
-                    .build(app)?;
-                let theme_dark = MenuItemBuilder::new("Dunkel")
-                    .id("theme-dark")
-                    .build(app)?;
-
-                let view_menu = SubmenuBuilder::new(app, "Ansicht")
-                    .item(&theme_auto)
-                    .item(&theme_light)
-                    .item(&theme_dark)
-                    .build()?;
-
-                let lang_auto = MenuItemBuilder::new("Automatisch (System) / Automatic (system)")
-                    .id("lang-auto")
-                    .build(app)?;
-                let lang_de = MenuItemBuilder::new("Deutsch")
-                    .id("lang-de")
-                    .build(app)?;
-                let lang_en = MenuItemBuilder::new("English")
-                    .id("lang-en")
-                    .build(app)?;
-
-                let lang_menu = SubmenuBuilder::new(app, "Sprache / Language")
-                    .item(&lang_auto)
-                    .item(&lang_de)
-                    .item(&lang_en)
-                    .build()?;
-
-                let new_window_item = MenuItemBuilder::new("Neues Fenster")
-                    .id("new-window")
-                    .accelerator("CmdOrCtrl+N")
-                    .build(app)?;
-
-                let window_menu = SubmenuBuilder::new(app, "Fenster")
-                    .item(&new_window_item)
-                    .separator()
-                    .minimize()
-                    .maximize()
-                    .separator()
-                    .close_window()
-                    .build()?;
-
-                let menu = MenuBuilder::new(app)
-                    .item(&app_menu)
-                    .item(&edit_menu)
-                    .item(&view_menu)
-                    .item(&lang_menu)
-                    .item(&window_menu)
-                    .build()?;
-                app.set_menu(menu)?;
-
-                // macOS injiziert automatisch Text-Service-Einträge (AutoFill,
-                // Writing Tools, Emoji & Symbole, Diktat …) ins Bearbeiten-Menü.
-                // Diese hier entfernen, nur Standard-Befehle behalten.
-                promise_drag::clean_edit_menu();
-
-                // Dock-Menü (Rechtsklick aufs Dock-Symbol) mit „Neues Fenster",
-                // analog zum Finder.
-                promise_drag::install_dock_menu("Neues Fenster");
+                let lang = detect_menu_lang();
+                build_and_set_menu(app.handle(), &lang)?;
 
                 app.on_menu_event(move |app_handle, event| {
                     let id = event.id().as_ref();
                     if id == "new-window" {
                         open_new_window(app_handle);
+                        return;
+                    }
+                    if id == "help" {
+                        let _ = app_handle.emit("dualbeam://help", ());
                         return;
                     }
                     let theme = match id {
@@ -2611,6 +2864,10 @@ pub fn run() {
             list_volumes,
             list_network_bookmarks,
             mount_network_url,
+            app_version,
+            check_update,
+            download_and_open_update,
+            set_menu_language,
             eject_volume,
             mount_dmg,
             find_dmg_mount,

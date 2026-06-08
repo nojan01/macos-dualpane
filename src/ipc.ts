@@ -69,6 +69,30 @@ export async function mountNetworkUrl(url: string): Promise<string> {
   return invoke<string>("mount_network_url", { url });
 }
 
+export async function appVersion(): Promise<string> {
+  return invoke<string>("app_version");
+}
+
+export type UpdateInfo = {
+  current: string;
+  latest: string;
+  updateAvailable: boolean;
+  url: string;
+  assetUrl: string;
+};
+
+export async function checkUpdate(): Promise<UpdateInfo> {
+  return invoke<UpdateInfo>("check_update");
+}
+
+export async function downloadAndOpenUpdate(url: string): Promise<string> {
+  return invoke<string>("download_and_open_update", { url });
+}
+
+export async function setMenuLanguage(lang: string): Promise<void> {
+  return invoke<void>("set_menu_language", { lang });
+}
+
 export async function mountDmg(path: string): Promise<string> {
   return invoke<string>("mount_dmg", { path });
 }
