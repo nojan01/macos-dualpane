@@ -356,6 +356,9 @@ export const de: Record<string, string> = {
   "err.path.invalidChar": "Ungültiges Zeichen im Pfad/Namen.",
   "err.path.forbidden": "Unerlaubter Pfad: {0}",
   "err.mount.failed": "Verbinden fehlgeschlagen.",
+  "err.mount.notWebdav": "Verbinden fehlgeschlagen. Unter http(s):// kann macOS nur WebDAV-Server einhängen — ein gewöhnlicher Webserver lässt sich nicht als Laufwerk verbinden.",
+  "err.mount.ftp": "Verbinden fehlgeschlagen. FTP wird vom Finder nur eingeschränkt unterstützt und lässt sich nicht als beschreibbares Laufwerk einhängen. Nutze SMB oder WebDAV.",
+  "err.mount.unreachable": "Server nicht erreichbar. Adresse, Port und Netzwerkverbindung prüfen. Hinweis: NFS fragt kein Passwort ab — der Zugriff wird über die Export-/Freigabeliste des Servers geregelt.",
   "err.eject.failed": "Aushängen fehlgeschlagen: {0}",
   "err.update.failed": "Update-Prüfung fehlgeschlagen.",
 };

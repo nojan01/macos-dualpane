@@ -589,6 +589,8 @@ async fn mount_network_url(url: String) -> Result<String, String> {
         "tell application \"Finder\" to activate\nmount volume \"{}\"",
         url
     );
+    let is_web = lower.starts_with("http://") || lower.starts_with("https://");
+    let is_ftp = lower.starts_with("ftp://") || lower.starts_with("ftps://");
     tauri::async_runtime::spawn_blocking(move || -> Result<String, String> {
         let out = std::process::Command::new("osascript")
             .arg("-e")
@@ -597,6 +599,22 @@ async fn mount_network_url(url: String) -> Result<String, String> {
             .map_err(|e| format!("osascript: {}", e))?;
         if !out.status.success() {
             let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
+            // Finder-Fehler in verständliche Codes übersetzen.
+            // -3014: Ressource kann nicht eingehängt werden (kein mountbares
+            // Dateisystem) — bei http(s) meist „kein WebDAV-Server".
+            if err.contains("-3014") {
+                if is_web {
+                    return Err("err.mount.notWebdav".into());
+                }
+                if is_ftp {
+                    return Err("err.mount.ftp".into());
+                }
+                return Err("err.mount.unreachable".into());
+            }
+            // -1409 / „nicht gefunden" o. ä.: Server nicht erreichbar.
+            if err.contains("-1409") || err.contains("NSURLErrorDomain") {
+                return Err("err.mount.unreachable".into());
+            }
             return Err(if err.is_empty() { "err.mount.failed".into() } else { err });
         }
         Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())

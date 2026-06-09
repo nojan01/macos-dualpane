@@ -356,6 +356,9 @@ export const en: Record<string, string> = {
   "err.path.invalidChar": "Invalid character in path/name.",
   "err.path.forbidden": "Forbidden path: {0}",
   "err.mount.failed": "Connection failed.",
+  "err.mount.notWebdav": "Connection failed. Over http(s):// macOS can only mount WebDAV servers — a plain web server cannot be mounted as a drive.",
+  "err.mount.ftp": "Connection failed. FTP has limited Finder support and cannot be mounted as a writable drive. Use SMB or WebDAV instead.",
+  "err.mount.unreachable": "Server unreachable. Check the address, port and network connection. Note: NFS does not prompt for a password — access is governed by the server's export/share list.",
   "err.eject.failed": "Eject failed: {0}",
   "err.update.failed": "Update check failed.",
 };
