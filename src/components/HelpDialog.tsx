@@ -68,6 +68,19 @@ const CONTENT: Record<"de" | "en", { title: string; sections: Section[] }> = {
           { term: "http:// · https:// (WebDAV)", desc: "WebDAV-Freigaben (z. B. Nextcloud, HiDrive, ownCloud). https:// ist verschlüsselt und empfohlen. Beispiel: https://server/webdav." },
         ],
       },
+      {
+        title: "Anmeldedaten & Schlüsselbund",
+        intro:
+          "Das Verbinden übernimmt macOS (Finder), nicht DualBeam. Daraus ergeben sich einige Eigenheiten:",
+        items: [
+          { term: "Passwortabfrage", desc: "Hast du beim ersten Verbinden „Passwort sichern“ aktiviert, liegt es im macOS-Schlüsselbund. macOS mountet dann ohne erneute Passwortabfrage – das ist normal und kein Fehler von DualBeam." },
+          { term: "Dialog „webdavfs_agent…“", desc: "Dieser Schlüsselbund-Dialog stammt von macOS. Er fragt nicht nach deinem HiDrive-Passwort, sondern ob der System-Dienst das gespeicherte Passwort lesen darf." },
+          { term: "Mountet trotz „Nicht erlauben“", desc: "Wenn der Schlüsselbund-Eintrag „immer erlauben“ für webdavfs_agent gesetzt ist, greift macOS direkt zu und hängt das Volume parallel ein. Das ist macOS-Verhalten, kein DualBeam-Bug." },
+          { term: "Wieder nachfragen lassen", desc: "In der Schlüsselbundverwaltung den Eintrag des Servers öffnen → Reiter „Zugriff“ → webdavfs_agent entfernen bzw. auf „nachfragen“ stellen. Oder den gespeicherten Eintrag löschen, damit macOS beim nächsten Mount neu nach dem Passwort fragt." },
+          { term: "Nachfragen abschalten", desc: "Den ständigen Dialog stoppst du in der Schlüsselbundverwaltung: Eintrag des Servers doppelklicken → Reiter „Zugriff“ → entweder „Allen Programmen Zugriff erlauben“ wählen oder sicherstellen, dass webdavfs_agent in der Liste steht und auf „immer erlauben“ steht → „Änderungen sichern“. Kommt der Dialog trotzdem, gibt es oft einen doppelten/alten Eintrag für denselben Host – diesen löschen." },
+          { term: "NFS", desc: "NFS kennt keine Passwortabfrage – der Zugriff wird über die Export-/Freigabeliste des Servers (Host/IP) geregelt." },
+        ],
+      },
     ],
   },
   en: {
@@ -117,6 +130,19 @@ const CONTENT: Record<"de" | "en", { title: string; sections: Section[] }> = {
           { term: "nfs://", desc: "Network File System – common in Unix/Linux environments. Example: nfs://server/export." },
           { term: "ftp:// · ftps://", desc: "File Transfer Protocol, ftps:// adds TLS encryption. Example: ftps://server/path." },
           { term: "http:// · https:// (WebDAV)", desc: "WebDAV shares (e.g. Nextcloud, HiDrive, ownCloud). https:// is encrypted and recommended. Example: https://server/webdav." },
+        ],
+      },
+      {
+        title: "Credentials & Keychain",
+        intro:
+          "Mounting is handled by macOS (Finder), not by DualBeam. This leads to a few quirks:",
+        items: [
+          { term: "Password prompt", desc: "If you ticked “Save password” on first connect, it is stored in the macOS Keychain. macOS then mounts without asking again – this is normal and not a DualBeam bug." },
+          { term: "“webdavfs_agent…” dialog", desc: "This Keychain dialog comes from macOS. It does not ask for your HiDrive password, but whether the system service may read the stored password." },
+          { term: "Mounts despite “Deny”", desc: "If the Keychain entry has “always allow” set for webdavfs_agent, macOS reads it directly and mounts the volume in parallel. That is macOS behaviour, not a DualBeam bug." },
+          { term: "Make it ask again", desc: "In Keychain Access open the server’s entry → “Access Control” tab → remove webdavfs_agent or set it to “ask”. Or delete the stored entry so macOS prompts for the password on the next mount." },
+          { term: "Stop the prompt", desc: "To stop the recurring dialog, open Keychain Access: double-click the server’s entry → “Access Control” tab → either choose “Allow all applications to access this item” or make sure webdavfs_agent is in the list and set to “always allow” → “Save Changes”. If the dialog still appears, there is often a duplicate/old entry for the same host – delete it." },
+          { term: "NFS", desc: "NFS has no password prompt – access is governed by the server’s export/share list (host/IP)." },
         ],
       },
     ],
