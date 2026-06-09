@@ -12,7 +12,7 @@ import {
   type Favorite,
   type NetworkBookmark,
 } from "../ipc";
-import { askConfirm } from "./Dialogs";
+import { askConfirm, notify, notifyError } from "./Dialogs";
 import { connectToServer } from "../network";
 import { t, errMsg } from "../i18n";
 
@@ -122,13 +122,18 @@ export function Sidebar() {
       await saveFavorites(next);
     } catch (err) {
       console.error("saveFavorites:", err);
+      await notifyError(t("sidebar.addFailed"));
     }
   }
 
   async function addCurrent() {
     const cwd = state[state.active].cwd;
+    if (!cwd) return;
     const name = basename(cwd) || cwd;
-    if (favs().some((f) => f.path === cwd)) return;
+    if (favs().some((f) => f.path === cwd)) {
+      await notify({ title: t("sidebar.favorites"), message: t("sidebar.alreadyFav", { name }) });
+      return;
+    }
     await persist([...favs(), { name, icon: "📁", path: cwd }]);
   }
 

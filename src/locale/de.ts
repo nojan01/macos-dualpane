@@ -201,6 +201,8 @@ export const de: Record<string, string> = {
   // Sidebar
   "sidebar.favorites": "Favoriten",
   "sidebar.addCurrent": "Aktuellen Ordner hinzufügen",
+  "sidebar.alreadyFav": "„{name}“ ist bereits ein Favorit.",
+  "sidebar.addFailed": "Favorit konnte nicht gespeichert werden.",
   "sidebar.renameFav": "Favorit umbenennen",
   "sidebar.volumes": "Volumes",
   "sidebar.network": "Netzwerk",

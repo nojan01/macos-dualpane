@@ -201,6 +201,8 @@ export const en: Record<string, string> = {
   // Sidebar
   "sidebar.favorites": "Favorites",
   "sidebar.addCurrent": "Add current folder",
+  "sidebar.alreadyFav": "“{name}” is already a favorite.",
+  "sidebar.addFailed": "Could not save favorite.",
   "sidebar.renameFav": "Rename favorite",
   "sidebar.volumes": "Volumes",
   "sidebar.network": "Network",
