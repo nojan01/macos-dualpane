@@ -349,12 +349,74 @@ fn rename_path(old_path: String, new_path: String) -> Result<(), String> {
     std::fs::rename(&a, &b).map_err(|e| e.to_string())
 }
 
+/// Mountpoints registrierter Time-Machine-Ziele (canonicalize'd) für schnelle
+/// Präfix-Vergleiche. `tmutil destinationinfo` wird dabei nur einmal aufgerufen.
+fn tm_mountpoints_canon() -> Vec<std::path::PathBuf> {
+    get_tm_mountpoints()
+        .into_iter()
+        .map(|m| std::fs::canonicalize(&m).unwrap_or_else(|_| std::path::PathBuf::from(m)))
+        .collect()
+}
+
+/// Erkennt, ob ein Pfad zu einem Time-Machine-Backup gehört. Bewusst eng
+/// gefasst, um normale Nutzerdateien (z.B. `notiz.backup`) nicht zu blockieren.
+fn is_time_machine_path(full: &Path, tm_mounts: &[std::path::PathBuf]) -> bool {
+    // 1) Innerhalb eines registrierten Time-Machine-Ziel-Volumes.
+    let canon = std::fs::canonicalize(full).ok();
+    let target = canon.as_deref().unwrap_or(full);
+    for mp in tm_mounts {
+        if target == mp.as_path() || target.starts_with(mp) {
+            return true;
+        }
+    }
+    // 2) Eindeutige Time-Machine-Pfadbestandteile bzw. -Endungen.
+    for comp in full.components() {
+        if let std::path::Component::Normal(os) = comp {
+            let s = os.to_string_lossy();
+            if s.eq_ignore_ascii_case("Backups.backupdb")
+                || s == ".timemachine"
+                || s == ".MobileBackups"
+            {
+                return true;
+            }
+            if s.ends_with(".backupbundle")
+                || s.ends_with(".inprogress")
+                || s.ends_with(".previous")
+                || s.ends_with(".interrupted")
+            {
+                return true;
+            }
+        }
+    }
+    // 3) Ein übergeordnetes Verzeichnis ist eine TM-Backup-Wurzel (greift auch
+    //    bei ehemaligen, nicht mehr registrierten Backup-Volumes).
+    let mut cur: Option<&Path> = Some(full);
+    let mut depth = 0u32;
+    while let Some(p) = cur {
+        if depth > 64 {
+            break;
+        }
+        if p.join("backup_manifest.plist").is_file() || p.join("Backups.backupdb").is_dir() {
+            return true;
+        }
+        cur = p.parent();
+        depth += 1;
+    }
+    false
+}
+
 #[tauri::command]
 fn move_to_trash(paths: Vec<String>) -> Result<(), String> {
     use std::os::macos::fs::MetadataExt;
     const PROTECT_MASK: u32 = 0x0002 | 0x0004 | 0x00020000 | 0x00040000 | 0x00080000 | 0x00100000;
+    let tm_mounts = tm_mountpoints_canon();
     for p in &paths {
         let full = expand_tilde(p);
+        // Time-Machine-Backups dürfen nicht über das normale Panel gelöscht
+        // werden – das Frontend zeigt dafür einen Hinweis statt Admin-Löschen.
+        if is_time_machine_path(&full, &tm_mounts) {
+            return Err(format!("TIMEMACHINE_PROTECTED\u{1f}{}", full.display()));
+        }
         // Symlinks: das `trash`-Crate folgt auf macOS teilweise dem Ziel
         // und scheitert dann bei fehlenden Rechten am Zielpfad oder bei
         // kaputten Links. Symlinks daher direkt entfernen (nur der Link,

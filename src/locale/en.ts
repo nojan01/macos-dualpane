@@ -288,6 +288,9 @@ export const en: Record<string, string> = {
   "jobs.trash.forceAdmin": "Move to Trash failed:\n{msg}\n\nPermanently delete as administrator?",
   "jobs.trash.protectedAdmin": "\"{name}\" is protected and cannot be moved to the Trash.\n\nPermanently delete as administrator?",
   "jobs.trash.deleteAsAdmin": "Delete as admin",
+  "jobs.trash.timeMachine.title": "Time Machine",
+  "jobs.trash.timeMachine.message":
+    "Time Machine backups can't be deleted here.\n\nUse the Time Machine manager in the toolbar to remove backups.",
   "jobs.extractFailed": "Extraction failed: {msg}",
   "jobs.zipFailed": "ZIP creation failed: {msg}",
 

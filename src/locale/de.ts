@@ -288,6 +288,9 @@ export const de: Record<string, string> = {
   "jobs.trash.forceAdmin": "Papierkorb-Verschieben fehlgeschlagen:\n{msg}\n\nEndgültig als Administrator löschen?",
   "jobs.trash.protectedAdmin": "\"{name}\" ist geschützt und kann nicht in den Papierkorb verschoben werden.\n\nEndgültig als Administrator löschen?",
   "jobs.trash.deleteAsAdmin": "Als Admin löschen",
+  "jobs.trash.timeMachine.title": "Time Machine",
+  "jobs.trash.timeMachine.message":
+    "Time-Machine-Backups können hier nicht gelöscht werden.\n\nNutze die Time-Machine-Verwaltung in der Symbolleiste, um Backups zu entfernen.",
   "jobs.extractFailed": "Entpacken fehlgeschlagen: {msg}",
   "jobs.zipFailed": "ZIP-Erstellung fehlgeschlagen: {msg}",
 
