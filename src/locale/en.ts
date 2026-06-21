@@ -290,7 +290,7 @@ export const en: Record<string, string> = {
   "jobs.trash.deleteAsAdmin": "Delete as admin",
   "jobs.trash.timeMachine.title": "Time Machine",
   "jobs.trash.timeMachine.message":
-    "Time Machine backups can't be deleted here.\n\nUse the Time Machine manager in the toolbar to remove backups.",
+    "Time Machine backups are protected by macOS and can't be deleted in this app.\n\nUse the macOS Time Machine app or Disk Utility instead.",
   "jobs.extractFailed": "Extraction failed: {msg}",
   "jobs.zipFailed": "ZIP creation failed: {msg}",
 

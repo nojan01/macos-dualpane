@@ -290,7 +290,7 @@ export const de: Record<string, string> = {
   "jobs.trash.deleteAsAdmin": "Als Admin löschen",
   "jobs.trash.timeMachine.title": "Time Machine",
   "jobs.trash.timeMachine.message":
-    "Time-Machine-Backups können hier nicht gelöscht werden.\n\nNutze die Time-Machine-Verwaltung in der Symbolleiste, um Backups zu entfernen.",
+    "Time-Machine-Backups sind durch macOS geschützt und können in dieser App nicht gelöscht werden.\n\nVerwende dafür die macOS-App „Time Machine“ oder das Festplattendienstprogramm.",
   "jobs.extractFailed": "Entpacken fehlgeschlagen: {msg}",
   "jobs.zipFailed": "ZIP-Erstellung fehlgeschlagen: {msg}",
 
