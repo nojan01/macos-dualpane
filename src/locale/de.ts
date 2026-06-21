@@ -294,28 +294,6 @@ export const de: Record<string, string> = {
   "jobs.extractFailed": "Entpacken fehlgeschlagen: {msg}",
   "jobs.zipFailed": "ZIP-Erstellung fehlgeschlagen: {msg}",
 
-  // Time Machine
-  "toolbar.timeMachine": "Time-Machine-Backups verwalten",
-  "tm.title": "Time Machine",
-  "tm.tabBackups": "Backups",
-  "tm.tabSnapshots": "Lokale Snapshots",
-  "tm.destination": "Ziel",
-  "tm.noDestinations": "Keine Time-Machine-Ziele gefunden.",
-  "tm.noBackups": "Keine Backups gefunden.",
-  "tm.noSnapshots": "Keine lokalen Snapshots gefunden.",
-  "tm.refresh": "Aktualisieren",
-  "tm.hint": "Hinweis: Backups werden im Hintergrund über Terminal.app gelöscht (Terminal.app hat Vollzugriff auf Festplatte). Das Passwort wird einmal pro Sitzung in DualBeam abgefragt. Lokale Snapshots werden ohne Admin gelöscht.",
-  "tm.pwPrompt": "Admin-Passwort eingeben, um dieses Backup zu löschen:",
-  "tm.pwPlaceholder": "Passwort",
-  "tm.wipeVolume": "Datenträger löschen",
-  "tm.wipeHint": "Volume neu anlegen (APFS) — entfernt alle Backups und TM-Schutzmarker. Admin-Rechte nötig.",
-  "tm.wipeConfirm": "ACHTUNG: Volume {mount} wird komplett geleert (APFS-Volume wird neu angelegt). Alle Backups und Daten gehen unwiderruflich verloren. Fortfahren?",
-  "tm.wipeTarget": "Ziel-Volume",
-  "tm.noVolumes": "Keine gemounteten Volumes gefunden.",
-  "tm.wipeConfirmBtn": "Wirklich löschen?",
-  "tm.kindActive": "aktives TM-Ziel",
-  "tm.kindFormer": "ehemaliges TM-Ziel",
-
   // Sync (sync.ts / SyncDialog)
   "sync.title": "Verzeichnis synchronisieren",
   "sync.summary": "\"{name}\" einweg in den anderen Pane synchronisieren.",

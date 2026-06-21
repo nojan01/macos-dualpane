@@ -294,28 +294,6 @@ export const en: Record<string, string> = {
   "jobs.extractFailed": "Extraction failed: {msg}",
   "jobs.zipFailed": "ZIP creation failed: {msg}",
 
-  // Time Machine
-  "toolbar.timeMachine": "Manage Time Machine backups",
-  "tm.title": "Time Machine",
-  "tm.tabBackups": "Backups",
-  "tm.tabSnapshots": "Local snapshots",
-  "tm.destination": "Destination",
-  "tm.noDestinations": "No Time Machine destinations found.",
-  "tm.noBackups": "No backups found.",
-  "tm.noSnapshots": "No local snapshots found.",
-  "tm.refresh": "Refresh",
-  "tm.hint": "Note: Backups are deleted in the background via Terminal.app (which has Full Disk Access). Password is prompted once per session in DualBeam. Local snapshots are removed without admin.",
-  "tm.pwPrompt": "Enter admin password to delete this backup:",
-  "tm.pwPlaceholder": "Password",
-  "tm.wipeVolume": "Wipe volume",
-  "tm.wipeHint": "Re-create APFS volume — removes all backups and TM protection markers. Admin required.",
-  "tm.wipeConfirm": "WARNING: Volume {mount} will be wiped (APFS volume will be re-created). All backups and data will be lost permanently. Continue?",
-  "tm.wipeTarget": "Target volume",
-  "tm.noVolumes": "No mounted volumes found.",
-  "tm.wipeConfirmBtn": "Click again to confirm",
-  "tm.kindActive": "active TM destination",
-  "tm.kindFormer": "former TM destination",
-
   // Sync (sync.ts / SyncDialog)
   "sync.title": "Synchronize folder",
   "sync.summary": "Synchronize \"{name}\" one-way into the other pane.",
