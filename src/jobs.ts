@@ -1,7 +1,7 @@
 // Orchestriert Datei-Operationen: Konfliktprüfung, Job-Lauf, Refresh.
 import { createSignal } from "solid-js";
 import { state, setState, refreshPane, loadPane } from "./state";
-import { askPrompt, askConfirm, notifyError } from "./components/Dialogs";
+import { askPrompt, askConfirm, notify, notifyError } from "./components/Dialogs";
 import type { Entry, PaneId } from "./types";
 import { t, errMsg } from "./i18n";
 import { joinPath, splitName, uniqueName } from "./paths";
@@ -216,6 +216,14 @@ export async function deleteSelected(skipConfirm = false) {
     await moveToTrash(sel.map((e) => e.path));
   } catch (e) {
     const raw = errMsg(e);
+    if (raw.includes("TIMEMACHINE_PROTECTED")) {
+      await notify({
+        title: t("jobs.trash.timeMachine.title"),
+        message: t("jobs.trash.timeMachine.message"),
+      });
+      await refreshPane(pane);
+      return;
+    }
     const isProtected = raw.includes("NEEDS_ADMIN");
     const retry = await askConfirm({
       title: t("jobs.trash.title"),
