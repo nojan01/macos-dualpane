@@ -1227,16 +1227,51 @@ fn copy_file_with_metadata(src: &Path, dst: &Path) -> std::io::Result<()> {
     const COPYFILE_XATTR: u32 = 1 << 2;
     const COPYFILE_DATA: u32 = 1 << 3;
     const COPYFILE_ALL: u32 = COPYFILE_ACL | COPYFILE_STAT | COPYFILE_XATTR | COPYFILE_DATA;
+
     let s = CString::new(src.as_os_str().as_bytes())
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
     let d = CString::new(dst.as_os_str().as_bytes())
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
-    let ret = unsafe { copyfile(s.as_ptr(), d.as_ptr(), std::ptr::null_mut(), COPYFILE_ALL) };
-    if ret != 0 {
-        Err(std::io::Error::last_os_error())
-    } else {
-        Ok(())
+
+    let call = |flags: u32| -> std::io::Result<()> {
+        let ret = unsafe { copyfile(s.as_ptr(), d.as_ptr(), std::ptr::null_mut(), flags) };
+        if ret != 0 {
+            Err(std::io::Error::last_os_error())
+        } else {
+            Ok(())
+        }
+    };
+
+    // Manche Dateisysteme (z. B. WebDAV, FAT, SMB) unterstützen keine ACLs
+    // oder erweiterten Attribute und liefern dann ENOTSUP/EOPNOTSUPP
+    // (os error 45). In dem Fall degradieren wir schrittweise: erst ACL/xattr
+    // weglassen (nur Daten + Zeitstempel/Rechte), zuletzt reine Datenkopie.
+    // Andere Fehler (z. B. Zugriff verweigert) werden sofort weitergereicht.
+    let is_unsupported = |e: &std::io::Error| -> bool {
+        matches!(
+            e.raw_os_error(),
+            Some(libc::ENOTSUP) | Some(libc::EOPNOTSUPP)
+        )
+    };
+
+    match call(COPYFILE_ALL) {
+        Ok(()) => return Ok(()),
+        Err(e) if is_unsupported(&e) => {}
+        Err(e) => return Err(e),
     }
+
+    // Bei erneutem Versuch eine ggf. teilweise erzeugte Zieldatei entfernen,
+    // damit copyfile frisch schreiben kann.
+    let _ = std::fs::remove_file(dst);
+    match call(COPYFILE_DATA | COPYFILE_STAT) {
+        Ok(()) => return Ok(()),
+        Err(e) if is_unsupported(&e) => {}
+        Err(e) => return Err(e),
+    }
+
+    // Letzter Fallback: reine Datenkopie (kopiert auch die Rechte-Bits).
+    let _ = std::fs::remove_file(dst);
+    std::fs::copy(src, dst).map(|_| ())
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -2438,4 +2473,115 @@ pub fn run() {
                 }
             }
         });
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod copy_tests {
+    use super::copy_file_with_metadata;
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+    use std::path::PathBuf;
+
+    extern "C" {
+        fn setxattr(
+            path: *const libc::c_char,
+            name: *const libc::c_char,
+            value: *const libc::c_void,
+            size: libc::size_t,
+            position: u32,
+            options: libc::c_int,
+        ) -> libc::c_int;
+        fn getxattr(
+            path: *const libc::c_char,
+            name: *const libc::c_char,
+            value: *mut libc::c_void,
+            size: libc::size_t,
+            position: u32,
+            options: libc::c_int,
+        ) -> libc::ssize_t;
+    }
+
+    fn tmp_path(name: &str) -> PathBuf {
+        let mut p = std::env::temp_dir();
+        let uniq = format!(
+            "dualbeam_copytest_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        p.push(uniq);
+        std::fs::create_dir_all(&p).unwrap();
+        p.push(name);
+        p
+    }
+
+    #[test]
+    fn copies_data_and_preserves_xattr() {
+        let src = tmp_path("src.bin");
+        let dst = {
+            let mut d = src.clone();
+            d.set_file_name("dst.bin");
+            d
+        };
+        let payload = b"hello dualbeam sync";
+        std::fs::write(&src, payload).unwrap();
+
+        // Ein erweitertes Attribut auf die Quelle setzen.
+        let cpath = CString::new(src.as_os_str().as_bytes()).unwrap();
+        let xname = CString::new("com.dualbeam.test").unwrap();
+        let xval = b"marker";
+        let rc = unsafe {
+            setxattr(
+                cpath.as_ptr(),
+                xname.as_ptr(),
+                xval.as_ptr() as *const libc::c_void,
+                xval.len(),
+                0,
+                0,
+            )
+        };
+        assert_eq!(rc, 0, "setxattr auf Quelle fehlgeschlagen");
+
+        copy_file_with_metadata(&src, &dst).expect("copy sollte gelingen");
+
+        // Daten identisch?
+        assert_eq!(std::fs::read(&dst).unwrap(), payload);
+
+        // xattr auf dem Ziel vorhanden (COPYFILE_ALL-Pfad)?
+        let dpath = CString::new(dst.as_os_str().as_bytes()).unwrap();
+        let mut buf = [0u8; 32];
+        let n = unsafe {
+            getxattr(
+                dpath.as_ptr(),
+                xname.as_ptr(),
+                buf.as_mut_ptr() as *mut libc::c_void,
+                buf.len(),
+                0,
+                0,
+            )
+        };
+        assert!(n > 0, "xattr wurde nicht auf das Ziel kopiert");
+        assert_eq!(&buf[..n as usize], xval);
+
+        let _ = std::fs::remove_dir_all(src.parent().unwrap());
+    }
+
+    #[test]
+    fn overwrites_existing_destination() {
+        let src = tmp_path("src2.bin");
+        let dst = {
+            let mut d = src.clone();
+            d.set_file_name("dst2.bin");
+            d
+        };
+        std::fs::write(&src, b"neuer Inhalt").unwrap();
+        std::fs::write(&dst, b"alter, laengerer Inhalt der ueberschrieben wird").unwrap();
+
+        copy_file_with_metadata(&src, &dst).expect("copy sollte bestehende Datei ersetzen");
+        assert_eq!(std::fs::read(&dst).unwrap(), b"neuer Inhalt");
+
+        let _ = std::fs::remove_dir_all(src.parent().unwrap());
+    }
 }
