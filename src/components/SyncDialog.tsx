@@ -1,9 +1,16 @@
-import { Show, createMemo } from "solid-js";
+import { Show, For, createMemo } from "solid-js";
 import {
   syncDialog, syncEntries, syncDeleteExtra, syncLoading,
   setSyncDelete, cancelSync, confirmSync,
 } from "../sync";
+import type { SyncAction } from "../ipc";
 import { t } from "../i18n";
+
+const ACTION_LABEL: Record<SyncAction, string> = {
+  copy: "sync.actionNew",
+  update: "sync.actionChanged",
+  delete: "sync.actionDelete",
+};
 
 export function SyncDialog() {
   const counts = createMemo(() => {
@@ -37,6 +44,21 @@ export function SyncDialog() {
                 </ul>
                 <Show when={counts().copy + counts().update + counts().del === 0}>
                   <p>{t("sync.upToDate")}</p>
+                </Show>
+                <Show when={syncEntries().length > 0}>
+                  <details class="sync-details">
+                    <summary>{t("sync.details")}</summary>
+                    <ul class="sync-details-list">
+                      <For each={syncEntries()}>
+                        {(e) => (
+                          <li classList={{ danger: e.action === "delete" }}>
+                            <span class="sync-details-badge">{t(ACTION_LABEL[e.action])}</span>
+                            <span class="sync-details-path">{e.rel}</span>
+                          </li>
+                        )}
+                      </For>
+                    </ul>
+                  </details>
                 </Show>
                 <Show when={counts().del > 0}>
                   <p class="danger">{t("sync.extrasPrompt", { count: counts().del })}</p>

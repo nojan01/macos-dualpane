@@ -569,6 +569,43 @@ body.col-resizing * { cursor: col-resize !important; -webkit-user-select: none !
 .modal-list .danger {
   color: #e07a7a;
 }
+.sync-details {
+  margin: 0 0 14px;
+  font-size: 12px;
+  color: var(--text-dim, #bbb);
+}
+.sync-details > summary {
+  cursor: pointer;
+  user-select: none;
+  padding: 2px 0;
+}
+.sync-details-list {
+  list-style: none;
+  margin: 6px 0 0;
+  padding: 0;
+  max-height: 160px;
+  overflow: auto;
+}
+.sync-details-list li {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 2px 0;
+}
+.sync-details-badge {
+  flex: none;
+  min-width: 62px;
+  font-size: 11px;
+  opacity: 0.75;
+}
+.sync-details-path {
+  word-break: break-all;
+  color: #ddd;
+}
+.sync-details-list li.danger .sync-details-path,
+.sync-details-list li.danger .sync-details-badge {
+  color: #e07a7a;
+}
 .modal-actions button {
   background: #4a90e2;
   color: white;

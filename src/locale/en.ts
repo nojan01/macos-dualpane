@@ -311,6 +311,10 @@ export const en: Record<string, string> = {
   "sync.start": "Synchronize",
   "sync.selectFolder": "Please select a single folder to synchronize.",
   "sync.preparing": "Preparing synchronization – this may take a while on network drives…",
+  "sync.details": "Show details",
+  "sync.actionNew": "New",
+  "sync.actionChanged": "Changed",
+  "sync.actionDelete": "Delete",
 
   // Network / Connect to server (⌘K)
   "network.connectServer": "Connect to server…",

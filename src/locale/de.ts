@@ -311,6 +311,10 @@ export const de: Record<string, string> = {
   "sync.start": "Synchronisieren",
   "sync.selectFolder": "Bitte genau einen Ordner zum Synchronisieren auswählen.",
   "sync.preparing": "Synchronisation wird vorbereitet – bei Netzlaufwerken kann das etwas dauern…",
+  "sync.details": "Details anzeigen",
+  "sync.actionNew": "Neu",
+  "sync.actionChanged": "Geändert",
+  "sync.actionDelete": "Löschen",
 
   // Netzwerk / Mit Server verbinden (⌘K)
   "network.connectServer": "Mit Server verbinden…",
