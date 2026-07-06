@@ -1247,10 +1247,20 @@ fn remove_path(p: &Path) -> std::io::Result<()> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
         Err(e) => return Err(e),
     };
-    if meta.is_dir() && !meta.file_type().is_symlink() {
+    let res = if meta.is_dir() && !meta.file_type().is_symlink() {
         std::fs::remove_dir_all(p)
     } else {
         std::fs::remove_file(p)
+    };
+    match res {
+        Ok(()) => Ok(()),
+        // WebDAV/SMB liefern Verzeichnis-Listings aus einem veralteten Cache:
+        // `stat` meldet die Datei noch als vorhanden, das eigentliche Löschen
+        // scheitert dann aber mit ENOENT, weil sie (z. B. über die IONOS
+        // Web-GUI) längst entfernt wurde. Das Ziel „nicht mehr vorhanden" ist
+        // damit erreicht – als Erfolg werten, nicht als Fehler abbrechen.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e),
     }
 }
 
