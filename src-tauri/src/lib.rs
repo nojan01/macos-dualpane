@@ -1685,6 +1685,25 @@ fn file_mtime_secs(meta: &std::fs::Metadata) -> i64 {
         .unwrap_or(0)
 }
 
+/// Aktuelle Wanduhrzeit in Sekunden seit Epoch.
+fn now_secs() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(i64::MAX)
+}
+
+/// Effektive Quell-mtime für den Änderungsvergleich. Ein Zeitstempel in der
+/// Zukunft ist unglaubwürdig (eine Datei kann nicht „in der Zukunft" geändert
+/// worden sein) – z. B. durch fehlerhafte Archiv-Entpackung oder Tools, die
+/// falsche Daten setzen (real beobachtet: `DEPLOYMENT.md` mit Jahr 2076). Ohne
+/// Kappung gilt eine solche Datei bei gleicher Größe bei JEDEM Sync fälschlich
+/// als „geändert", weil das Ziel beim Upload stets das aktuelle Datum erhält
+/// und damit immer „älter" als die Zukunft ist. Daher auf jetzt begrenzen.
+fn effective_src_mtime_secs(meta: &std::fs::Metadata) -> i64 {
+    file_mtime_secs(meta).min(now_secs())
+}
+
 /// Toleranz für den mtime-Vergleich. Netzlaufwerke (WebDAV/HiDrive) und FAT
 /// speichern Änderungszeiten nur grob (FAT: 2s) bzw. setzen beim Upload eine
 /// eigene Zeit. Ohne Toleranz würden gleichnamige Dateien sonst bei jedem
@@ -1821,9 +1840,11 @@ fn preview_compare_file(
                     });
                 }
             } else {
-                // Datei-Vergleich: Größe oder (deutlich) neuere Quelle.
+                // Datei-Vergleich: Größe oder (deutlich) neuere Quelle. Die
+                // Quell-mtime wird auf „jetzt" gekappt, damit zukunftsdatierte
+                // Dateien nicht bei jedem Sync als „geändert" erscheinen.
                 if f.len() != d.len()
-                    || file_mtime_secs(&f) > file_mtime_secs(&d) + MTIME_TOLERANCE_SECS
+                    || effective_src_mtime_secs(&f) > file_mtime_secs(&d) + MTIME_TOLERANCE_SECS
                 {
                     out.push(SyncEntry {
                         rel: rel_str,
