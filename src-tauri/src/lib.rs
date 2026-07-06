@@ -1927,25 +1927,17 @@ fn preview_walk_dst(
         if name == ".DS_Store" {
             continue;
         }
-        // AppleDouble `._X`: gehört zur Datei `X`. Nur als verwaist löschen, wenn
-        // auch `X` in der Quelle fehlt – sonst existiert es nur, weil das
-        // Netzlaufwerk keine nativen xattrs kann, und darf NICHT gelöscht werden.
+        // AppleDouble `._X` sind reine macOS-Metadaten-Sidecars (Ressourcen-Fork/
+        // xattrs zur Datei `X`). Auf Netzlaufwerken ohne native xattrs legt macOS
+        // sie selbst an. Sie werden NIE zum Löschen vorgeschlagen:
+        //  * Existiert `X`, gehört `._X` dazu und darf nicht entfernt werden.
+        //  * Ist `X` (z. B. über die IONOS Web-GUI) gelöscht, bleibt `._X` als
+        //    verwaistes Sidecar auf dem Server. macOS virtualisiert `._X` aber
+        //    über die AppleDouble-Schicht und liefert beim Löschen ENOENT
+        //    (os error 2), sobald der Partner `X` fehlt – der Eintrag ließe sich
+        //    über den Mount gar nicht entfernen und tauchte bei jedem Sync erneut
+        //    als „Zu löschen" auf. Wie `.DS_Store` daher grundsätzlich überspringen.
         if is_apple_double_name(&name) {
-            let partner = &name[2..];
-            let partner_rel = match rel.parent() {
-                Some(par) => par.join(partner),
-                None => std::path::PathBuf::from(partner),
-            };
-            if !src_root.join(&partner_rel).exists() {
-                if let Ok(dmeta) = symlink_metadata_retry(&p) {
-                    out.push(SyncEntry {
-                        rel: rel.to_string_lossy().into_owned(),
-                        action: "delete".into(),
-                        is_dir: false,
-                        size: dmeta.len(),
-                    });
-                }
-            }
             continue;
         }
 
