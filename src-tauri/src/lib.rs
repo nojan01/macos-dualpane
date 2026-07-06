@@ -1335,6 +1335,71 @@ fn is_enotsup(e: &std::io::Error) -> bool {
     )
 }
 
+/// Prüft, ob ein Fehler vorübergehend/transient ist – typisch für langsame
+/// Netzlaufwerke (WebDAV/HiDrive, SMB), die einzelne Operationen mit Timeout
+/// (ETIMEDOUT / macOS „os error 60") oder Verbindungsabbrüchen quittieren.
+/// Solche Fehler können durch einen erneuten Versuch verschwinden.
+#[cfg(unix)]
+fn is_transient(e: &std::io::Error) -> bool {
+    matches!(
+        e.raw_os_error(),
+        Some(libc::ETIMEDOUT)
+            | Some(libc::ECONNRESET)
+            | Some(libc::ECONNABORTED)
+            | Some(libc::EPIPE)
+            | Some(libc::EAGAIN)
+            | Some(libc::ENETRESET)
+            | Some(libc::ENETDOWN)
+            | Some(libc::ENETUNREACH)
+            | Some(libc::EHOSTDOWN)
+            | Some(libc::EHOSTUNREACH)
+            | Some(libc::EINTR)
+    )
+}
+
+#[cfg(not(unix))]
+fn is_transient(_e: &std::io::Error) -> bool {
+    false
+}
+
+/// Kopiert eine Datei und wiederholt den Versuch bei transienten Netzwerk-
+/// fehlern (z. B. os error 60 „Operation timed out" auf HiDrive/WebDAV) mit
+/// exponentiellem Backoff. Bricht sofort ab, wenn der Job abgebrochen wurde
+/// oder ein nicht-transienter Fehler auftritt.
+fn copy_file_retry(src: &Path, dst: &Path, cancel: &AtomicBool) -> std::io::Result<()> {
+    const MAX_ATTEMPTS: u32 = 5;
+    let mut attempt: u32 = 0;
+    loop {
+        match copy_file_with_metadata(src, dst) {
+            Ok(()) => return Ok(()),
+            Err(e) => {
+                attempt += 1;
+                if !is_transient(&e) || attempt >= MAX_ATTEMPTS || cancel.load(Ordering::SeqCst) {
+                    return Err(e);
+                }
+                // Teilweise geschriebene Zieldatei entfernen, damit der nächste
+                // Versuch frisch schreiben kann.
+                let _ = std::fs::remove_file(dst);
+                // Backoff: 0,5s → 1s → 2s → 4s. Abbruchfreundlich in 100ms-Schritten warten.
+                let backoff =
+                    std::time::Duration::from_millis(500u64.saturating_mul(1u64 << (attempt - 1)));
+                let step = std::time::Duration::from_millis(100);
+                let mut waited = std::time::Duration::ZERO;
+                while waited < backoff {
+                    if cancel.load(Ordering::SeqCst) {
+                        return Err(std::io::Error::new(
+                            std::io::ErrorKind::Interrupted,
+                            "cancelled",
+                        ));
+                    }
+                    std::thread::sleep(step);
+                    waited += step;
+                }
+            }
+        }
+    }
+}
+
 fn copy_recursive(
     src: &Path,
     dst: &Path,
@@ -1396,7 +1461,7 @@ fn copy_recursive(
                                 })()
                             } else {
                                 // copyfile folgt dem Symlink und kopiert die Zieldaten.
-                                copy_file_with_metadata(src, dst).map(|_| {
+                                copy_file_retry(src, dst, ctx.cancel).map(|_| {
                                     ctx.done += 1;
                                     ctx.emit(&src.to_string_lossy());
                                 })
@@ -1449,7 +1514,7 @@ fn copy_recursive(
         if let Some(parent) = dst.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        copy_file_with_metadata(src, dst)?;
+        copy_file_retry(src, dst, ctx.cancel)?;
         ctx.done += 1;
         ctx.emit(&src.to_string_lossy());
     }
