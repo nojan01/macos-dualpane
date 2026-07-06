@@ -1934,9 +1934,25 @@ fn preview_walk_dst(
 /// dereferenziert verglichen; transiente Netzwerkfehler werden wiederholt und
 /// führen im Ernstfall zum Abbruch statt zu falschen Zahlen.
 #[tauri::command]
-fn sync_preview(src: String, dst: String, delete_extra: bool) -> Result<Vec<SyncEntry>, String> {
-    let src_root = expand_tilde(&src);
-    let dst_root = expand_tilde(&dst);
+async fn sync_preview(
+    src: String,
+    dst: String,
+    delete_extra: bool,
+) -> Result<Vec<SyncEntry>, String> {
+    // Der Verzeichnis-Abgleich kann auf langsamen Netzlaufwerken (WebDAV/HiDrive,
+    // SMB) sehr lange dauern. Als synchroner Befehl liefe er auf dem Haupt-Thread
+    // und würde die gesamte Oberfläche einfrieren (macOS-Beachball) – der
+    // Vorbereitungs-Hinweis im Dialog könnte gar nicht erst gezeichnet werden.
+    // Deshalb wird die eigentliche Arbeit auf einem Blocking-Thread ausgeführt,
+    // sodass die UI weiterhin reagiert und den Hinweis anzeigt.
+    tauri::async_runtime::spawn_blocking(move || sync_preview_inner(&src, &dst, delete_extra))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+fn sync_preview_inner(src: &str, dst: &str, delete_extra: bool) -> Result<Vec<SyncEntry>, String> {
+    let src_root = expand_tilde(src);
+    let dst_root = expand_tilde(dst);
     if !src_root.is_dir() {
         return Err(format!("Quelle ist kein Verzeichnis: {}", src_root.display()));
     }
