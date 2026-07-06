@@ -1642,6 +1642,23 @@ fn file_mtime_secs(meta: &std::fs::Metadata) -> i64 {
 /// Durchlauf fälschlich als „geändert" erscheinen.
 const MTIME_TOLERANCE_SECS: i64 = 2;
 
+/// AppleDouble-Begleitdatei (`._X`)? Auf Dateisystemen ohne nativen xattr-
+/// Support (WebDAV/HiDrive, SMB, FAT) legt macOS für jede Datei `X` mit
+/// erweiterten Attributen/Resource-Fork eine sichtbare Datei `._X` an.
+fn is_apple_double_name(name: &str) -> bool {
+    name.starts_with("._")
+}
+
+/// macOS-Metadaten-Artefakt (`._X` oder `.DS_Store`)? Diese Dateien werden vom
+/// System erzeugt/verwaltet und erscheinen nur auf Netzlaufwerken als sichtbare
+/// Dateien. Auf der lokalen APFS-Quelle existieren sie nicht (xattrs liegen
+/// inline). Sie dürfen in der Sync-Vorschau daher weder als „neu"/„geändert"
+/// noch – für sich allein – als „zu löschen" gewertet werden; sonst entstehen
+/// massenhaft falsche Einträge (z. B. 1000+ `._`-Dateien in .app-Bundles).
+fn is_os_metadata_name(name: &str) -> bool {
+    name == ".DS_Store" || is_apple_double_name(name)
+}
+
 /// `symlink_metadata` mit Wiederholung bei transienten Netzwerkfehlern
 /// (Timeouts o. Ä.). „Nicht vorhanden" (NotFound) wird sofort zurückgegeben
 /// und NICHT als transienter Fehler behandelt.
@@ -1790,6 +1807,11 @@ fn preview_walk_src(
             Ok(r) => r,
             Err(_) => continue,
         };
+        // macOS-Metadaten (._X, .DS_Store) nicht kopieren – sie werden auf dem
+        // Ziel (falls nötig) vom System selbst erzeugt.
+        if is_os_metadata_name(&entry.file_name().to_string_lossy()) {
+            continue;
+        }
         let rel_str = rel.to_string_lossy().into_owned();
         let dst_path = dst_root.join(rel);
         let link_meta = match std::fs::symlink_metadata(&p) {
@@ -1850,9 +1872,38 @@ fn preview_walk_dst(
             Ok(r) => r,
             Err(_) => continue,
         };
-        let dmeta = match std::fs::symlink_metadata(&p) {
+        let name = entry.file_name().to_string_lossy().into_owned();
+
+        // `.DS_Store` ist reines Finder-Artefakt – nie löschen (wird neu erzeugt).
+        if name == ".DS_Store" {
+            continue;
+        }
+        // AppleDouble `._X`: gehört zur Datei `X`. Nur als verwaist löschen, wenn
+        // auch `X` in der Quelle fehlt – sonst existiert es nur, weil das
+        // Netzlaufwerk keine nativen xattrs kann, und darf NICHT gelöscht werden.
+        if is_apple_double_name(&name) {
+            let partner = &name[2..];
+            let partner_rel = match rel.parent() {
+                Some(par) => par.join(partner),
+                None => std::path::PathBuf::from(partner),
+            };
+            if !src_root.join(&partner_rel).exists() {
+                if let Ok(dmeta) = symlink_metadata_retry(&p) {
+                    out.push(SyncEntry {
+                        rel: rel.to_string_lossy().into_owned(),
+                        action: "delete".into(),
+                        is_dir: false,
+                        size: dmeta.len(),
+                    });
+                }
+            }
+            continue;
+        }
+
+        let dmeta = match symlink_metadata_retry(&p) {
             Ok(m) => m,
-            Err(_) => continue,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) => return Err(format!("Ziel-Metadaten lesen fehlgeschlagen: {e}")),
         };
         let is_dir = dmeta.is_dir() && !dmeta.file_type().is_symlink();
         // `exists()` folgt Symlinks – so werden dereferenzierte Ziel-Inhalte
