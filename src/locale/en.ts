@@ -288,6 +288,10 @@ export const en: Record<string, string> = {
   "jobs.trash.forceAdmin": "Move to Trash failed:\n{msg}\n\nPermanently delete as administrator?",
   "jobs.trash.protectedAdmin": "\"{name}\" is protected and cannot be moved to the Trash.\n\nPermanently delete as administrator?",
   "jobs.trash.deleteAsAdmin": "Delete as admin",
+  "jobs.trash.deletePermTitle": "Delete permanently?",
+  "jobs.trash.permOne": "\"{name}\" is on a network drive and has no Trash. It will be deleted permanently.",
+  "jobs.trash.permMany": "{count} items are on a network drive and have no Trash. They will be deleted permanently.",
+  "jobs.trash.deletePerm": "Delete permanently",
   "jobs.trash.timeMachine.title": "Time Machine",
   "jobs.trash.timeMachine.message":
     "Time Machine backups are protected by macOS and can't be deleted in this app.\n\nUse the macOS Time Machine app or Disk Utility instead.",

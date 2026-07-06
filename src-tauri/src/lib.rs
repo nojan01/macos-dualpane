@@ -410,6 +410,7 @@ fn move_to_trash(paths: Vec<String>) -> Result<(), String> {
     use std::os::macos::fs::MetadataExt;
     const PROTECT_MASK: u32 = 0x0002 | 0x0004 | 0x00020000 | 0x00040000 | 0x00080000 | 0x00100000;
     let tm_mounts = tm_mountpoints_canon();
+    let fs = mount_fs_types();
     for p in &paths {
         let full = expand_tilde(p);
         // Time-Machine-Backups dürfen nicht über das normale Panel gelöscht
@@ -427,6 +428,14 @@ fn move_to_trash(paths: Vec<String>) -> Result<(), String> {
         if is_symlink {
             std::fs::remove_file(&full)
                 .map_err(|e| format!("{}: {}", full.display(), e))?;
+            continue;
+        }
+        // Netzlaufwerke (WebDAV/SMB/NFS …) haben keinen brauchbaren Papierkorb:
+        // `.Trashes` liegt auf demselben Server, und das Verschieben großer
+        // Dateien dorthin scheitert und hinterlässt eine 0-Byte-Leiche. Dort
+        // – wie der Finder – direkt und dauerhaft löschen.
+        if path_fstype(&full, &fs).map(|t| is_network_fstype(&t)).unwrap_or(false) {
+            remove_path(&full).map_err(|e| format!("{}: {}", full.display(), e))?;
             continue;
         }
         let needs_admin = std::fs::symlink_metadata(&full)
@@ -532,6 +541,40 @@ fn mount_fs_types() -> std::collections::HashMap<String, String> {
         }
     }
     map
+}
+
+// Netzwerk-Dateisystemtypen. Auf solchen Volumes liegt der „Papierkorb" als
+// `.Trashes` auf demselben Server – das Verschieben großer Dateien dorthin
+// scheitert (Timeout/Serverfehler) und hinterlässt eine 0-Byte-Leiche.
+fn is_network_fstype(fstype: &str) -> bool {
+    matches!(fstype, "webdav" | "smbfs" | "nfs" | "afpfs" | "ftp" | "cifs")
+}
+
+// Ermittelt den Dateisystemtyp eines Pfads über das am längsten passende
+// Mountpoint-Präfix (längster Treffer gewinnt, damit verschachtelte Mounts
+// korrekt erkannt werden).
+fn path_fstype(full: &Path, mounts: &std::collections::HashMap<String, String>) -> Option<String> {
+    let mut best: Option<(usize, String)> = None;
+    for (mp, fstype) in mounts {
+        if full.starts_with(mp) {
+            let len = mp.len();
+            if best.as_ref().map(|(l, _)| len > *l).unwrap_or(true) {
+                best = Some((len, fstype.clone()));
+            }
+        }
+    }
+    best.map(|(_, fstype)| fstype)
+}
+
+// Prüft für das Frontend, ob ein Pfad auf einem Netzlaufwerk liegt (dann wird
+// beim Löschen direkt dauerhaft entfernt statt in den Papierkorb verschoben).
+#[tauri::command]
+fn path_is_network(path: String) -> bool {
+    let full = expand_tilde(&path);
+    let mounts = mount_fs_types();
+    path_fstype(&full, &mounts)
+        .map(|f| is_network_fstype(&f))
+        .unwrap_or(false)
 }
 
 // IONOS HiDrive WebDAV-Netzwerk-Bookmark (Host, Anzeigename, URL an einer Stelle).
@@ -2425,6 +2468,7 @@ pub fn run() {
             move_to_trash,
             force_delete_admin,
             path_exists,
+            path_is_network,
             list_volumes,
             list_network_bookmarks,
             mount_network_url,
