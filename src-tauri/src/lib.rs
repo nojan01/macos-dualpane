@@ -1200,25 +1200,6 @@ fn check_conflicts(items: Vec<JobItem>) -> Vec<String> {
         .collect()
 }
 
-fn count_files(p: &Path) -> u64 {
-    let meta = match std::fs::symlink_metadata(p) {
-        Ok(m) => m,
-        Err(_) => return 0,
-    };
-    if meta.file_type().is_symlink() || !meta.is_dir() {
-        return 1;
-    }
-    WalkDir::new(p)
-        .into_iter()
-        .filter_map(|e| e.ok())
-        .filter(|e| {
-            let ft = e.file_type();
-            ft.is_symlink() || !ft.is_dir()
-        })
-        .count()
-        .max(1) as u64
-}
-
 struct JobCtx<'a> {
     app: &'a AppHandle,
     job_id: &'a str,
@@ -1232,11 +1213,9 @@ struct JobCtx<'a> {
 
 impl<'a> JobCtx<'a> {
     fn emit(&self, current: &str) {
-        // `total` ist nur eine Schätzung: Symlinks werden einmal gezählt, beim
-        // Kopieren auf Netzlaufwerke (WebDAV/SMB) aber dereferenziert, sodass
-        // ganze Zielverzeichnisse zusätzlich kopiert werden. Dadurch kann `done`
-        // die Schätzung überschreiten ("297 / 252"). Wir korrigieren die Anzeige,
-        // indem `total` mindestens so groß wie `done` ausgewiesen wird.
+        // Sicherheitsnetz: `done` darf nie größer als `total` angezeigt werden.
+        // Der Fortschritt zählt jetzt Einträge (siehe run_job), sodass dies im
+        // Normalfall nicht eintritt.
         let total = self.total.max(self.done);
         let _ = self.app.emit(
             "job-progress",
@@ -1432,7 +1411,6 @@ fn copy_recursive(
         {
             match std::os::unix::fs::symlink(&target, dst) {
                 Ok(()) => {
-                    ctx.done += 1;
                     ctx.emit(&src.to_string_lossy());
                 }
                 Err(e) if is_enotsup(&e) => {
@@ -1468,7 +1446,6 @@ fn copy_recursive(
                             } else {
                                 // copyfile folgt dem Symlink und kopiert die Zieldaten.
                                 copy_file_retry(src, dst, ctx.cancel).map(|_| {
-                                    ctx.done += 1;
                                     ctx.emit(&src.to_string_lossy());
                                 })
                             };
@@ -1478,7 +1455,6 @@ fn copy_recursive(
                         Err(_) => {
                             // Defekter (dangling) Symlink: auf einem FS ohne Symlink-
                             // Unterstützung nicht abbildbar → überspringen statt abbrechen.
-                            ctx.done += 1;
                             ctx.emit(&src.to_string_lossy());
                         }
                     }
@@ -1489,7 +1465,6 @@ fn copy_recursive(
         #[cfg(not(unix))]
         {
             let _ = &target;
-            ctx.done += 1;
             ctx.emit(&src.to_string_lossy());
         }
     } else if meta.is_dir() {
@@ -1521,7 +1496,6 @@ fn copy_recursive(
             std::fs::create_dir_all(parent)?;
         }
         copy_file_retry(src, dst, ctx.cancel)?;
-        ctx.done += 1;
         ctx.emit(&src.to_string_lossy());
     }
     Ok(())
@@ -1545,10 +1519,14 @@ async fn run_job(
     let cancel2 = cancel.clone();
 
     let join = tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
-        let total: u64 = items
-            .iter()
-            .map(|i| count_files(&expand_tilde(&i.src)))
-            .sum();
+        // Fortschritt zählt EINTRÄGE (wie im Sync-Dialog: Neu/Geändert), nicht
+        // einzelne Dateien. Ein neuer Ordner-Teilbaum ist im Dialog EIN Eintrag,
+        // wird aber beim Kopieren rekursiv (inkl. dereferenzierter Symlinks auf
+        // Netzlaufwerken) durchlaufen. Würde der Fortschritt Dateien zählen,
+        // stünde in der Statusleiste eine viel höhere Zahl als im Dialog. Pro
+        // Eintrag wird `done` daher genau einmal erhöht; der aktuelle Dateiname
+        // wird zur Rückmeldung weiter pro Datei ausgegeben.
+        let total: u64 = items.len() as u64;
         let mut ctx = JobCtx {
             app: &app2,
             job_id: &job_id2,
@@ -1571,19 +1549,25 @@ async fn run_job(
                     let _ = std::fs::create_dir_all(parent);
                 }
                 if std::fs::rename(&src, &dst).is_ok() {
-                    let n = count_files(&dst);
-                    ctx.done += n;
+                    ctx.done += 1;
                     ctx.emit(&it.src);
                     handled = true;
                 }
             }
             if !handled {
-                if let Err(e) = copy_recursive(&src, &dst, it.overwrite, &mut ctx) {
-                    if e.kind() != std::io::ErrorKind::Interrupted {
-                        return Err(format!("{}: {}", src.display(), e));
+                match copy_recursive(&src, &dst, it.overwrite, &mut ctx) {
+                    Err(e) => {
+                        if e.kind() != std::io::ErrorKind::Interrupted {
+                            return Err(format!("{}: {}", src.display(), e));
+                        }
                     }
-                } else if is_move {
-                    let _ = remove_path(&src);
+                    Ok(()) => {
+                        if is_move {
+                            let _ = remove_path(&src);
+                        }
+                        ctx.done += 1;
+                        ctx.emit(&it.src);
+                    }
                 }
             }
         }
