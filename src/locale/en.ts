@@ -41,6 +41,7 @@ export const en: Record<string, string> = {
   // JobBar
   "jobbar.copying": "Copying",
   "jobbar.moving": "Moving",
+  "jobbar.deleting": "Deleting",
 
   // Pane
   "pane.filter.placeholder": "Filter (⌘F)",

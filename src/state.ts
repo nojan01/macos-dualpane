@@ -44,7 +44,7 @@ export type AppState = {
   editing: { pane: PaneId; idx: number } | null;
   job: {
     id: string;
-    kind: "copy" | "move";
+    kind: "copy" | "move" | "delete";
     done: number;
     total: number;
     current: string;

@@ -413,6 +413,13 @@ fn move_to_trash(paths: Vec<String>) -> Result<(), String> {
     let fs = mount_fs_types();
     for p in &paths {
         let full = expand_tilde(p);
+        // Bereits gelöscht? Auf Netzlaufwerken können verwaiste AppleDouble-
+        // Dateien (`._X`) zwischen Vorschau und Löschung verschwinden. Dann
+        // ist nichts mehr zu tun – kein Fehler (os error 2 / ENOENT vermeiden).
+        match std::fs::symlink_metadata(&full) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            _ => {}
+        }
         // Time-Machine-Backups dürfen nicht über das normale Panel gelöscht
         // werden – das Frontend zeigt dafür einen Hinweis statt Admin-Löschen.
         if is_time_machine_path(&full, &tm_mounts) {
@@ -1233,7 +1240,13 @@ impl<'a> JobCtx<'a> {
 }
 
 fn remove_path(p: &Path) -> std::io::Result<()> {
-    let meta = std::fs::symlink_metadata(p)?;
+    let meta = match std::fs::symlink_metadata(p) {
+        Ok(m) => m,
+        // Bereits weg (z. B. verwaiste AppleDouble-Datei, die das Netzlaufwerk
+        // zwischenzeitlich selbst entfernt hat) → Ziel „gelöscht" ist erreicht.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e),
+    };
     if meta.is_dir() && !meta.file_type().is_symlink() {
         std::fs::remove_dir_all(p)
     } else {

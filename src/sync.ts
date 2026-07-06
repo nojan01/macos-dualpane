@@ -73,7 +73,6 @@ export async function confirmSync() {
   if (copies.length === 0 && deletes.length === 0) return;
 
   const id = newJobId();
-  setState("job", { id, kind: "copy", done: 0, total: 0, current: "" });
   try {
     if (copies.length > 0) {
       const items = copies.map((e) => ({
@@ -81,10 +80,15 @@ export async function confirmSync() {
         dst: joinPath(s.dst, e.rel),
         overwrite: e.action === "update",
       }));
+      setState("job", { id, kind: "copy", done: 0, total: items.length, current: "" });
       await runJob(id, "copy", items);
     }
     if (deletes.length > 0) {
+      // Löschen läuft als einzelner Batch-Aufruf ohne Fortschrittsereignisse –
+      // die Statusleiste soll trotzdem "Löschen" (nicht "Kopieren") anzeigen.
+      setState("job", { id, kind: "delete", done: 0, total: deletes.length, current: "" });
       await moveToTrash(deletes.map((e) => joinPath(s.dst, e.rel)));
+      setState("job", "done", deletes.length);
     }
   } catch (e) {
     await notifyError(t("common.error", { msg: errMsg(e) }));
