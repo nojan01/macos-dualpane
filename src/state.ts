@@ -1,7 +1,7 @@
 import { createSignal } from "solid-js";
 import { createStore, type SetStoreFunction } from "solid-js/store";
 import type { Entry, PaneId, SortKey, SortDir } from "./types";
-import { listDir, watchPath, pathExists, homeDir, unwatchPane } from "./ipc";
+import { listDir, watchPath, pathExists, pathIsNetwork, homeDir, unwatchPane } from "./ipc";
 import { errMsg } from "./i18n";
 
 export type PaneState = {
@@ -140,23 +140,36 @@ export function sortEntries(entries: Entry[], key: SortKey, dir: SortDir): Entry
 export async function loadPane(pane: PaneId, path: string) {
   setState(pane, "loading", true);
   setState(pane, "error", null);
-  // Fallback, falls Pfad verschwunden ist (z.B. ausgeworfenes Volume / unmounted DMG):
-  // an erstes existierendes Eltern-Verzeichnis (oder Home) ausweichen.
   let target = path;
-  try {
-    if (!(await pathExists(target))) {
-      let probe = target;
-      while (probe && probe !== "/" && !(await pathExists(probe))) {
-        const idx = probe.lastIndexOf("/");
-        probe = idx <= 0 ? "/" : probe.slice(0, idx);
+  // Netzlaufwerke (HiDrive/WebDAV/SMB…, i. d. R. unter /Volumes) sind langsam:
+  // ein zusätzliches pathExists wäre ein weiterer Server-Roundtrip vor listDir.
+  // pathIsNetwork liest dagegen nur die lokale Mount-Tabelle (kein Server-Zugriff).
+  // Für erkannte Netzpfade daher die Existenz-/Eltern-Prüfung überspringen und
+  // direkt listen; das Ausweichen passiert erst bei einem echten listDir-Fehler.
+  let isNet = false;
+  if (target.startsWith("/Volumes/")) {
+    try {
+      isNet = await pathIsNetwork(target);
+    } catch {}
+  }
+  if (!isNet) {
+    // Fallback, falls Pfad verschwunden ist (z.B. ausgeworfenes Volume / unmounted DMG):
+    // an erstes existierendes Eltern-Verzeichnis (oder Home) ausweichen.
+    try {
+      if (!(await pathExists(target))) {
+        let probe = target;
+        while (probe && probe !== "/" && !(await pathExists(probe))) {
+          const idx = probe.lastIndexOf("/");
+          probe = idx <= 0 ? "/" : probe.slice(0, idx);
+        }
+        if (!probe || !(await pathExists(probe))) {
+          probe = await homeDir();
+        }
+        target = probe;
       }
-      if (!probe || !(await pathExists(probe))) {
-        probe = await homeDir();
-      }
-      target = probe;
+    } catch {
+      // pathExists/homeDir-Fehler ignorieren; listDir liefert ggf. eigene Fehlermeldung.
     }
-  } catch {
-    // pathExists/homeDir-Fehler ignorieren; listDir liefert ggf. eigene Fehlermeldung.
   }
   try {
     const raw = await listDir(target, state.showHidden);
@@ -176,6 +189,17 @@ export async function loadPane(pane: PaneId, path: string) {
     bumpSel();
     watchPath(pane, target).catch(() => {});
   } catch (e) {
+    // Netzpfad nicht erreichbar (z. B. HiDrive ausgehängt): auf Home ausweichen,
+    // damit die App sofort nutzbar bleibt, statt nur eine Fehlermeldung zu zeigen.
+    if (isNet) {
+      try {
+        const home = await homeDir();
+        if (home && home !== target) {
+          await loadPane(pane, home);
+          return;
+        }
+      } catch {}
+    }
     setState(pane, { loading: false, error: errMsg(e) });
   }
 }

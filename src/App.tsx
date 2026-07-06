@@ -281,12 +281,12 @@ export function App() {
       applyPersisted(persisted);
       const lCwd = persisted.panes.left.tabs[persisted.panes.left.activeTab].cwd;
       const rCwd = persisted.panes.right.tabs[persisted.panes.right.activeTab].cwd;
-      await loadPane("left", lCwd || home);
-      await loadPane("right", rCwd || home);
+      // Beide Panes parallel laden: liegt eines (oder beide) auf einem langsamen
+      // Netzlaufwerk (HiDrive/WebDAV), blockiert es so nicht das jeweils andere.
+      await Promise.all([loadPane("left", lCwd || home), loadPane("right", rCwd || home)]);
       setActive(persisted.active);
     } else {
-      await loadPane("left", home);
-      await loadPane("right", home);
+      await Promise.all([loadPane("left", home), loadPane("right", home)]);
       setActive("left");
     }
     attachPersist();
