@@ -41,6 +41,7 @@ export const de: Record<string, string> = {
   // JobBar
   "jobbar.copying": "Kopieren",
   "jobbar.moving": "Verschieben",
+  "jobbar.deleting": "Löschen",
 
   // Pane
   "pane.filter.placeholder": "Filter (⌘F)",
@@ -309,6 +310,11 @@ export const de: Record<string, string> = {
   "sync.extrasPrompt": "{count} Element(e) sind im Ziel vorhanden, aber nicht (mehr) in der Quelle. Auch im Ziel löschen (in den Papierkorb)?",
   "sync.start": "Synchronisieren",
   "sync.selectFolder": "Bitte genau einen Ordner zum Synchronisieren auswählen.",
+  "sync.preparing": "Synchronisation wird vorbereitet – bei Netzlaufwerken kann das etwas dauern…",
+  "sync.details": "Details anzeigen",
+  "sync.actionNew": "Neu",
+  "sync.actionChanged": "Geändert",
+  "sync.actionDelete": "Löschen",
 
   // Netzwerk / Mit Server verbinden (⌘K)
   "network.connectServer": "Mit Server verbinden…",

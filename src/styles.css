@@ -549,7 +549,61 @@ body.col-resizing * { cursor: col-resize !important; -webkit-user-select: none !
 .sync-option input {
   cursor: pointer;
 }
+.sync-preparing {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 13px;
+  color: #bbb;
+  margin: 12px 0;
+}
+.sync-preparing .spinner {
+  width: 16px;
+  height: 16px;
+  flex: none;
+  border: 2px solid rgba(255, 255, 255, 0.25);
+  border-top-color: var(--accent, #4a90e2);
+  border-radius: 50%;
+  animation: tb-spin 0.8s linear infinite;
+}
 .modal-list .danger {
+  color: #e07a7a;
+}
+.sync-details {
+  margin: 0 0 14px;
+  font-size: 12px;
+  color: var(--text-dim, #bbb);
+}
+.sync-details > summary {
+  cursor: pointer;
+  user-select: none;
+  padding: 2px 0;
+}
+.sync-details-list {
+  list-style: none;
+  margin: 6px 0 0;
+  padding: 0;
+  max-height: 160px;
+  overflow: auto;
+}
+.sync-details-list li {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 2px 0;
+}
+.sync-details-badge {
+  flex: none;
+  min-width: 62px;
+  font-size: 11px;
+  opacity: 0.75;
+}
+.sync-details-path {
+  word-break: break-all;
+  color: #ddd;
+}
+.sync-details-list li.danger .sync-details-path,
+.sync-details-list li.danger .sync-details-badge {
   color: #e07a7a;
 }
 .modal-actions button {

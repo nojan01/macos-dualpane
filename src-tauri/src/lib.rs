@@ -413,6 +413,13 @@ fn move_to_trash(paths: Vec<String>) -> Result<(), String> {
     let fs = mount_fs_types();
     for p in &paths {
         let full = expand_tilde(p);
+        // Bereits gelöscht? Auf Netzlaufwerken können verwaiste AppleDouble-
+        // Dateien (`._X`) zwischen Vorschau und Löschung verschwinden. Dann
+        // ist nichts mehr zu tun – kein Fehler (os error 2 / ENOENT vermeiden).
+        match std::fs::symlink_metadata(&full) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            _ => {}
+        }
         // Time-Machine-Backups dürfen nicht über das normale Panel gelöscht
         // werden – das Frontend zeigt dafür einen Hinweis statt Admin-Löschen.
         if is_time_machine_path(&full, &tm_mounts) {
@@ -575,6 +582,42 @@ fn path_is_network(path: String) -> bool {
     path_fstype(&full, &mounts)
         .map(|f| is_network_fstype(&f))
         .unwrap_or(false)
+}
+
+/// Versucht, den Verzeichnis-Cache eines Netzlaufwerks (macOS webdavfs/smbfs)
+/// zu invalidieren, damit ein direkt danach folgendes `read_dir` ein frisches
+/// PROPFIND auslöst und z. B. extern (über die Web-GUI) gelöschte Dateien
+/// nicht mehr als „Geister" im Listing erscheinen.
+///
+/// macOS bietet KEINE öffentliche API, um den webdavfs-Verzeichnis-Cache gezielt
+/// zu leeren – zuverlässig geht das nur per Aus-/Einhängen. Der einzige
+/// nicht-destruktive Trick ist, das Verzeichnis kurz zu verändern (verborgene
+/// Temp-Datei anlegen und sofort wieder löschen); dadurch markiert webdavfs den
+/// Cache-Knoten als „dirty" und liest beim nächsten Listing frisch nach.
+/// Best-effort: nur für Netzlaufwerke, Fehler (z. B. schreibgeschützt) werden
+/// stillschweigend ignoriert – der anschließende Refresh läuft ohnehin.
+#[tauri::command]
+async fn bust_dir_cache(path: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let full = expand_tilde(&path);
+        let fs = mount_fs_types();
+        let is_net = path_fstype(&full, &fs)
+            .map(|t| is_network_fstype(&t))
+            .unwrap_or(false);
+        if !is_net || !full.is_dir() {
+            return;
+        }
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let tmp = full.join(format!(".dualbeam-refresh-{}-{}", std::process::id(), ts));
+        if std::fs::File::create(&tmp).is_ok() {
+            let _ = std::fs::remove_file(&tmp);
+        }
+    })
+    .await
+    .map_err(|e| e.to_string())
 }
 
 // IONOS HiDrive WebDAV-Netzwerk-Bookmark (Host, Anzeigename, URL an einer Stelle).
@@ -1200,25 +1243,6 @@ fn check_conflicts(items: Vec<JobItem>) -> Vec<String> {
         .collect()
 }
 
-fn count_files(p: &Path) -> u64 {
-    let meta = match std::fs::symlink_metadata(p) {
-        Ok(m) => m,
-        Err(_) => return 0,
-    };
-    if meta.file_type().is_symlink() || !meta.is_dir() {
-        return 1;
-    }
-    WalkDir::new(p)
-        .into_iter()
-        .filter_map(|e| e.ok())
-        .filter(|e| {
-            let ft = e.file_type();
-            ft.is_symlink() || !ft.is_dir()
-        })
-        .count()
-        .max(1) as u64
-}
-
 struct JobCtx<'a> {
     app: &'a AppHandle,
     job_id: &'a str,
@@ -1232,12 +1256,16 @@ struct JobCtx<'a> {
 
 impl<'a> JobCtx<'a> {
     fn emit(&self, current: &str) {
+        // Sicherheitsnetz: `done` darf nie größer als `total` angezeigt werden.
+        // Der Fortschritt zählt jetzt Einträge (siehe run_job), sodass dies im
+        // Normalfall nicht eintritt.
+        let total = self.total.max(self.done);
         let _ = self.app.emit(
             "job-progress",
             JobProgress {
                 job_id: self.job_id.to_string(),
                 done: self.done,
-                total: self.total,
+                total,
                 current: current.to_string(),
                 finished: false,
                 cancelled: false,
@@ -1248,11 +1276,27 @@ impl<'a> JobCtx<'a> {
 }
 
 fn remove_path(p: &Path) -> std::io::Result<()> {
-    let meta = std::fs::symlink_metadata(p)?;
-    if meta.is_dir() && !meta.file_type().is_symlink() {
+    let meta = match std::fs::symlink_metadata(p) {
+        Ok(m) => m,
+        // Bereits weg (z. B. verwaiste AppleDouble-Datei, die das Netzlaufwerk
+        // zwischenzeitlich selbst entfernt hat) → Ziel „gelöscht" ist erreicht.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e),
+    };
+    let res = if meta.is_dir() && !meta.file_type().is_symlink() {
         std::fs::remove_dir_all(p)
     } else {
         std::fs::remove_file(p)
+    };
+    match res {
+        Ok(()) => Ok(()),
+        // WebDAV/SMB liefern Verzeichnis-Listings aus einem veralteten Cache:
+        // `stat` meldet die Datei noch als vorhanden, das eigentliche Löschen
+        // scheitert dann aber mit ENOENT, weil sie (z. B. über die IONOS
+        // Web-GUI) längst entfernt wurde. Das Ziel „nicht mehr vorhanden" ist
+        // damit erreicht – als Erfolg werten, nicht als Fehler abbrechen.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e),
     }
 }
 
@@ -1335,6 +1379,71 @@ fn is_enotsup(e: &std::io::Error) -> bool {
     )
 }
 
+/// Prüft, ob ein Fehler vorübergehend/transient ist – typisch für langsame
+/// Netzlaufwerke (WebDAV/HiDrive, SMB), die einzelne Operationen mit Timeout
+/// (ETIMEDOUT / macOS „os error 60") oder Verbindungsabbrüchen quittieren.
+/// Solche Fehler können durch einen erneuten Versuch verschwinden.
+#[cfg(unix)]
+fn is_transient(e: &std::io::Error) -> bool {
+    matches!(
+        e.raw_os_error(),
+        Some(libc::ETIMEDOUT)
+            | Some(libc::ECONNRESET)
+            | Some(libc::ECONNABORTED)
+            | Some(libc::EPIPE)
+            | Some(libc::EAGAIN)
+            | Some(libc::ENETRESET)
+            | Some(libc::ENETDOWN)
+            | Some(libc::ENETUNREACH)
+            | Some(libc::EHOSTDOWN)
+            | Some(libc::EHOSTUNREACH)
+            | Some(libc::EINTR)
+    )
+}
+
+#[cfg(not(unix))]
+fn is_transient(_e: &std::io::Error) -> bool {
+    false
+}
+
+/// Kopiert eine Datei und wiederholt den Versuch bei transienten Netzwerk-
+/// fehlern (z. B. os error 60 „Operation timed out" auf HiDrive/WebDAV) mit
+/// exponentiellem Backoff. Bricht sofort ab, wenn der Job abgebrochen wurde
+/// oder ein nicht-transienter Fehler auftritt.
+fn copy_file_retry(src: &Path, dst: &Path, cancel: &AtomicBool) -> std::io::Result<()> {
+    const MAX_ATTEMPTS: u32 = 5;
+    let mut attempt: u32 = 0;
+    loop {
+        match copy_file_with_metadata(src, dst) {
+            Ok(()) => return Ok(()),
+            Err(e) => {
+                attempt += 1;
+                if !is_transient(&e) || attempt >= MAX_ATTEMPTS || cancel.load(Ordering::SeqCst) {
+                    return Err(e);
+                }
+                // Teilweise geschriebene Zieldatei entfernen, damit der nächste
+                // Versuch frisch schreiben kann.
+                let _ = std::fs::remove_file(dst);
+                // Backoff: 0,5s → 1s → 2s → 4s. Abbruchfreundlich in 100ms-Schritten warten.
+                let backoff =
+                    std::time::Duration::from_millis(500u64.saturating_mul(1u64 << (attempt - 1)));
+                let step = std::time::Duration::from_millis(100);
+                let mut waited = std::time::Duration::ZERO;
+                while waited < backoff {
+                    if cancel.load(Ordering::SeqCst) {
+                        return Err(std::io::Error::new(
+                            std::io::ErrorKind::Interrupted,
+                            "cancelled",
+                        ));
+                    }
+                    std::thread::sleep(step);
+                    waited += step;
+                }
+            }
+        }
+    }
+}
+
 fn copy_recursive(
     src: &Path,
     dst: &Path,
@@ -1361,7 +1470,6 @@ fn copy_recursive(
         {
             match std::os::unix::fs::symlink(&target, dst) {
                 Ok(()) => {
-                    ctx.done += 1;
                     ctx.emit(&src.to_string_lossy());
                 }
                 Err(e) if is_enotsup(&e) => {
@@ -1396,8 +1504,7 @@ fn copy_recursive(
                                 })()
                             } else {
                                 // copyfile folgt dem Symlink und kopiert die Zieldaten.
-                                copy_file_with_metadata(src, dst).map(|_| {
-                                    ctx.done += 1;
+                                copy_file_retry(src, dst, ctx.cancel).map(|_| {
                                     ctx.emit(&src.to_string_lossy());
                                 })
                             };
@@ -1407,7 +1514,6 @@ fn copy_recursive(
                         Err(_) => {
                             // Defekter (dangling) Symlink: auf einem FS ohne Symlink-
                             // Unterstützung nicht abbildbar → überspringen statt abbrechen.
-                            ctx.done += 1;
                             ctx.emit(&src.to_string_lossy());
                         }
                     }
@@ -1418,7 +1524,6 @@ fn copy_recursive(
         #[cfg(not(unix))]
         {
             let _ = &target;
-            ctx.done += 1;
             ctx.emit(&src.to_string_lossy());
         }
     } else if meta.is_dir() {
@@ -1449,8 +1554,7 @@ fn copy_recursive(
         if let Some(parent) = dst.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        copy_file_with_metadata(src, dst)?;
-        ctx.done += 1;
+        copy_file_retry(src, dst, ctx.cancel)?;
         ctx.emit(&src.to_string_lossy());
     }
     Ok(())
@@ -1474,10 +1578,14 @@ async fn run_job(
     let cancel2 = cancel.clone();
 
     let join = tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
-        let total: u64 = items
-            .iter()
-            .map(|i| count_files(&expand_tilde(&i.src)))
-            .sum();
+        // Fortschritt zählt EINTRÄGE (wie im Sync-Dialog: Neu/Geändert), nicht
+        // einzelne Dateien. Ein neuer Ordner-Teilbaum ist im Dialog EIN Eintrag,
+        // wird aber beim Kopieren rekursiv (inkl. dereferenzierter Symlinks auf
+        // Netzlaufwerken) durchlaufen. Würde der Fortschritt Dateien zählen,
+        // stünde in der Statusleiste eine viel höhere Zahl als im Dialog. Pro
+        // Eintrag wird `done` daher genau einmal erhöht; der aktuelle Dateiname
+        // wird zur Rückmeldung weiter pro Datei ausgegeben.
+        let total: u64 = items.len() as u64;
         let mut ctx = JobCtx {
             app: &app2,
             job_id: &job_id2,
@@ -1500,19 +1608,25 @@ async fn run_job(
                     let _ = std::fs::create_dir_all(parent);
                 }
                 if std::fs::rename(&src, &dst).is_ok() {
-                    let n = count_files(&dst);
-                    ctx.done += n;
+                    ctx.done += 1;
                     ctx.emit(&it.src);
                     handled = true;
                 }
             }
             if !handled {
-                if let Err(e) = copy_recursive(&src, &dst, it.overwrite, &mut ctx) {
-                    if e.kind() != std::io::ErrorKind::Interrupted {
-                        return Err(format!("{}: {}", src.display(), e));
+                match copy_recursive(&src, &dst, it.overwrite, &mut ctx) {
+                    Err(e) => {
+                        if e.kind() != std::io::ErrorKind::Interrupted {
+                            return Err(format!("{}: {}", src.display(), e));
+                        }
                     }
-                } else if is_move {
-                    let _ = remove_path(&src);
+                    Ok(()) => {
+                        if is_move {
+                            let _ = remove_path(&src);
+                        }
+                        ctx.done += 1;
+                        ctx.emit(&it.src);
+                    }
                 }
             }
         }
@@ -1571,90 +1685,341 @@ fn file_mtime_secs(meta: &std::fs::Metadata) -> i64 {
         .unwrap_or(0)
 }
 
+/// Aktuelle Wanduhrzeit in Sekunden seit Epoch.
+fn now_secs() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(i64::MAX)
+}
+
+/// Effektive Quell-mtime für den Änderungsvergleich. Ein Zeitstempel in der
+/// Zukunft ist unglaubwürdig (eine Datei kann nicht „in der Zukunft" geändert
+/// worden sein) – z. B. durch fehlerhafte Archiv-Entpackung oder Tools, die
+/// falsche Daten setzen (real beobachtet: `DEPLOYMENT.md` mit Jahr 2076). Ohne
+/// Kappung gilt eine solche Datei bei gleicher Größe bei JEDEM Sync fälschlich
+/// als „geändert", weil das Ziel beim Upload stets das aktuelle Datum erhält
+/// und damit immer „älter" als die Zukunft ist. Daher auf jetzt begrenzen.
+fn effective_src_mtime_secs(meta: &std::fs::Metadata) -> i64 {
+    file_mtime_secs(meta).min(now_secs())
+}
+
+/// Toleranz für den mtime-Vergleich. Netzlaufwerke (WebDAV/HiDrive) und FAT
+/// speichern Änderungszeiten nur grob (FAT: 2s) bzw. setzen beim Upload eine
+/// eigene Zeit. Ohne Toleranz würden gleichnamige Dateien sonst bei jedem
+/// Durchlauf fälschlich als „geändert" erscheinen.
+const MTIME_TOLERANCE_SECS: i64 = 2;
+
+/// AppleDouble-Begleitdatei (`._X`)? Auf Dateisystemen ohne nativen xattr-
+/// Support (WebDAV/HiDrive, SMB, FAT) legt macOS für jede Datei `X` mit
+/// erweiterten Attributen/Resource-Fork eine sichtbare Datei `._X` an.
+fn is_apple_double_name(name: &str) -> bool {
+    name.starts_with("._")
+}
+
+/// macOS-Metadaten-Artefakt (`._X` oder `.DS_Store`)? Diese Dateien werden vom
+/// System erzeugt/verwaltet und erscheinen nur auf Netzlaufwerken als sichtbare
+/// Dateien. Auf der lokalen APFS-Quelle existieren sie nicht (xattrs liegen
+/// inline). Sie dürfen in der Sync-Vorschau daher weder als „neu"/„geändert"
+/// noch – für sich allein – als „zu löschen" gewertet werden; sonst entstehen
+/// massenhaft falsche Einträge (z. B. 1000+ `._`-Dateien in .app-Bundles).
+fn is_os_metadata_name(name: &str) -> bool {
+    name == ".DS_Store" || is_apple_double_name(name)
+}
+
+/// `symlink_metadata` mit Wiederholung bei transienten Netzwerkfehlern
+/// (Timeouts o. Ä.). „Nicht vorhanden" (NotFound) wird sofort zurückgegeben
+/// und NICHT als transienter Fehler behandelt.
+fn symlink_metadata_retry(path: &Path) -> std::io::Result<std::fs::Metadata> {
+    let mut attempt: u32 = 0;
+    loop {
+        match std::fs::symlink_metadata(path) {
+            Ok(m) => return Ok(m),
+            Err(e) => {
+                if e.kind() == std::io::ErrorKind::NotFound {
+                    return Err(e);
+                }
+                attempt += 1;
+                if !is_transient(&e) || attempt >= 4 {
+                    return Err(e);
+                }
+                std::thread::sleep(std::time::Duration::from_millis(300u64 * attempt as u64));
+            }
+        }
+    }
+}
+
+/// Liest ein Verzeichnis vollständig ein und wiederholt bei transienten
+/// Netzwerkfehlern. Wichtig, damit die Löschvorschau auf langsamen Laufwerken
+/// nicht durch übersprungene Einträge falsche/schwankende Zahlen liefert.
+fn read_dir_retry(path: &Path) -> std::io::Result<Vec<std::fs::DirEntry>> {
+    let mut attempt: u32 = 0;
+    loop {
+        let res = std::fs::read_dir(path)
+            .and_then(|rd| rd.collect::<std::io::Result<Vec<std::fs::DirEntry>>>());
+        match res {
+            Ok(v) => return Ok(v),
+            Err(e) => {
+                attempt += 1;
+                if !is_transient(&e) || attempt >= 4 {
+                    return Err(e);
+                }
+                std::thread::sleep(std::time::Duration::from_millis(300u64 * attempt as u64));
+            }
+        }
+    }
+}
+
+/// Vergleicht eine Quell-Datei/-Symlink mit dem Ziel und hängt ggf. einen
+/// copy/update-Eintrag an. Transiente Netzwerkfehler beim Lesen der Ziel-
+/// Metadaten führen zum Abbruch (Err), damit keine falschen „Neu"-Einträge
+/// entstehen.
+fn preview_compare_file(
+    rel_str: String,
+    src_path: &Path,
+    dst_path: &Path,
+    link_meta: &std::fs::Metadata,
+    out: &mut Vec<SyncEntry>,
+) -> Result<(), String> {
+    // Effektive Quell-Metadaten bestimmen: Symlinks folgen, um mit einem ggf.
+    // dereferenzierten Ziel (Netzlaufwerk ohne Symlink-Support) zu vergleichen.
+    let is_symlink = link_meta.file_type().is_symlink();
+    let followed = if is_symlink {
+        std::fs::metadata(src_path).ok()
+    } else {
+        Some(link_meta.clone())
+    };
+
+    let dmeta = match symlink_metadata_retry(dst_path) {
+        Ok(m) => Some(m),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => return Err(format!("Ziel-Metadaten lesen fehlgeschlagen: {e}")),
+    };
+
+    match (followed, dmeta) {
+        // Ziel fehlt → neu kopieren.
+        (Some(f), None) => {
+            out.push(SyncEntry {
+                rel: rel_str,
+                action: "copy".into(),
+                is_dir: f.is_dir(),
+                size: if f.is_dir() { 0 } else { f.len() },
+            });
+        }
+        // Defekter (dangling) Quell-Symlink, Ziel fehlt → als Symlink kopieren.
+        (None, None) => {
+            out.push(SyncEntry {
+                rel: rel_str,
+                action: "copy".into(),
+                is_dir: false,
+                size: link_meta.len(),
+            });
+        }
+        // Ziel vorhanden → auf Änderung prüfen.
+        (Some(f), Some(d)) => {
+            if f.is_dir() {
+                // Quelle ist (Symlink auf) Verzeichnis. Ist das Ziel ebenfalls ein
+                // Verzeichnis (real oder dereferenziert), gilt es als vorhanden –
+                // die eigentlichen Kinder werden über ihre realen Pfade erfasst.
+                if !d.is_dir() {
+                    out.push(SyncEntry {
+                        rel: rel_str,
+                        action: "update".into(),
+                        is_dir: false,
+                        size: 0,
+                    });
+                }
+            } else if is_symlink && d.file_type().is_symlink() {
+                // Beide Symlinks: über das Linkziel vergleichen.
+                if std::fs::read_link(src_path).ok() != std::fs::read_link(dst_path).ok() {
+                    out.push(SyncEntry {
+                        rel: rel_str,
+                        action: "update".into(),
+                        is_dir: false,
+                        size: f.len(),
+                    });
+                }
+            } else {
+                // Datei-Vergleich: Größe oder (deutlich) neuere Quelle. Die
+                // Quell-mtime wird auf „jetzt" gekappt, damit zukunftsdatierte
+                // Dateien nicht bei jedem Sync als „geändert" erscheinen.
+                if f.len() != d.len()
+                    || effective_src_mtime_secs(&f) > file_mtime_secs(&d) + MTIME_TOLERANCE_SECS
+                {
+                    out.push(SyncEntry {
+                        rel: rel_str,
+                        action: "update".into(),
+                        is_dir: false,
+                        size: f.len(),
+                    });
+                }
+            }
+        }
+        // Dangling-Symlink, aber Ziel existiert → nichts zu tun.
+        (None, Some(_)) => {}
+    }
+    Ok(())
+}
+
+/// Läuft die Quelle rekursiv ab und sammelt copy/update-Einträge. Folgt keinen
+/// Symlink-Verzeichnissen (deren Inhalte liegen unter den realen Pfaden).
+fn preview_walk_src(
+    src_root: &Path,
+    dst_root: &Path,
+    cur: &Path,
+    out: &mut Vec<SyncEntry>,
+) -> Result<(), String> {
+    let entries =
+        read_dir_retry(cur).map_err(|e| format!("Quelle lesen fehlgeschlagen: {e}"))?;
+    for entry in entries {
+        let p = entry.path();
+        let rel = match p.strip_prefix(src_root) {
+            Ok(r) => r,
+            Err(_) => continue,
+        };
+        // macOS-Metadaten (._X, .DS_Store) nicht kopieren – sie werden auf dem
+        // Ziel (falls nötig) vom System selbst erzeugt.
+        if is_os_metadata_name(&entry.file_name().to_string_lossy()) {
+            continue;
+        }
+        let rel_str = rel.to_string_lossy().into_owned();
+        let dst_path = dst_root.join(rel);
+        let link_meta = match std::fs::symlink_metadata(&p) {
+            Ok(m) => m,
+            Err(_) => continue,
+        };
+
+        if link_meta.file_type().is_symlink() {
+            preview_compare_file(rel_str, &p, &dst_path, &link_meta, out)?;
+            continue;
+        }
+        if link_meta.is_dir() {
+            match symlink_metadata_retry(&dst_path) {
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    // Ganzer Teilbaum ist neu → als Einheit melden, nicht rekursieren.
+                    out.push(SyncEntry {
+                        rel: rel_str,
+                        action: "copy".into(),
+                        is_dir: true,
+                        size: 0,
+                    });
+                }
+                Err(e) => return Err(format!("Ziel-Metadaten lesen fehlgeschlagen: {e}")),
+                Ok(d) if d.is_dir() => preview_walk_src(src_root, dst_root, &p, out)?,
+                Ok(_) => {
+                    // Ziel existiert, ist aber kein Verzeichnis (z. B. Datei) →
+                    // Teilbaum als Einheit kopieren (überschreiben), nicht rekursieren.
+                    out.push(SyncEntry {
+                        rel: rel_str,
+                        action: "copy".into(),
+                        is_dir: true,
+                        size: 0,
+                    });
+                }
+            }
+            continue;
+        }
+        // Reguläre Datei.
+        preview_compare_file(rel_str, &p, &dst_path, &link_meta, out)?;
+    }
+    Ok(())
+}
+
+/// Läuft das Ziel rekursiv ab und sammelt delete-Einträge (im Ziel vorhanden,
+/// aber nicht in der Quelle). Bei transienten Fehlern wird wiederholt; schlägt
+/// das Lesen dauerhaft fehl, bricht die Vorschau ab (Err), damit keine
+/// unvollständige/gefährliche Löschliste entsteht.
+fn preview_walk_dst(
+    src_root: &Path,
+    dst_root: &Path,
+    cur: &Path,
+    out: &mut Vec<SyncEntry>,
+) -> Result<(), String> {
+    let entries = read_dir_retry(cur).map_err(|e| format!("Ziel lesen fehlgeschlagen: {e}"))?;
+    for entry in entries {
+        let p = entry.path();
+        let rel = match p.strip_prefix(dst_root) {
+            Ok(r) => r,
+            Err(_) => continue,
+        };
+        let name = entry.file_name().to_string_lossy().into_owned();
+
+        // `.DS_Store` ist reines Finder-Artefakt – nie löschen (wird neu erzeugt).
+        if name == ".DS_Store" {
+            continue;
+        }
+        // AppleDouble `._X` sind reine macOS-Metadaten-Sidecars (Ressourcen-Fork/
+        // xattrs zur Datei `X`). Auf Netzlaufwerken ohne native xattrs legt macOS
+        // sie selbst an. Sie werden NIE zum Löschen vorgeschlagen:
+        //  * Existiert `X`, gehört `._X` dazu und darf nicht entfernt werden.
+        //  * Ist `X` (z. B. über die IONOS Web-GUI) gelöscht, bleibt `._X` als
+        //    verwaistes Sidecar auf dem Server. macOS virtualisiert `._X` aber
+        //    über die AppleDouble-Schicht und liefert beim Löschen ENOENT
+        //    (os error 2), sobald der Partner `X` fehlt – der Eintrag ließe sich
+        //    über den Mount gar nicht entfernen und tauchte bei jedem Sync erneut
+        //    als „Zu löschen" auf. Wie `.DS_Store` daher grundsätzlich überspringen.
+        if is_apple_double_name(&name) {
+            continue;
+        }
+
+        let dmeta = match symlink_metadata_retry(&p) {
+            Ok(m) => m,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) => return Err(format!("Ziel-Metadaten lesen fehlgeschlagen: {e}")),
+        };
+        let is_dir = dmeta.is_dir() && !dmeta.file_type().is_symlink();
+        // `exists()` folgt Symlinks – so werden dereferenzierte Ziel-Inhalte
+        // korrekt der Quelle zugeordnet und nicht fälschlich zum Löschen markiert.
+        if !src_root.join(rel).exists() {
+            out.push(SyncEntry {
+                rel: rel.to_string_lossy().into_owned(),
+                action: "delete".into(),
+                is_dir,
+                size: dmeta.len(),
+            });
+            // Ganzer Teilbaum wird gelöscht → nicht weiter absteigen.
+        } else if is_dir {
+            preview_walk_dst(src_root, dst_root, &p, out)?;
+        }
+    }
+    Ok(())
+}
+
 /// Berechnet die Unterschiede zwischen `src` und `dst` (einweg: src → dst).
-/// Vergleich über Größe + Änderungszeit. Verzeichnisse, die komplett neu sind,
-/// werden als eine Einheit gemeldet (Kinder werden übersprungen).
+/// Vergleich über Größe + Änderungszeit (mit Toleranz). Symlinks werden
+/// dereferenziert verglichen; transiente Netzwerkfehler werden wiederholt und
+/// führen im Ernstfall zum Abbruch statt zu falschen Zahlen.
 #[tauri::command]
-fn sync_preview(src: String, dst: String, delete_extra: bool) -> Result<Vec<SyncEntry>, String> {
-    let src_root = expand_tilde(&src);
-    let dst_root = expand_tilde(&dst);
+async fn sync_preview(
+    src: String,
+    dst: String,
+    delete_extra: bool,
+) -> Result<Vec<SyncEntry>, String> {
+    // Der Verzeichnis-Abgleich kann auf langsamen Netzlaufwerken (WebDAV/HiDrive,
+    // SMB) sehr lange dauern. Als synchroner Befehl liefe er auf dem Haupt-Thread
+    // und würde die gesamte Oberfläche einfrieren (macOS-Beachball) – der
+    // Vorbereitungs-Hinweis im Dialog könnte gar nicht erst gezeichnet werden.
+    // Deshalb wird die eigentliche Arbeit auf einem Blocking-Thread ausgeführt,
+    // sodass die UI weiterhin reagiert und den Hinweis anzeigt.
+    tauri::async_runtime::spawn_blocking(move || sync_preview_inner(&src, &dst, delete_extra))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+fn sync_preview_inner(src: &str, dst: &str, delete_extra: bool) -> Result<Vec<SyncEntry>, String> {
+    let src_root = expand_tilde(src);
+    let dst_root = expand_tilde(dst);
     if !src_root.is_dir() {
         return Err(format!("Quelle ist kein Verzeichnis: {}", src_root.display()));
     }
     let mut out: Vec<SyncEntry> = Vec::new();
 
-    // Quelle durchlaufen → copy/update
-    let mut it = WalkDir::new(&src_root).into_iter();
-    while let Some(entry) = it.next() {
-        let entry = match entry {
-            Ok(e) => e,
-            Err(_) => continue,
-        };
-        let p = entry.path();
-        if p == src_root {
-            continue;
-        }
-        let rel = match p.strip_prefix(&src_root) {
-            Ok(r) => r,
-            Err(_) => continue,
-        };
-        let rel_str = rel.to_string_lossy().into_owned();
-        let ft = entry.file_type();
-        let dst_path = dst_root.join(rel);
-        if ft.is_dir() {
-            if !dst_path.exists() {
-                // Ganzer Teilbaum ist neu → als Einheit kopieren, Kinder überspringen.
-                out.push(SyncEntry { rel: rel_str, action: "copy".into(), is_dir: true, size: 0 });
-                it.skip_current_dir();
-            }
-            continue;
-        }
-        // Datei oder Symlink
-        let smeta = match std::fs::symlink_metadata(p) {
-            Ok(m) => m,
-            Err(_) => continue,
-        };
-        let size = smeta.len();
-        match std::fs::symlink_metadata(&dst_path) {
-            Err(_) => out.push(SyncEntry { rel: rel_str, action: "copy".into(), is_dir: false, size }),
-            Ok(dmeta) => {
-                if smeta.len() != dmeta.len() || file_mtime_secs(&smeta) > file_mtime_secs(&dmeta) {
-                    out.push(SyncEntry { rel: rel_str, action: "update".into(), is_dir: false, size });
-                }
-            }
-        }
-    }
+    // Quelle durchlaufen → copy/update (robust gegen transiente Netzwerkfehler).
+    preview_walk_src(&src_root, &dst_root, &src_root, &mut out)?;
 
-    // Ziel durchlaufen → delete (nur Extras, oberste Ebene)
+    // Ziel durchlaufen → delete (nur Extras; Teilbäume werden als Einheit gemeldet).
     if delete_extra && dst_root.is_dir() {
-        let mut it = WalkDir::new(&dst_root).into_iter();
-        while let Some(entry) = it.next() {
-            let entry = match entry {
-                Ok(e) => e,
-                Err(_) => continue,
-            };
-            let p = entry.path();
-            if p == dst_root {
-                continue;
-            }
-            let rel = match p.strip_prefix(&dst_root) {
-                Ok(r) => r,
-                Err(_) => continue,
-            };
-            if !src_root.join(rel).exists() {
-                let is_dir = entry.file_type().is_dir();
-                let size = entry.metadata().map(|m| m.len()).unwrap_or(0);
-                out.push(SyncEntry {
-                    rel: rel.to_string_lossy().into_owned(),
-                    action: "delete".into(),
-                    is_dir,
-                    size,
-                });
-                if is_dir {
-                    it.skip_current_dir();
-                }
-            }
-        }
+        preview_walk_dst(&src_root, &dst_root, &dst_root, &mut out)?;
     }
 
     Ok(out)
@@ -2543,6 +2908,7 @@ pub fn run() {
             force_delete_admin,
             path_exists,
             path_is_network,
+            bust_dir_cache,
             list_volumes,
             list_network_bookmarks,
             mount_network_url,
