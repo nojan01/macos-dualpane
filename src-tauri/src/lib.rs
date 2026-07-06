@@ -1232,12 +1232,18 @@ struct JobCtx<'a> {
 
 impl<'a> JobCtx<'a> {
     fn emit(&self, current: &str) {
+        // `total` ist nur eine Schätzung: Symlinks werden einmal gezählt, beim
+        // Kopieren auf Netzlaufwerke (WebDAV/SMB) aber dereferenziert, sodass
+        // ganze Zielverzeichnisse zusätzlich kopiert werden. Dadurch kann `done`
+        // die Schätzung überschreiten ("297 / 252"). Wir korrigieren die Anzeige,
+        // indem `total` mindestens so groß wie `done` ausgewiesen wird.
+        let total = self.total.max(self.done);
         let _ = self.app.emit(
             "job-progress",
             JobProgress {
                 job_id: self.job_id.to_string(),
                 done: self.done,
-                total: self.total,
+                total,
                 current: current.to_string(),
                 finished: false,
                 cancelled: false,

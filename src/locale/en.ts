@@ -309,6 +309,7 @@ export const en: Record<string, string> = {
   "sync.extrasPrompt": "{count} item(s) exist in the destination but not (any more) in the source. Delete them in the destination too (move to trash)?",
   "sync.start": "Synchronize",
   "sync.selectFolder": "Please select a single folder to synchronize.",
+  "sync.preparing": "Preparing synchronization – this may take a while on network drives…",
 
   // Network / Connect to server (⌘K)
   "network.connectServer": "Connect to server…",

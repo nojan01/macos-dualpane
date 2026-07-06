@@ -549,6 +549,23 @@ body.col-resizing * { cursor: col-resize !important; -webkit-user-select: none !
 .sync-option input {
   cursor: pointer;
 }
+.sync-preparing {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 13px;
+  color: #bbb;
+  margin: 12px 0;
+}
+.sync-preparing .spinner {
+  width: 16px;
+  height: 16px;
+  flex: none;
+  border: 2px solid rgba(255, 255, 255, 0.25);
+  border-top-color: var(--accent, #4a90e2);
+  border-radius: 50%;
+  animation: tb-spin 0.8s linear infinite;
+}
 .modal-list .danger {
   color: #e07a7a;
 }

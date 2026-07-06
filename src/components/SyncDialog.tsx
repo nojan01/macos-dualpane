@@ -51,7 +51,10 @@ export function SyncDialog() {
                 </Show>
               </>
             }>
-              <p>{t("common.loading")}</p>
+              <p class="sync-preparing">
+                <span class="spinner" aria-hidden="true" />
+                {t("sync.preparing")}
+              </p>
             </Show>
             <div class="modal-actions">
               <button
