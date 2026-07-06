@@ -584,6 +584,42 @@ fn path_is_network(path: String) -> bool {
         .unwrap_or(false)
 }
 
+/// Versucht, den Verzeichnis-Cache eines Netzlaufwerks (macOS webdavfs/smbfs)
+/// zu invalidieren, damit ein direkt danach folgendes `read_dir` ein frisches
+/// PROPFIND auslöst und z. B. extern (über die Web-GUI) gelöschte Dateien
+/// nicht mehr als „Geister" im Listing erscheinen.
+///
+/// macOS bietet KEINE öffentliche API, um den webdavfs-Verzeichnis-Cache gezielt
+/// zu leeren – zuverlässig geht das nur per Aus-/Einhängen. Der einzige
+/// nicht-destruktive Trick ist, das Verzeichnis kurz zu verändern (verborgene
+/// Temp-Datei anlegen und sofort wieder löschen); dadurch markiert webdavfs den
+/// Cache-Knoten als „dirty" und liest beim nächsten Listing frisch nach.
+/// Best-effort: nur für Netzlaufwerke, Fehler (z. B. schreibgeschützt) werden
+/// stillschweigend ignoriert – der anschließende Refresh läuft ohnehin.
+#[tauri::command]
+async fn bust_dir_cache(path: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let full = expand_tilde(&path);
+        let fs = mount_fs_types();
+        let is_net = path_fstype(&full, &fs)
+            .map(|t| is_network_fstype(&t))
+            .unwrap_or(false);
+        if !is_net || !full.is_dir() {
+            return;
+        }
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let tmp = full.join(format!(".dualbeam-refresh-{}-{}", std::process::id(), ts));
+        if std::fs::File::create(&tmp).is_ok() {
+            let _ = std::fs::remove_file(&tmp);
+        }
+    })
+    .await
+    .map_err(|e| e.to_string())
+}
+
 // IONOS HiDrive WebDAV-Netzwerk-Bookmark (Host, Anzeigename, URL an einer Stelle).
 // Nur in der persönlichen Build-Variante (Feature `hidrive`, standardmäßig aktiv).
 // Die öffentliche Version wird mit `--no-default-features` gebaut; dann existiert
@@ -2859,6 +2895,7 @@ pub fn run() {
             force_delete_admin,
             path_exists,
             path_is_network,
+            bust_dir_cache,
             list_volumes,
             list_network_bookmarks,
             mount_network_url,

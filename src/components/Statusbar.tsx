@@ -1,4 +1,4 @@
-import { state, selTick, refreshPane, toggleHidden, toggleHelp } from "../state";
+import { state, selTick, forceRefreshPane, toggleHidden, toggleHelp } from "../state";
 import { beginRename, makeFolder, startTransfer, deleteSelected, selectedEntries, archiveAction } from "../jobs";
 import { quickLook, openTerminal } from "../ipc";
 import { Show } from "solid-js";
@@ -101,7 +101,7 @@ export function FnBar() {
       <button class="fn-btn" title={t("fn.zip.title")} onClick={() => void archiveAction()}>
         <b>⌘E</b> {t("fn.zip")}
       </button>
-      <button class="fn-btn" title={t("fn.refresh.title")} onClick={() => void refreshPane(state.active)}>
+      <button class="fn-btn" title={t("fn.refresh.title")} onClick={() => void forceRefreshPane(state.active)}>
         <b>⌘R</b> {t("fn.refresh")}
       </button>
       <button class="fn-btn" title={t("fn.terminal.title")} onClick={() => { const cwd = state[state.active]?.cwd; if (cwd) void openTerminal(cwd); }}>

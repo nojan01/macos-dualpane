@@ -15,7 +15,7 @@ import { PropertiesDialog } from "./components/PropertiesDialog";
 import { JobBar } from "./components/JobBar";
 import { AboutDialog, openAbout } from "./components/AboutDialog";
 import { HelpDialog, openHelp } from "./components/HelpDialog";
-import { loadPane, state, setActive, setState, refreshPane, refreshAll, toggleCompareMode } from "./state";
+import { loadPane, state, setActive, setState, refreshPane, forceRefreshAll, toggleCompareMode } from "./state";
 import { homeDir, openTerminal, setDockBadge, setMenuLanguage, type JobProgress, type PaneChanged } from "./ipc";
 import { attachKeymap } from "./keymap";
 import { setHoverTarget, setDragEffect, defaultDragMode, toggleDefaultDragMode } from "./dnd";
@@ -63,7 +63,7 @@ export function App() {
   const doRefresh = () => {
     setRefreshFlash(true);
     setTimeout(() => setRefreshFlash(false), 350);
-    void refreshAll();
+    void forceRefreshAll();
   };
 
   const panesTemplate = () => {

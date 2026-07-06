@@ -53,6 +53,12 @@ export async function pathIsNetwork(path: string): Promise<boolean> {
   return invoke<boolean>("path_is_network", { path });
 }
 
+// Nudge the macOS network-drive (webdavfs/smbfs) directory cache so the next
+// read_dir returns a fresh listing. Best-effort; resolves even on failure.
+export async function bustDirCache(path: string): Promise<void> {
+  return invoke<void>("bust_dir_cache", { path });
+}
+
 export type Volume = { name: string; path: string; kind: "local" | "network" };
 
 export async function listVolumes(): Promise<Volume[]> {

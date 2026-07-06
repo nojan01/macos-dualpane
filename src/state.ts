@@ -1,7 +1,7 @@
 import { createSignal } from "solid-js";
 import { createStore, type SetStoreFunction } from "solid-js/store";
 import type { Entry, PaneId, SortKey, SortDir } from "./types";
-import { listDir, watchPath, pathExists, pathIsNetwork, homeDir, unwatchPane } from "./ipc";
+import { listDir, watchPath, pathExists, pathIsNetwork, homeDir, unwatchPane, bustDirCache } from "./ipc";
 import { errMsg } from "./i18n";
 
 export type PaneState = {
@@ -206,6 +206,20 @@ export async function loadPane(pane: PaneId, path: string) {
 
 export async function refreshPane(pane: PaneId) {
   await loadPane(pane, state[pane].cwd);
+}
+
+// „Harter" Refresh für die explizite Nutzer-Aktion (Toolbar-Button / ⌘R / ⌘⇧R):
+// Vor dem Neuladen wird bei Netzlaufwerken der Verzeichnis-Cache angestoßen
+// (macOS webdavfs/smbfs liefert Listings sonst aus einem veralteten Cache, in
+// dem z. B. über die Web-GUI gelöschte Dateien noch als Geister erscheinen).
+// Best-effort – schlägt der Cache-Anstoß fehl, wird trotzdem neu geladen.
+export async function forceRefreshPane(pane: PaneId) {
+  try { await bustDirCache(state[pane].cwd); } catch {}
+  await loadPane(pane, state[pane].cwd);
+}
+
+export async function forceRefreshAll() {
+  await Promise.all([forceRefreshPane("left"), forceRefreshPane("right")]);
 }
 
 // Aktualisiert beide Panes. Damit wird auch ein im inaktiven Pane geöffnetes

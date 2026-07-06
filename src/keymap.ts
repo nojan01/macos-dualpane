@@ -1,4 +1,4 @@
-import { state, setActive, setCursor, selectOnly, loadPane, toggleHidden, refreshPane, setFilter, requestFocusFilter, toggleSidebar, togglePreview, toggleHelp, newTab, closeActiveTab, switchTab } from "./state";
+import { state, setActive, setCursor, selectOnly, loadPane, toggleHidden, forceRefreshPane, setFilter, requestFocusFilter, toggleSidebar, togglePreview, toggleHelp, newTab, closeActiveTab, switchTab } from "./state";
 import { openDefault, quickLook, clipboardWriteFiles } from "./ipc";
 import { openProperties } from "./components/PropertiesDialog";
 import { startTransfer, deleteSelected, makeFolder, beginRename, duplicateSelected, archiveAction, pasteFromClipboard } from "./jobs";
@@ -171,7 +171,7 @@ export function attachKeymap() {
         case "r":
           ev.preventDefault();
           if (ev.shiftKey) {
-            await refreshPane(pane);
+            await forceRefreshPane(pane);
           } else {
             openRenameDialog();
           }
@@ -179,7 +179,7 @@ export function attachKeymap() {
         case "R":
           // Manche Layouts liefern "R" bei Cmd+Shift+R.
           ev.preventDefault();
-          await refreshPane(pane);
+          await forceRefreshPane(pane);
           return;
         case "d":
           ev.preventDefault();
