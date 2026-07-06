@@ -1,5 +1,6 @@
 #import <Cocoa/Cocoa.h>
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
+#import <Quartz/Quartz.h>
 #import <objc/runtime.h>
 #include "promise_drag.h"
 
@@ -613,6 +614,56 @@ void db_install_dock_menu(const char *title, db_dock_callback cb) {
         if (!class_addMethod(cls, sel, (IMP)db_dock_menu_imp, types)) {
             class_replaceMethod(cls, sel, (IMP)db_dock_menu_imp, types);
         }
+    };
+    if ([NSThread isMainThread]) work();
+    else dispatch_sync(dispatch_get_main_queue(), work);
+}
+
+#pragma mark - Quick Look
+
+/* Datenquelle für das native QLPreviewPanel. NSURL erfüllt bereits das
+ * QLPreviewItem-Protokoll, daher genügt es, die URLs vorzuhalten. */
+@interface DBQLDataSource : NSObject <QLPreviewPanelDataSource, QLPreviewPanelDelegate>
+@property (strong) NSArray<NSURL *> *urls;
+@end
+
+@implementation DBQLDataSource
+- (NSInteger)numberOfPreviewItemsInPreviewPanel:(QLPreviewPanel *)panel {
+    return (NSInteger)self.urls.count;
+}
+- (id<QLPreviewItem>)previewPanel:(QLPreviewPanel *)panel previewItemAtIndex:(NSInteger)index {
+    if (index < 0 || index >= (NSInteger)self.urls.count) return nil;
+    return self.urls[(NSUInteger)index];
+}
+@end
+
+static DBQLDataSource *g_ql_source = nil;
+
+void db_quick_look(const char *const *paths, int count) {
+    if (paths == NULL || count <= 0) return;
+    NSMutableArray<NSURL *> *urls = [NSMutableArray arrayWithCapacity:(NSUInteger)count];
+    for (int i = 0; i < count; i++) {
+        if (paths[i] == NULL) continue;
+        NSString *s = [NSString stringWithUTF8String:paths[i]];
+        if (s.length == 0) continue;
+        [urls addObject:[NSURL fileURLWithPath:s]];
+    }
+    if (urls.count == 0) return;
+
+    void (^work)(void) = ^{
+        if (g_ql_source == nil) g_ql_source = [[DBQLDataSource alloc] init];
+        QLPreviewPanel *panel = [QLPreviewPanel sharedPreviewPanel];
+        BOOL visible = [QLPreviewPanel sharedPreviewPanelExists] && panel.isVisible;
+        // Gleiche Auswahl erneut ausgelöst -> schließen (wie Finder mit Leertaste).
+        if (visible && [g_ql_source.urls isEqualToArray:urls]) {
+            [panel orderOut:nil];
+            return;
+        }
+        g_ql_source.urls = urls;
+        panel.dataSource = g_ql_source;
+        panel.delegate = g_ql_source;
+        if (!visible) [panel makeKeyAndOrderFront:nil];
+        [panel reloadData];
     };
     if ([NSThread isMainThread]) work();
     else dispatch_sync(dispatch_get_main_queue(), work);

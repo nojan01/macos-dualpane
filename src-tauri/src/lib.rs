@@ -1197,14 +1197,8 @@ async fn mount_dmg(path: String) -> Result<String, String> {
 #[tauri::command]
 fn quick_look(path: String) -> Result<(), String> {
     let p = expand_tilde(&path);
-    std::process::Command::new("qlmanage")
-        .arg("-p")
-        .arg(&p)
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .map(|_| ())
-        .map_err(|e| e.to_string())
+    let s = p.to_string_lossy().to_string();
+    promise_drag::quick_look(&[s])
 }
 
 // ---------- Jobs (copy / move) ----------

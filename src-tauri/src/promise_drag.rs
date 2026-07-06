@@ -26,6 +26,7 @@ extern "C" {
     ) -> c_int;
     fn db_set_dock_badge(label: *const c_char);
     fn db_install_dock_menu(title: *const c_char, cb: DockCallback);
+    fn db_quick_look(paths: *const *const c_char, count: c_int);
     fn db_file_icon_png(
         path: *const c_char,
         size: c_int,
@@ -188,6 +189,22 @@ pub fn install_dock_menu(title: &str) {
     if let Ok(c) = CString::new(title) {
         unsafe { db_install_dock_menu(c.as_ptr(), on_dock_new_window) };
     }
+}
+
+/// Show the native Quick Look preview panel (Finder's spacebar preview) for
+/// the given file paths. Re-triggering the same selection toggles it closed.
+pub fn quick_look(paths: &[String]) -> Result<(), String> {
+    if paths.is_empty() {
+        return Err("keine Pfade angegeben".into());
+    }
+    let cstrings: Vec<CString> = paths
+        .iter()
+        .map(|p| CString::new(p.as_str()))
+        .collect::<Result<_, _>>()
+        .map_err(|e| e.to_string())?;
+    let ptrs: Vec<*const c_char> = cstrings.iter().map(|c| c.as_ptr()).collect();
+    unsafe { db_quick_look(ptrs.as_ptr(), ptrs.len() as c_int) };
+    Ok(())
 }
 
 pub fn file_icon_png(path: &str, size: u32) -> Result<Vec<u8>, String> {

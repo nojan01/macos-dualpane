@@ -46,6 +46,11 @@ void db_clean_edit_menu(void);
 typedef void (*db_dock_callback)(void);
 void db_install_dock_menu(const char *title, db_dock_callback cb);
 
+/* Present a native Quick Look preview panel (like Finder's spacebar preview)
+ * for the given file paths. If the same selection is already shown, the panel
+ * is toggled closed. Runs on the main thread. */
+void db_quick_look(const char *const *paths, int count);
+
 #ifdef __cplusplus
 }
 #endif

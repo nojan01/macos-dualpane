@@ -8,6 +8,7 @@ fn main() {
             .compile("dualbeam_promise_drag");
         println!("cargo:rustc-link-lib=framework=Cocoa");
         println!("cargo:rustc-link-lib=framework=UniformTypeIdentifiers");
+        println!("cargo:rustc-link-lib=framework=Quartz");
         println!("cargo:rerun-if-changed=src/promise_drag.m");
         println!("cargo:rerun-if-changed=src/promise_drag.h");
     }
