@@ -288,6 +288,10 @@ export const de: Record<string, string> = {
   "jobs.trash.forceAdmin": "Papierkorb-Verschieben fehlgeschlagen:\n{msg}\n\nEndgültig als Administrator löschen?",
   "jobs.trash.protectedAdmin": "\"{name}\" ist geschützt und kann nicht in den Papierkorb verschoben werden.\n\nEndgültig als Administrator löschen?",
   "jobs.trash.deleteAsAdmin": "Als Admin löschen",
+  "jobs.trash.deletePermTitle": "Endgültig löschen?",
+  "jobs.trash.permOne": "\"{name}\" liegt auf einem Netzlaufwerk ohne Papierkorb und wird endgültig gelöscht.",
+  "jobs.trash.permMany": "{count} Einträge liegen auf einem Netzlaufwerk ohne Papierkorb und werden endgültig gelöscht.",
+  "jobs.trash.deletePerm": "Endgültig löschen",
   "jobs.trash.timeMachine.title": "Time Machine",
   "jobs.trash.timeMachine.message":
     "Time-Machine-Backups sind durch macOS geschützt und können in dieser App nicht gelöscht werden.\n\nVerwende dafür die macOS-App „Time Machine“ oder das Festplattendienstprogramm.",

@@ -14,6 +14,7 @@ import {
   moveToTrash,
   forceDeleteAdmin,
   pathExists,
+  pathIsNetwork,
   zipCreate,
   zipExtract,
   createSymlink,
@@ -201,13 +202,22 @@ export async function deleteSelected(skipConfirm = false) {
   if (sel.length === 0) return;
 
   if (!skipConfirm) {
+    // Auf Netzlaufwerken (z. B. HiDrive/WebDAV) gibt es keinen Papierkorb –
+    // dort wird direkt und dauerhaft gelöscht. Das in der Bestätigung klar sagen.
+    let onNetwork = false;
+    try {
+      onNetwork = await pathIsNetwork(sel[0].path);
+    } catch {}
     const ok = await askConfirm({
-      title: t("jobs.trash.title"),
-      message:
-        sel.length === 1
+      title: onNetwork ? t("jobs.trash.deletePermTitle") : t("jobs.trash.title"),
+      message: onNetwork
+        ? sel.length === 1
+          ? t("jobs.trash.permOne", { name: sel[0].name })
+          : t("jobs.trash.permMany", { count: sel.length })
+        : sel.length === 1
           ? t("jobs.trash.one", { name: sel[0].name })
           : t("jobs.trash.many", { count: sel.length }),
-      okLabel: t("common.delete"),
+      okLabel: onNetwork ? t("jobs.trash.deletePerm") : t("common.delete"),
       danger: true,
     });
     if (!ok) return;

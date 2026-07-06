@@ -49,6 +49,10 @@ export async function pathExists(path: string): Promise<boolean> {
   return invoke<boolean>("path_exists", { path });
 }
 
+export async function pathIsNetwork(path: string): Promise<boolean> {
+  return invoke<boolean>("path_is_network", { path });
+}
+
 export type Volume = { name: string; path: string; kind: "local" | "network" };
 
 export async function listVolumes(): Promise<Volume[]> {
