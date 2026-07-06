@@ -405,14 +405,14 @@ export function App() {
           <button
             class="tb-glyph"
             onClick={() => syncPanes("left")}
-            title={state.syncMode === "nav" ? "Verzeichnis nach links übernehmen" : "Inhalte nach links spiegeln (fehlende Dateien kopieren)"}
+            title={state.syncMode === "nav" ? "Verzeichnis nach links übernehmen" : "Inhalte nach links spiegeln (kopieren, auf Wunsch löschen) – mit Vorschau"}
           >
             <span class="tb-icon-text">←</span>
           </button>
           <button
             class="tb-glyph"
             onClick={() => syncPanes("right")}
-            title={state.syncMode === "nav" ? "Verzeichnis nach rechts übernehmen" : "Inhalte nach rechts spiegeln (fehlende Dateien kopieren)"}
+            title={state.syncMode === "nav" ? "Verzeichnis nach rechts übernehmen" : "Inhalte nach rechts spiegeln (kopieren, auf Wunsch löschen) – mit Vorschau"}
           >
             <span class="tb-icon-text">→</span>
           </button>
