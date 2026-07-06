@@ -1225,6 +1225,9 @@ struct JobCtx<'a> {
     cancel: &'a Arc<AtomicBool>,
     done: u64,
     total: u64,
+    /// Verschachtelungstiefe beim Dereferenzieren von Symlinks (Schleifenschutz,
+    /// falls das Ziel-Dateisystem keine Symlinks unterstützt).
+    deref_depth: u32,
 }
 
 impl<'a> JobCtx<'a> {
@@ -1322,6 +1325,16 @@ fn copy_file_with_metadata(src: &Path, dst: &Path) -> std::io::Result<()> {
     std::fs::copy(src, dst).map(|_| ())
 }
 
+/// Prüft, ob ein Fehler „Operation nicht unterstützt" (ENOTSUP/EOPNOTSUPP,
+/// macOS „os error 45") ist – typisch für WebDAV/SMB/FAT bei Symlinks/ACLs/xattr.
+#[cfg(unix)]
+fn is_enotsup(e: &std::io::Error) -> bool {
+    matches!(
+        e.raw_os_error(),
+        Some(libc::ENOTSUP) | Some(libc::EOPNOTSUPP)
+    )
+}
+
 fn copy_recursive(
     src: &Path,
     dst: &Path,
@@ -1345,9 +1358,69 @@ fn copy_recursive(
         }
         let target = std::fs::read_link(src)?;
         #[cfg(unix)]
-        std::os::unix::fs::symlink(&target, dst)?;
-        ctx.done += 1;
-        ctx.emit(&src.to_string_lossy());
+        {
+            match std::os::unix::fs::symlink(&target, dst) {
+                Ok(()) => {
+                    ctx.done += 1;
+                    ctx.emit(&src.to_string_lossy());
+                }
+                Err(e) if is_enotsup(&e) => {
+                    // Ziel-Dateisystem (WebDAV/SMB/FAT …) unterstützt keine Symlinks
+                    // (ENOTSUP / os error 45). Statt abzubrechen dereferenzieren wir:
+                    // dem Link folgen und das Ziel real kopieren, damit z. B.
+                    // .app-Bundles (Frameworks mit Versions-Symlinks) nutzbar bleiben.
+                    // Tiefenbegrenzung schützt vor Symlink-Schleifen.
+                    match std::fs::metadata(src) {
+                        Ok(tmeta) => {
+                            if ctx.deref_depth >= 64 {
+                                return Err(std::io::Error::new(
+                                    std::io::ErrorKind::Other,
+                                    "Symlink-Schleife oder zu tiefe Verschachtelung beim Dereferenzieren",
+                                ));
+                            }
+                            ctx.deref_depth += 1;
+                            let res: std::io::Result<()> = if tmeta.is_dir() {
+                                // read_dir folgt dem Symlink und liest das Zielverzeichnis.
+                                // Fortschritt zählen die Kind-Kopien selbst.
+                                if !dst.exists() {
+                                    std::fs::create_dir_all(dst)?;
+                                }
+                                (|| {
+                                    for entry in std::fs::read_dir(src)? {
+                                        let entry = entry?;
+                                        let from = entry.path();
+                                        let to = dst.join(entry.file_name());
+                                        copy_recursive(&from, &to, overwrite, ctx)?;
+                                    }
+                                    Ok(())
+                                })()
+                            } else {
+                                // copyfile folgt dem Symlink und kopiert die Zieldaten.
+                                copy_file_with_metadata(src, dst).map(|_| {
+                                    ctx.done += 1;
+                                    ctx.emit(&src.to_string_lossy());
+                                })
+                            };
+                            ctx.deref_depth -= 1;
+                            res?;
+                        }
+                        Err(_) => {
+                            // Defekter (dangling) Symlink: auf einem FS ohne Symlink-
+                            // Unterstützung nicht abbildbar → überspringen statt abbrechen.
+                            ctx.done += 1;
+                            ctx.emit(&src.to_string_lossy());
+                        }
+                    }
+                }
+                Err(e) => return Err(e),
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = &target;
+            ctx.done += 1;
+            ctx.emit(&src.to_string_lossy());
+        }
     } else if meta.is_dir() {
         if !dst.exists() {
             std::fs::create_dir_all(dst)?;
@@ -1411,6 +1484,7 @@ async fn run_job(
             cancel: &cancel2,
             done: 0,
             total,
+            deref_depth: 0,
         };
         ctx.emit("");
         for it in &items {
