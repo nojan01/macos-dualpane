@@ -28,7 +28,11 @@ async function reloadPreview() {
   if (!s) return;
   setSyncLoading(true);
   try {
-    const entries = await syncPreview(s.src, s.dst, syncDeleteExtra());
+    // Immer mit delete_extra=true vorschauen, damit überzählige Ziel-Dateien
+    // (in der Quelle gelöscht/nicht vorhanden) stets erkannt und dem Nutzer
+    // angezeigt werden. Ob sie tatsächlich gelöscht werden, entscheidet erst
+    // die Checkbox (syncDeleteExtra) in confirmSync.
+    const entries = await syncPreview(s.src, s.dst, true);
     setSyncEntries(entries);
   } catch (e) {
     await notifyError(t("common.error", { msg: errMsg(e) }));
@@ -46,9 +50,10 @@ export async function openSyncDialog(src: string, dst: string, srcName: string, 
   await reloadPreview();
 }
 
-export async function setSyncDelete(v: boolean) {
+export function setSyncDelete(v: boolean) {
+  // Nur den Schalter umlegen – die Extras sind bereits in der Vorschau enthalten,
+  // ein erneuter (bei Netzlaufwerken langsamer) Preview-Roundtrip entfällt.
   setSyncDeleteExtra(v);
-  await reloadPreview();
 }
 
 export function cancelSync() {
@@ -61,10 +66,11 @@ export async function confirmSync() {
   if (!s) return;
   const entries = syncEntries();
   setSyncDialog(null);
-  if (entries.length === 0) return;
 
   const copies = entries.filter((e) => e.action === "copy" || e.action === "update");
-  const deletes = entries.filter((e) => e.action === "delete");
+  // Löschungen nur ausführen, wenn der Nutzer sie ausdrücklich bestätigt hat.
+  const deletes = syncDeleteExtra() ? entries.filter((e) => e.action === "delete") : [];
+  if (copies.length === 0 && deletes.length === 0) return;
 
   const id = newJobId();
   setState("job", { id, kind: "copy", done: 0, total: 0, current: "" });

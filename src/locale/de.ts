@@ -306,6 +306,7 @@ export const de: Record<string, string> = {
   "sync.deleteCount": "Zu löschen: {count}",
   "sync.upToDate": "Alles ist bereits aktuell.",
   "sync.deleteExtra": "Dateien im Ziel löschen, die in der Quelle nicht existieren",
+  "sync.extrasPrompt": "{count} Element(e) sind im Ziel vorhanden, aber nicht (mehr) in der Quelle. Auch im Ziel löschen (in den Papierkorb)?",
   "sync.start": "Synchronisieren",
   "sync.selectFolder": "Bitte genau einen Ordner zum Synchronisieren auswählen.",
 

@@ -23,6 +23,7 @@ import {
   type JobItem,
   type JobKind,
 } from "./ipc";
+import { openSyncDialog } from "./sync";
 
 const newJobId = () => `job-${Date.now()}-${Math.floor(Math.random() * 1e6)}`;
 
@@ -417,10 +418,11 @@ export async function syncPanes(direction: "left" | "right") {
     await loadPane(dst, srcCwd);
     return;
   }
-  // merge
-  const entries = state[src].entriesRaw;
-  if (!entries || entries.length === 0) return;
+  // merge: über den Sync-Dialog, damit neue/geänderte Dateien kopiert UND
+  // im Ziel überzählige (in der Quelle gelöschte) Dateien nach Rückfrage
+  // gelöscht werden können. Zeigt eine Vorschau (Neu/Geändert/Zu löschen).
   const dstCwd = state[dst].cwd;
-  if (srcCwd === dstCwd) return;
-  await transferEntries("copy", entries, dstCwd, [src, dst], "skip");
+  if (!dstCwd || srcCwd === dstCwd) return;
+  const name = srcCwd.replace(/\/+$/, "").split("/").pop() || srcCwd;
+  await openSyncDialog(srcCwd, dstCwd, name, dst);
 }

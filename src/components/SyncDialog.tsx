@@ -15,7 +15,9 @@ export function SyncDialog() {
     }
     return { copy, update, del };
   });
-  const total = () => counts().copy + counts().update + counts().del;
+  // Was tatsächlich ausgeführt wird: Kopien/Updates immer, Löschungen nur wenn bestätigt.
+  const effectiveTotal = () =>
+    counts().copy + counts().update + (syncDeleteExtra() ? counts().del : 0);
 
   return (
     <Show when={syncDialog()}>
@@ -29,21 +31,24 @@ export function SyncDialog() {
                 <ul class="modal-list">
                   <li>{t("sync.copyCount", { count: counts().copy })}</li>
                   <li>{t("sync.updateCount", { count: counts().update })}</li>
-                  <Show when={syncDeleteExtra()}>
+                  <Show when={counts().del > 0}>
                     <li class="danger">{t("sync.deleteCount", { count: counts().del })}</li>
                   </Show>
                 </ul>
-                <Show when={total() === 0}>
+                <Show when={counts().copy + counts().update + counts().del === 0}>
                   <p>{t("sync.upToDate")}</p>
                 </Show>
-                <label class="sync-option">
-                  <input
-                    type="checkbox"
-                    checked={syncDeleteExtra()}
-                    onChange={(e) => void setSyncDelete((e.currentTarget as HTMLInputElement).checked)}
-                  />
-                  {t("sync.deleteExtra")}
-                </label>
+                <Show when={counts().del > 0}>
+                  <p class="danger">{t("sync.extrasPrompt", { count: counts().del })}</p>
+                  <label class="sync-option">
+                    <input
+                      type="checkbox"
+                      checked={syncDeleteExtra()}
+                      onChange={(e) => setSyncDelete((e.currentTarget as HTMLInputElement).checked)}
+                    />
+                    {t("sync.deleteExtra")}
+                  </label>
+                </Show>
               </>
             }>
               <p>{t("common.loading")}</p>
@@ -51,7 +56,7 @@ export function SyncDialog() {
             <div class="modal-actions">
               <button
                 onClick={() => void confirmSync()}
-                disabled={syncLoading() || total() === 0}
+                disabled={syncLoading() || effectiveTotal() === 0}
               >
                 {t("sync.start")}
               </button>
