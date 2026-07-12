@@ -17,6 +17,8 @@ export const en: Record<string, string> = {
   "toolbar.sidebar": "Sidebar (⌘B)",
   "toolbar.preview": "Preview (⌘I)",
   "toolbar.refresh": "Refresh (⌘⇧R)",
+  "toolbar.hiddenShow": "Show hidden files (⌘.)",
+  "toolbar.hiddenHide": "Hide hidden files (⌘.)",
   "toolbar.terminal": "Open Terminal here",
   "toolbar.columns": "Column view",
   "toolbar.compare": "Compare mode (left/right)",
@@ -24,6 +26,10 @@ export const en: Record<string, string> = {
   "toolbar.dragMove": "Mouse drag: move (Alt = copy)",
   "toolbar.themeTitle": "Theme: {label} — click to switch (Auto/Light/Dark)",
   "toolbar.langTitle": "Language: {label} — click to switch (Auto/DE/EN)",
+
+  // Path bar
+  "path.up": "Parent folder",
+  "path.back": "Previous folder",
 
   // Tab bar
   "tab.close": "Close tab",
@@ -46,7 +52,7 @@ export const en: Record<string, string> = {
   // Pane
   "pane.filter.placeholder": "Filter (⌘F)",
   "pane.filter.clear": "Clear filter",
-  "pane.filter.searchRecursive": "Search recursively (⇧⌘F)",
+  "pane.filter.searchRecursive": "Search recursively (⌘F)",
   "pane.col.name": "Name",
   "pane.col.size": "Size",
   "pane.col.modified": "Modified",
@@ -93,11 +99,13 @@ export const en: Record<string, string> = {
   "pane.rename.title": "Rename",
   "pane.rename.placeholder": "Name",
   "pane.dmg.mountedTitle": "DMG is already mounted",
-  "pane.dmg.mountedMessage": "Mount point: {path}\n\nDo you want to eject the volume? (Cancel will open it)",
+  "pane.dmg.mountedMessage":
+    "Mount point: {path}\n\nDo you want to eject the volume? (Cancel will open it)",
   "pane.dmg.eject": "Eject",
   "pane.dmg.openInstead": "Open",
   "pane.dmg.failed": "DMG action failed",
-  "pane.error.permission": "Access denied. The app likely lacks permission for this folder.",
+  "pane.error.permission":
+    "Access denied. The app likely lacks permission for this folder.",
   "pane.error.openSettings": "Open System Settings",
 
   // Preview
@@ -215,7 +223,7 @@ export const en: Record<string, string> = {
   "sidebar.eject": "Eject",
   "sidebar.reconnect": "Reconnect",
   "sidebar.ejectTitle": "Eject volume",
-  "sidebar.ejectConfirm": "Eject \"{name}\"?",
+  "sidebar.ejectConfirm": 'Eject "{name}"?',
   "sidebar.ejectFailed": "Eject failed",
 
   // Statusbar
@@ -277,6 +285,8 @@ export const en: Record<string, string> = {
 
   // jobs.ts
   "jobs.sameSrcDst": "Source and destination are identical.",
+  "jobs.recursiveTarget":
+    "“{name}” cannot be copied or moved into itself or one of its subfolders.",
   "jobs.newFolder.title": "New folder",
   "jobs.newFolder.prompt": "Name of the new folder:",
   "jobs.newFolder.placeholder": "New folder",
@@ -284,14 +294,18 @@ export const en: Record<string, string> = {
   "jobs.newFile.prompt": "Name of the new file:",
   "jobs.newFile.placeholder": "New file.txt",
   "jobs.trash.title": "Move to Trash?",
-  "jobs.trash.one": "\"{name}\" will be moved to the Trash.",
+  "jobs.trash.one": '"{name}" will be moved to the Trash.',
   "jobs.trash.many": "{count} items will be moved to the Trash.",
-  "jobs.trash.forceAdmin": "Move to Trash failed:\n{msg}\n\nPermanently delete as administrator?",
-  "jobs.trash.protectedAdmin": "\"{name}\" is protected and cannot be moved to the Trash.\n\nPermanently delete as administrator?",
+  "jobs.trash.forceAdmin":
+    "Move to Trash failed:\n{msg}\n\nPermanently delete as administrator?",
+  "jobs.trash.protectedAdmin":
+    '"{name}" is protected and cannot be moved to the Trash.\n\nPermanently delete as administrator?',
   "jobs.trash.deleteAsAdmin": "Delete as admin",
   "jobs.trash.deletePermTitle": "Delete permanently?",
-  "jobs.trash.permOne": "\"{name}\" is on a network drive and has no Trash. It will be deleted permanently.",
-  "jobs.trash.permMany": "{count} items are on a network drive and have no Trash. They will be deleted permanently.",
+  "jobs.trash.permOne":
+    '"{name}" is on a network drive and has no Trash. It will be deleted permanently.',
+  "jobs.trash.permMany":
+    "{count} items are on a network drive and have no Trash. They will be deleted permanently.",
   "jobs.trash.deletePerm": "Delete permanently",
   "jobs.trash.timeMachine.title": "Time Machine",
   "jobs.trash.timeMachine.message":
@@ -301,16 +315,19 @@ export const en: Record<string, string> = {
 
   // Sync (sync.ts / SyncDialog)
   "sync.title": "Synchronize folder",
-  "sync.summary": "Synchronize \"{name}\" one-way into the other pane.",
+  "sync.summary": 'Synchronize "{name}" one-way into the other pane.',
   "sync.copyCount": "New: {count}",
   "sync.updateCount": "Changed: {count}",
   "sync.deleteCount": "To delete: {count}",
   "sync.upToDate": "Everything is already up to date.",
-  "sync.deleteExtra": "Delete files in the destination that don't exist in the source",
-  "sync.extrasPrompt": "{count} item(s) exist in the destination but not (any more) in the source. Delete them in the destination too (move to trash)?",
+  "sync.deleteExtra":
+    "Delete files in the destination that don't exist in the source",
+  "sync.extrasPrompt":
+    "{count} item(s) exist in the destination but not (any more) in the source. Delete them in the destination too (move to trash)?",
   "sync.start": "Synchronize",
   "sync.selectFolder": "Please select a single folder to synchronize.",
-  "sync.preparing": "Preparing synchronization – this may take a while on network drives…",
+  "sync.preparing":
+    "Preparing synchronization – this may take a while on network drives…",
   "sync.details": "Show details",
   "sync.actionNew": "New",
   "sync.actionChanged": "Changed",
@@ -319,9 +336,14 @@ export const en: Record<string, string> = {
   // Network / Connect to server (⌘K)
   "network.connectServer": "Connect to server…",
   "network.connectTitle": "Connect to server",
-  "network.connectLabel": "Server address (e.g. smb://server/share, https://webdav.example.com)",
+  "network.connectLabel":
+    "Server address (SMB or HTTPS WebDAV; e.g. smb://server/share)",
   "network.connect": "Connect",
   "network.connectFailed": "Connection failed",
+  "network.insecureTitle": "Insecure connection",
+  "network.insecureWarning":
+    "{url} uses an insecure network protocol. Data and credentials could be read or modified in transit. Continue?",
+  "network.insecureConnect": "Connect insecurely",
 
   // About dialog
   "about.title": "About DualBeam",
@@ -333,26 +355,41 @@ export const en: Record<string, string> = {
   "about.checkUpdates": "Check for updates",
   "about.checking": "Checking for updates…",
   "about.upToDate": "DualBeam is up to date (version {version}).",
-  "about.updateAvailable": "New version {version} available (installed: {current}).",
+  "about.updateAvailable":
+    "New version {version} available (installed: {current}).",
   "about.updateOpen": "Open download",
   "about.updateInstall": "Download & install",
   "about.downloading": "Downloading…",
-  "about.downloaded": "Download complete. Drag DualBeam into the Applications folder, then restart the app.",
+  "about.downloaded":
+    "Download complete. Drag DualBeam into the Applications folder, then restart the app.",
   "about.updateFailed": "Update check failed.",
   "toolbar.about": "About DualBeam",
   "toolbar.help": "Help",
 
   // Backend error codes
-  "err.network.scheme": "Unsupported address. Allowed schemes: smb://, afp://, nfs://, ftp(s):// or http(s):// (WebDAV).",
+  "err.network.scheme":
+    "Unsupported address. smb:// and https:// (WebDAV) are allowed. Insecure protocols require confirmation and a direct local IP address.",
   "err.network.badchars": "Invalid characters in the address.",
+  "err.network.invalidUrl": "Invalid server address.",
+  "err.network.credentials":
+    "Credentials must not be included in the address. Use the macOS sign-in dialog or Keychain instead.",
+  "err.network.localIpOnly":
+    "Insecure protocols are only allowed for direct private, link-local, or loopback IP addresses on the local network.",
+  "err.network.insecureConfirm": "The insecure connection was not confirmed.",
   "err.url.scheme": "URL scheme not allowed.",
   "err.exists": "Already exists: {0}",
   "err.path.invalidChar": "Invalid character in path/name.",
   "err.path.forbidden": "Forbidden path: {0}",
   "err.mount.failed": "Connection failed.",
-  "err.mount.notWebdav": "Connection failed. Over http(s):// macOS can only mount WebDAV servers — a plain web server cannot be mounted as a drive.",
-  "err.mount.ftp": "Connection failed. FTP has limited Finder support and cannot be mounted as a writable drive. Use SMB or WebDAV instead.",
-  "err.mount.unreachable": "Server unreachable. Check the address, port and network connection. Note: NFS does not prompt for a password — access is governed by the server's export/share list.",
+  "err.mount.notWebdav":
+    "Connection failed. Over http(s):// macOS can only mount WebDAV servers — a plain web server cannot be mounted as a drive.",
+  "err.mount.ftp":
+    "Connection failed. FTP has limited Finder support and cannot be mounted as a writable drive. Use SMB or WebDAV instead.",
+  "err.mount.unreachable":
+    "Server unreachable. Check the address, port and network connection. Note: NFS does not prompt for a password — access is governed by the server's export/share list.",
+  "err.mount.timeout": "The connection did not respond within two minutes.",
   "err.eject.failed": "Eject failed: {0}",
+  "err.eject.invalidMount":
+    "Only mounted volumes below /Volumes can be ejected.",
   "err.update.failed": "Update check failed.",
 };

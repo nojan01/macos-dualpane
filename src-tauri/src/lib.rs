@@ -1,15 +1,18 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::io::Write;
+use std::net::IpAddr;
+use std::process::{Command, Stdio};
 
 mod promise_drag;
+use notify_debouncer_mini::notify::RecommendedWatcher;
+use notify_debouncer_mini::{new_debouncer, notify::RecursiveMode, Debouncer};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, UNIX_EPOCH};
+use std::time::{Duration, Instant, UNIX_EPOCH};
 use tauri::{AppHandle, Emitter, Manager, State};
 use walkdir::WalkDir;
-use notify_debouncer_mini::{new_debouncer, notify::RecursiveMode, Debouncer};
-use notify_debouncer_mini::notify::RecommendedWatcher;
 
 /// Sperrt einen Mutex und übernimmt im Poison-Fall den inneren Guard,
 /// statt zu panicen. Verhindert Folgeabstürze, falls ein Thread beim
@@ -38,9 +41,15 @@ pub struct Entry {
 
 fn mode_to_rwx(mode: u32) -> String {
     let perms = [
-        (0o400, 'r'), (0o200, 'w'), (0o100, 'x'),
-        (0o040, 'r'), (0o020, 'w'), (0o010, 'x'),
-        (0o004, 'r'), (0o002, 'w'), (0o001, 'x'),
+        (0o400, 'r'),
+        (0o200, 'w'),
+        (0o100, 'x'),
+        (0o040, 'r'),
+        (0o020, 'w'),
+        (0o010, 'x'),
+        (0o004, 'r'),
+        (0o002, 'w'),
+        (0o001, 'x'),
     ];
     let mut s = String::with_capacity(9);
     for (bit, ch) in perms {
@@ -53,7 +62,9 @@ fn uid_to_name(uid: u32) -> String {
     use std::sync::OnceLock;
     static CACHE: OnceLock<Mutex<HashMap<u32, String>>> = OnceLock::new();
     let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
-    if let Some(v) = lock_safe(cache).get(&uid) { return v.clone(); }
+    if let Some(v) = lock_safe(cache).get(&uid) {
+        return v.clone();
+    }
     let name = unsafe {
         let pw = libc::getpwuid(uid as libc::uid_t);
         if pw.is_null() {
@@ -63,7 +74,10 @@ fn uid_to_name(uid: u32) -> String {
             cstr.to_string_lossy().into_owned()
         }
     };
-    cache.lock().unwrap_or_else(|p| p.into_inner()).insert(uid, name.clone());
+    cache
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .insert(uid, name.clone());
     name
 }
 
@@ -71,7 +85,9 @@ fn gid_to_name(gid: u32) -> String {
     use std::sync::OnceLock;
     static CACHE: OnceLock<Mutex<HashMap<u32, String>>> = OnceLock::new();
     let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
-    if let Some(v) = lock_safe(cache).get(&gid) { return v.clone(); }
+    if let Some(v) = lock_safe(cache).get(&gid) {
+        return v.clone();
+    }
     let name = unsafe {
         let gr = libc::getgrgid(gid as libc::gid_t);
         if gr.is_null() {
@@ -81,14 +97,21 @@ fn gid_to_name(gid: u32) -> String {
             cstr.to_string_lossy().into_owned()
         }
     };
-    cache.lock().unwrap_or_else(|p| p.into_inner()).insert(gid, name.clone());
+    cache
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .insert(gid, name.clone());
     name
 }
 
 fn ext_to_kind(ext: &str, is_dir: bool, is_symlink: bool) -> String {
-    if is_symlink { return "Symlink".into(); }
+    if is_symlink {
+        return "Symlink".into();
+    }
     if is_dir {
-        if ext == "app" { return "Programm".into(); }
+        if ext == "app" {
+            return "Programm".into();
+        }
         return "Ordner".into();
     }
     match ext {
@@ -101,7 +124,8 @@ fn ext_to_kind(ext: &str, is_dir: bool, is_symlink: bool) -> String {
         "zip" | "tar" | "gz" | "bz2" | "7z" | "rar" | "dmg" => "Archiv".into(),
         "html" | "htm" => "HTML-Dokument".into(),
         "json" | "xml" | "yaml" | "yml" | "toml" | "csv" => "Datendatei".into(),
-        "rs" | "ts" | "js" | "tsx" | "jsx" | "py" | "swift" | "c" | "cpp" | "h" | "go" | "rb" | "sh" => "Quellcode".into(),
+        "rs" | "ts" | "js" | "tsx" | "jsx" | "py" | "swift" | "c" | "cpp" | "h" | "go" | "rb"
+        | "sh" => "Quellcode".into(),
         other => format!("{}-Datei", other.to_uppercase()),
     }
 }
@@ -111,16 +135,13 @@ pub(crate) fn open_new_window(app: &AppHandle) {
     use std::sync::atomic::AtomicU32;
     static COUNTER: AtomicU32 = AtomicU32::new(1);
     let label = format!("win-{}", COUNTER.fetch_add(1, Ordering::Relaxed));
-    let builder = tauri::WebviewWindowBuilder::new(
-        app,
-        &label,
-        tauri::WebviewUrl::App("index.html".into()),
-    )
-    .title("DualBeam")
-    .inner_size(1280.0, 800.0)
-    .min_inner_size(900.0, 500.0)
-    .resizable(true)
-    .center();
+    let builder =
+        tauri::WebviewWindowBuilder::new(app, &label, tauri::WebviewUrl::App("index.html".into()))
+            .title("DualBeam")
+            .inner_size(1280.0, 800.0)
+            .min_inner_size(900.0, 500.0)
+            .resizable(true)
+            .center();
     if let Err(e) = builder.build() {
         eprintln!("Neues Fenster konnte nicht erstellt werden: {e}");
     }
@@ -130,7 +151,11 @@ fn expand_tilde(p: &str) -> PathBuf {
     if let Some(stripped) = p.strip_prefix("~") {
         if let Some(home) = dirs::home_dir() {
             let rest = stripped.trim_start_matches('/');
-            return if rest.is_empty() { home } else { home.join(rest) };
+            return if rest.is_empty() {
+                home
+            } else {
+                home.join(rest)
+            };
         }
     }
     PathBuf::from(p)
@@ -187,16 +212,29 @@ fn list_dir(path: String, show_hidden: bool) -> Result<Vec<Entry>, String> {
             .and_then(|s| s.to_str())
             .map(|s| s.to_ascii_lowercase())
             .unwrap_or_default();
-        let mode_str = meta.as_ref().map(|m| mode_to_rwx(m.mode())).unwrap_or_default();
-        let owner = meta.as_ref().map(|m| uid_to_name(m.uid())).unwrap_or_default();
-        let group = meta.as_ref().map(|m| gid_to_name(m.gid())).unwrap_or_default();
+        let mode_str = meta
+            .as_ref()
+            .map(|m| mode_to_rwx(m.mode()))
+            .unwrap_or_default();
+        let owner = meta
+            .as_ref()
+            .map(|m| uid_to_name(m.uid()))
+            .unwrap_or_default();
+        let group = meta
+            .as_ref()
+            .map(|m| gid_to_name(m.gid()))
+            .unwrap_or_default();
         let birth_time = meta
             .as_ref()
             .and_then(|m| m.created().ok())
             .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
             .map(|d| d.as_secs() as i64)
             .unwrap_or(0);
-        let size = if is_dir { 0 } else { meta.as_ref().map(|m| m.len()).unwrap_or(0) };
+        let size = if is_dir {
+            0
+        } else {
+            meta.as_ref().map(|m| m.len()).unwrap_or(0)
+        };
         let kind = ext_to_kind(&ext, is_dir, is_symlink);
         out.push(Entry {
             name,
@@ -234,17 +272,9 @@ fn open_default(path: String) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn open_url(url: String) -> Result<(), String> {
-    let lower = url.trim_start().to_ascii_lowercase();
-    let allowed = lower.starts_with("http://")
-        || lower.starts_with("https://")
-        || lower.starts_with("mailto:")
-        || lower.starts_with("x-apple.systempreferences:");
-    if !allowed {
-        return Err("err.url.scheme".into());
-    }
-    std::process::Command::new("open")
-        .arg(&url)
+fn open_privacy_settings() -> Result<(), String> {
+    Command::new("/usr/bin/open")
+        .arg("x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles")
         .status()
         .map_err(|e| e.to_string())
         .and_then(|s| {
@@ -298,9 +328,7 @@ fn create_finder_alias(target: String, link_path: String) -> Result<(), String> 
     if l.exists() || std::fs::symlink_metadata(&l).is_ok() {
         return Err(format!("err.exists\u{1f}{}", l.display()));
     }
-    let parent = l
-        .parent()
-        .ok_or_else(|| "Ungültiges Ziel".to_string())?;
+    let parent = l.parent().ok_or_else(|| "Ungültiges Ziel".to_string())?;
     let name = l
         .file_name()
         .and_then(|s| s.to_str())
@@ -433,22 +461,26 @@ fn move_to_trash(paths: Vec<String>) -> Result<(), String> {
             .map(|m| m.file_type().is_symlink())
             .unwrap_or(false);
         if is_symlink {
-            std::fs::remove_file(&full)
-                .map_err(|e| format!("{}: {}", full.display(), e))?;
+            std::fs::remove_file(&full).map_err(|e| format!("{}: {}", full.display(), e))?;
             continue;
         }
         // Netzlaufwerke (WebDAV/SMB/NFS …) haben keinen brauchbaren Papierkorb:
         // `.Trashes` liegt auf demselben Server, und das Verschieben großer
         // Dateien dorthin scheitert und hinterlässt eine 0-Byte-Leiche. Dort
         // – wie der Finder – direkt und dauerhaft löschen.
-        if path_fstype(&full, &fs).map(|t| is_network_fstype(&t)).unwrap_or(false) {
+        if path_fstype(&full, &fs)
+            .map(|t| is_network_fstype(&t))
+            .unwrap_or(false)
+        {
             remove_path(&full).map_err(|e| format!("{}: {}", full.display(), e))?;
             continue;
         }
         let needs_admin = std::fs::symlink_metadata(&full)
             .map(|m| (m.st_flags() & PROTECT_MASK) != 0)
             .unwrap_or(false)
-            || full.file_name().and_then(|n| n.to_str())
+            || full
+                .file_name()
+                .and_then(|n| n.to_str())
                 .map(|n| n.ends_with(".inprogress"))
                 .unwrap_or(false);
         if needs_admin {
@@ -459,30 +491,70 @@ fn move_to_trash(paths: Vec<String>) -> Result<(), String> {
     Ok(())
 }
 
+/// Ein privilegierter Löschvorgang darf nie auf einen System- oder
+/// Benutzerstamm zeigen. Einzelne Objekte darunter dürfen weiterhin bewusst
+/// gelöscht werden, nachdem die normale Bestätigung erfolgt ist.
+fn is_protected_admin_root(path: &Path) -> bool {
+    const ROOTS: &[&str] = &[
+        "/",
+        "/Applications",
+        "/Library",
+        "/System",
+        "/Users",
+        "/Volumes",
+        "/bin",
+        "/private",
+        "/sbin",
+        "/usr",
+    ];
+    let normalized = canonicalize_target_path(path).unwrap_or_else(|_| path.to_path_buf());
+    ROOTS.iter().any(|root| normalized == Path::new(root))
+}
+
 #[tauri::command]
 fn force_delete_admin(paths: Vec<String>) -> Result<(), String> {
     use std::io::Write;
     // Diagnose-Log nur in Debug-Builds; im Release wird nichts auf die Platte geschrieben.
     #[cfg(debug_assertions)]
-    let mut log = std::fs::OpenOptions::new().create(true).append(true)
-        .open("/tmp/dualbeam-delete.log").ok();
+    let mut log = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open("/tmp/dualbeam-delete.log")
+        .ok();
     #[cfg(not(debug_assertions))]
     let mut log: Option<std::fs::File> = None;
     let logln = |log: &mut Option<std::fs::File>, s: &str| {
-        if let Some(f) = log.as_mut() { let _ = writeln!(f, "{}", s); }
+        if let Some(f) = log.as_mut() {
+            let _ = writeln!(f, "{}", s);
+        }
     };
-    logln(&mut log, &format!("=== ts={} ===", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)));
+    logln(
+        &mut log,
+        &format!(
+            "=== ts={} ===",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0)
+        ),
+    );
     logln(&mut log, &format!("paths: {:?}", paths));
-    if paths.is_empty() { return Ok(()); }
+    if paths.is_empty() {
+        return Ok(());
+    }
     let mut parts: Vec<String> = Vec::with_capacity(paths.len() * 6);
     for p in &paths {
         let full = expand_tilde(p);
         let s = full.to_string_lossy().into_owned();
-        logln(&mut log, &format!("expanded: {} exists_before={}", s, full.exists()));
-        if s.is_empty() || s == "/" {
+        logln(
+            &mut log,
+            &format!("expanded: {} exists_before={}", s, full.exists()),
+        );
+        if s.is_empty() || is_protected_admin_root(&full) {
             return Err(format!("err.path.forbidden\u{1f}{}", s));
         }
-        let parent = full.parent()
+        let parent = full
+            .parent()
             .map(|p| p.to_string_lossy().into_owned())
             .unwrap_or_else(|| "/".into());
         let q = shell_single_quote(&s);
@@ -504,13 +576,20 @@ fn force_delete_admin(paths: Vec<String>) -> Result<(), String> {
     for p in &paths {
         let full = expand_tilde(p);
         let ex = full.exists();
-        logln(&mut log, &format!("after: {} exists_after={}", full.display(), ex));
+        logln(
+            &mut log,
+            &format!("after: {} exists_after={}", full.display(), ex),
+        );
         if ex {
             still.push(full.to_string_lossy().into_owned());
         }
     }
     if !still.is_empty() {
-        return Err(format!("Nicht gelöscht:\n{}\n\nAusgabe:\n{}", still.join("\n"), out.trim()));
+        return Err(format!(
+            "Nicht gelöscht:\n{}\n\nAusgabe:\n{}",
+            still.join("\n"),
+            out.trim()
+        ));
     }
     Ok(())
 }
@@ -540,7 +619,12 @@ fn mount_fs_types() -> std::collections::HashMap<String, String> {
                     if let Some(paren) = rest.rfind(" (") {
                         let mp = &rest[..paren];
                         let opts = &rest[paren + 2..];
-                        let fstype = opts.split(',').next().unwrap_or("").trim().trim_end_matches(')');
+                        let fstype = opts
+                            .split(',')
+                            .next()
+                            .unwrap_or("")
+                            .trim()
+                            .trim_end_matches(')');
                         map.insert(mp.to_string(), fstype.to_string());
                     }
                 }
@@ -554,7 +638,10 @@ fn mount_fs_types() -> std::collections::HashMap<String, String> {
 // `.Trashes` auf demselben Server – das Verschieben großer Dateien dorthin
 // scheitert (Timeout/Serverfehler) und hinterlässt eine 0-Byte-Leiche.
 fn is_network_fstype(fstype: &str) -> bool {
-    matches!(fstype, "webdav" | "smbfs" | "nfs" | "afpfs" | "ftp" | "cifs")
+    matches!(
+        fstype,
+        "webdav" | "smbfs" | "nfs" | "afpfs" | "ftp" | "cifs"
+    )
 }
 
 // Ermittelt den Dateisystemtyp eines Pfads über das am längsten passende
@@ -582,42 +669,6 @@ fn path_is_network(path: String) -> bool {
     path_fstype(&full, &mounts)
         .map(|f| is_network_fstype(&f))
         .unwrap_or(false)
-}
-
-/// Versucht, den Verzeichnis-Cache eines Netzlaufwerks (macOS webdavfs/smbfs)
-/// zu invalidieren, damit ein direkt danach folgendes `read_dir` ein frisches
-/// PROPFIND auslöst und z. B. extern (über die Web-GUI) gelöschte Dateien
-/// nicht mehr als „Geister" im Listing erscheinen.
-///
-/// macOS bietet KEINE öffentliche API, um den webdavfs-Verzeichnis-Cache gezielt
-/// zu leeren – zuverlässig geht das nur per Aus-/Einhängen. Der einzige
-/// nicht-destruktive Trick ist, das Verzeichnis kurz zu verändern (verborgene
-/// Temp-Datei anlegen und sofort wieder löschen); dadurch markiert webdavfs den
-/// Cache-Knoten als „dirty" und liest beim nächsten Listing frisch nach.
-/// Best-effort: nur für Netzlaufwerke, Fehler (z. B. schreibgeschützt) werden
-/// stillschweigend ignoriert – der anschließende Refresh läuft ohnehin.
-#[tauri::command]
-async fn bust_dir_cache(path: String) -> Result<(), String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        let full = expand_tilde(&path);
-        let fs = mount_fs_types();
-        let is_net = path_fstype(&full, &fs)
-            .map(|t| is_network_fstype(&t))
-            .unwrap_or(false);
-        if !is_net || !full.is_dir() {
-            return;
-        }
-        let ts = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0);
-        let tmp = full.join(format!(".dualbeam-refresh-{}-{}", std::process::id(), ts));
-        if std::fs::File::create(&tmp).is_ok() {
-            let _ = std::fs::remove_file(&tmp);
-        }
-    })
-    .await
-    .map_err(|e| e.to_string())
 }
 
 // IONOS HiDrive WebDAV-Netzwerk-Bookmark (Host, Anzeigename, URL an einer Stelle).
@@ -711,45 +762,128 @@ fn list_network_bookmarks() -> Result<Vec<NetworkBookmark>, String> {
     let mut out = Vec::new();
     for (name, url, mp) in known_network_bookmarks() {
         let connected = fs.contains_key(&mp);
-        out.push(NetworkBookmark { name, url, mount_path: mp, connected });
+        out.push(NetworkBookmark {
+            name,
+            url,
+            mount_path: mp,
+            connected,
+        });
     }
     Ok(out)
 }
 
-#[tauri::command]
-async fn mount_network_url(url: String) -> Result<String, String> {
-    // Gängige Netzwerk-Protokolle erlauben; anschließend per Finder mounten
-    // (nutzt Keychain bzw. Anmeldedialog). Schemata wie smb://, afp://, nfs://,
-    // ftp(s):// und WebDAV (http(s)/dav(s)) werden von Finders `mount volume`
-    // unterstützt.
-    let lower = url.trim().to_lowercase();
-    const ALLOWED: [&str; 8] = [
-        "https://", "http://", "smb://", "afp://", "nfs://", "ftp://", "ftps://", "cifs://",
-    ];
-    if !ALLOWED.iter().any(|p| lower.starts_with(p)) {
-        return Err("err.network.scheme".into());
+fn is_local_network_address(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(ip) => {
+            let [a, b, ..] = ip.octets();
+            a == 10
+                || a == 127
+                || (a == 169 && b == 254)
+                || (a == 172 && (16..=31).contains(&b))
+                || (a == 192 && b == 168)
+        }
+        IpAddr::V6(ip) => {
+            let first = ip.segments()[0];
+            ip.is_loopback() || (first & 0xffc0) == 0xfe80 || (first & 0xfe00) == 0xfc00
+        }
     }
-    // Escape: keine Newlines/Anführungszeichen erlauben — AppleScript-Injection verhindern.
-    if url.contains('"') || url.contains('\n') || url.contains('\r') || url.contains('\0') {
+}
+
+/// Validiert eine Mount-URL. Unsichere Protokolle sind bewusst ausschließlich
+/// für direkte private, Link-Local- oder Loopback-IP-Adressen erlaubt. Damit
+/// kann eine DNS-Auflösung weder unbeabsichtigt nach außen gehen noch später
+/// auf ein öffentliches Ziel umgebogen werden.
+fn parse_mount_url(
+    input: &str,
+    allow_insecure_local: bool,
+) -> Result<(String, bool, bool), String> {
+    let trimmed = input.trim();
+    if trimmed.is_empty() || trimmed.chars().any(char::is_control) {
         return Err("err.network.badchars".into());
     }
+    let parsed = url::Url::parse(trimmed).map_err(|_| "err.network.invalidUrl")?;
+    let scheme = parsed.scheme();
+    let secure = matches!(scheme, "https" | "smb");
+    let insecure = matches!(scheme, "http" | "ftp" | "ftps" | "afp" | "nfs" | "cifs");
+    if !secure && !insecure {
+        return Err("err.network.scheme".into());
+    }
+    if parsed.host_str().is_none() {
+        return Err("err.network.invalidUrl".into());
+    }
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err("err.network.credentials".into());
+    }
+    if parsed.query().is_some() || parsed.fragment().is_some() {
+        return Err("err.network.invalidUrl".into());
+    }
+    if insecure {
+        if !allow_insecure_local {
+            return Err("err.network.insecureConfirm".into());
+        }
+        let host = parsed
+            .host_str()
+            .expect("host checked above")
+            .trim_matches(['[', ']']);
+        let ip = host
+            .parse::<IpAddr>()
+            .map_err(|_| "err.network.localIpOnly")?;
+        if !is_local_network_address(ip) {
+            return Err("err.network.localIpOnly".into());
+        }
+    }
+    Ok((
+        parsed.to_string(),
+        scheme == "https" || scheme == "http",
+        matches!(scheme, "ftp" | "ftps"),
+    ))
+}
+
+fn run_osascript_with_timeout(script: &str) -> Result<std::process::Output, String> {
+    let mut child = Command::new("/usr/bin/osascript")
+        .arg("-")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|_| "err.mount.failed".to_string())?;
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin
+            .write_all(script.as_bytes())
+            .map_err(|_| "err.mount.failed".to_string())?;
+    }
+    let deadline = Instant::now() + Duration::from_secs(120);
+    loop {
+        if child
+            .try_wait()
+            .map_err(|_| "err.mount.failed".to_string())?
+            .is_some()
+        {
+            return child
+                .wait_with_output()
+                .map_err(|_| "err.mount.failed".to_string());
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err("err.mount.timeout".into());
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+#[tauri::command]
+async fn mount_network_url(url: String, allow_insecure_local: bool) -> Result<String, String> {
+    let (url, is_web, is_ftp) = parse_mount_url(&url, allow_insecure_local)?;
+    let escaped = escape_for_applescript(&url).map_err(|_| "err.network.badchars".to_string())?;
     let script = format!(
         "tell application \"Finder\" to activate\nmount volume \"{}\"",
-        url
+        escaped
     );
-    let is_web = lower.starts_with("http://") || lower.starts_with("https://");
-    let is_ftp = lower.starts_with("ftp://") || lower.starts_with("ftps://");
     tauri::async_runtime::spawn_blocking(move || -> Result<String, String> {
-        let out = std::process::Command::new("osascript")
-            .arg("-e")
-            .arg(&script)
-            .output()
-            .map_err(|e| format!("osascript: {}", e))?;
+        let out = run_osascript_with_timeout(&script)?;
         if !out.status.success() {
-            let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
-            // Finder-Fehler in verständliche Codes übersetzen.
-            // -3014: Ressource kann nicht eingehängt werden (kein mountbares
-            // Dateisystem) — bei http(s) meist „kein WebDAV-Server".
+            let err = String::from_utf8_lossy(&out.stderr);
             if err.contains("-3014") {
                 if is_web {
                     return Err("err.mount.notWebdav".into());
@@ -759,16 +893,15 @@ async fn mount_network_url(url: String) -> Result<String, String> {
                 }
                 return Err("err.mount.unreachable".into());
             }
-            // -1409 / „nicht gefunden" o. ä.: Server nicht erreichbar.
             if err.contains("-1409") || err.contains("NSURLErrorDomain") {
                 return Err("err.mount.unreachable".into());
             }
-            return Err(if err.is_empty() { "err.mount.failed".into() } else { err });
+            return Err("err.mount.failed".into());
         }
         Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
     })
     .await
-    .map_err(|e| e.to_string())?
+    .map_err(|_| "err.mount.failed".to_string())?
 }
 
 /// Gibt die in Cargo.toml gepflegte App-Version zurück (für den Über-Dialog).
@@ -777,166 +910,15 @@ fn app_version() -> String {
     env!("CARGO_PKG_VERSION").to_string()
 }
 
-#[derive(Serialize, Clone)]
-#[serde(rename_all = "camelCase")]
-pub struct UpdateInfo {
-    pub current: String,
-    pub latest: String,
-    pub update_available: bool,
-    pub url: String,
-    /// Direkte Download-URL der `.dmg`-Datei des neuesten Releases (falls vorhanden).
-    pub asset_url: String,
-}
-
-/// Vergleicht zwei Punkt-Versionen (z. B. "0.2.0" > "0.1.9"). Nicht-numerische
-/// Bestandteile werden als 0 gewertet.
-fn version_gt(a: &str, b: &str) -> bool {
-    let parse = |s: &str| -> Vec<u64> {
-        s.split('.')
-            .map(|p| p.trim().chars().take_while(|c| c.is_ascii_digit()).collect::<String>())
-            .map(|p| p.parse::<u64>().unwrap_or(0))
-            .collect()
-    };
-    let va = parse(a);
-    let vb = parse(b);
-    let n = va.len().max(vb.len());
-    for i in 0..n {
-        let x = va.get(i).copied().unwrap_or(0);
-        let y = vb.get(i).copied().unwrap_or(0);
-        if x != y {
-            return x > y;
-        }
-    }
-    false
-}
-
-/// Prüft über die GitHub-Releases-API (per System-`curl`, daher CSP-unabhängig),
-/// ob eine neuere Version verfügbar ist.
-#[tauri::command]
-async fn check_update() -> Result<UpdateInfo, String> {
-    let current = env!("CARGO_PKG_VERSION").to_string();
-    let api = "https://api.github.com/repos/nojan01/macos-dualpane/releases/latest";
-    tauri::async_runtime::spawn_blocking(move || -> Result<UpdateInfo, String> {
-        let out = std::process::Command::new("/usr/bin/curl")
-            .args([
-                "-sSL",
-                "--max-time",
-                "15",
-                "-H",
-                "Accept: application/vnd.github+json",
-                "-H",
-                "User-Agent: DualBeam",
-                api,
-            ])
-            .output()
-            .map_err(|_| "err.update.failed".to_string())?;
-        if !out.status.success() {
-            return Err("err.update.failed".into());
-        }
-        let body = String::from_utf8_lossy(&out.stdout);
-        let v: serde_json::Value =
-            serde_json::from_str(&body).map_err(|_| "err.update.failed".to_string())?;
-        let latest = v
-            .get("tag_name")
-            .and_then(|t| t.as_str())
-            .unwrap_or("")
-            .trim()
-            .trim_start_matches(['v', 'V'])
-            .to_string();
-        let url = v
-            .get("html_url")
-            .and_then(|t| t.as_str())
-            .unwrap_or("https://github.com/nojan01/macos-dualpane/releases")
-            .to_string();
-        // Erste `.dmg`-Datei aus den Release-Assets als direkte Download-URL.
-        let asset_url = v
-            .get("assets")
-            .and_then(|a| a.as_array())
-            .and_then(|arr| {
-                arr.iter().find_map(|asset| {
-                    let dl = asset.get("browser_download_url").and_then(|u| u.as_str())?;
-                    if dl.to_lowercase().ends_with(".dmg") {
-                        Some(dl.to_string())
-                    } else {
-                        None
-                    }
-                })
-            })
-            .unwrap_or_default();
-        if latest.is_empty() {
-            return Err("err.update.failed".into());
-        }
-        let update_available = version_gt(&latest, &current);
-        Ok(UpdateInfo { current, latest, update_available, url, asset_url })
-    })
-    .await
-    .map_err(|_| "err.update.failed".to_string())?
-}
-
-/// Lädt die angegebene `.dmg`-Datei herunter (per System-`curl`, CSP-unabhängig)
-/// in den Downloads-Ordner und öffnet sie anschließend (mountet das Image und
-/// zeigt das Installations-Fenster zum Ziehen in „Programme"). Gibt den Pfad der
-/// heruntergeladenen Datei zurück.
-#[tauri::command]
-async fn download_and_open_update(url: String) -> Result<String, String> {
-    // Nur HTTPS-Downloads von GitHub-Releases zulassen.
-    let ok = url.starts_with("https://github.com/")
-        || url.starts_with("https://objects.githubusercontent.com/")
-        || url.starts_with("https://release-assets.githubusercontent.com/");
-    if !ok || !url.to_lowercase().ends_with(".dmg") {
-        return Err("err.update.failed".into());
-    }
-    tauri::async_runtime::spawn_blocking(move || -> Result<String, String> {
-        // Dateinamen aus der URL ableiten, auf sichere Zeichen beschränken.
-        let raw_name = url.rsplit('/').next().unwrap_or("DualBeam_update.dmg");
-        let safe_name: String = raw_name
-            .chars()
-            .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
-            .collect();
-        let file_name = if safe_name.to_lowercase().ends_with(".dmg") && safe_name.len() > 4 {
-            safe_name
-        } else {
-            "DualBeam_update.dmg".to_string()
-        };
-        let home = std::env::var("HOME").map_err(|_| "err.update.failed".to_string())?;
-        let mut dest = std::path::PathBuf::from(home);
-        dest.push("Downloads");
-        if !dest.exists() {
-            dest = std::env::temp_dir();
-        }
-        dest.push(&file_name);
-        let dest_str = dest.to_string_lossy().to_string();
-
-        let out = std::process::Command::new("/usr/bin/curl")
-            .args([
-                "-fsSL",
-                "--max-time",
-                "120",
-                "-H",
-                "User-Agent: DualBeam",
-                "-o",
-                &dest_str,
-                &url,
-            ])
-            .output()
-            .map_err(|_| "err.update.failed".to_string())?;
-        if !out.status.success() {
-            return Err("err.update.failed".into());
-        }
-        // DMG öffnen (mountet das Image, zeigt das Installer-Fenster).
-        std::process::Command::new("/usr/bin/open")
-            .arg(&dest_str)
-            .status()
-            .map_err(|_| "err.update.failed".to_string())?;
-        Ok(dest_str)
-    })
-    .await
-    .map_err(|_| "err.update.failed".to_string())?
-}
-
 #[tauri::command]
 async fn eject_volume(path: String) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
+        let full = std::fs::canonicalize(expand_tilde(&path))
+            .map_err(|_| "err.eject.invalidMount".to_string())?;
+        if !full.starts_with("/Volumes/") {
+            return Err("err.eject.invalidMount".into());
+        }
+        let path = full.to_string_lossy().into_owned();
         // Netzlaufwerke (WebDAV/SMB/NFS/AFP/FTP) kennt `diskutil eject` nicht
         // ("Failed to find disk"). Sie müssen mit `umount`/`diskutil unmount`
         // ausgehängt werden. Physische Datenträger dagegen mit `eject`.
@@ -947,35 +929,29 @@ async fn eject_volume(path: String) -> Result<(), String> {
         );
 
         if is_network {
-            // Zuerst der saubere Weg über diskutil, dann Fallback auf umount.
-            let du = std::process::Command::new("diskutil")
+            // Zuerst der saubere Weg über diskutil, dann der normale umount.
+            // Kein erzwungenes Aushängen: Es könnte laufende Transfers anderer
+            // Programme unterbrechen oder noch nicht geschriebene Daten verlieren.
+            let du = Command::new("/usr/sbin/diskutil")
                 .args(["unmount", &path])
                 .output()
                 .map_err(|e| format!("diskutil: {}", e))?;
             if du.status.success() {
                 return Ok(());
             }
-            let um = std::process::Command::new("/sbin/umount")
+            let um = Command::new("/sbin/umount")
                 .arg(&path)
                 .output()
                 .map_err(|e| format!("umount: {}", e))?;
             if um.status.success() {
                 return Ok(());
             }
-            // Erzwungenes Aushängen als letzter Versuch (hängende WebDAV-Sitzung).
-            let umf = std::process::Command::new("/sbin/umount")
-                .args(["-f", &path])
-                .output()
-                .map_err(|e| format!("umount -f: {}", e))?;
-            if umf.status.success() {
-                return Ok(());
-            }
-            let err = String::from_utf8_lossy(&umf.stderr);
-            let so = String::from_utf8_lossy(&umf.stdout);
+            let err = String::from_utf8_lossy(&um.stderr);
+            let so = String::from_utf8_lossy(&um.stdout);
             return Err(format!("err.eject.failed\u{1f}{}{}", err.trim(), so.trim()));
         }
 
-        let out = std::process::Command::new("diskutil")
+        let out = Command::new("/usr/sbin/diskutil")
             .args(["eject", &path])
             .output()
             .map_err(|e| format!("diskutil: {}", e))?;
@@ -995,14 +971,25 @@ fn find_dmg_block<'a>(text: &'a str, p: &std::path::Path) -> Option<&'a str> {
     let canon = std::fs::canonicalize(p)
         .map(|c| c.to_string_lossy().into_owned())
         .unwrap_or_else(|_| p_str.clone());
-    let basename = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let basename = p
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
 
     for block in text.split("================") {
         for l in block.lines() {
             let lt = l.trim();
-            if let Some(rest) = lt.strip_prefix("image-path").or_else(|| lt.strip_prefix("image-alias")) {
-                let rest = rest.trim_start_matches(|c: char| c == ':' || c.is_whitespace()).trim();
-                if rest == p_str || rest == canon || (!basename.is_empty() && rest.ends_with(&basename)) {
+            if let Some(rest) = lt
+                .strip_prefix("image-path")
+                .or_else(|| lt.strip_prefix("image-alias"))
+            {
+                let rest = rest
+                    .trim_start_matches(|c: char| c == ':' || c.is_whitespace())
+                    .trim();
+                if rest == p_str
+                    || rest == canon
+                    || (!basename.is_empty() && rest.ends_with(&basename))
+                {
                     return Some(block);
                 }
             }
@@ -1013,7 +1000,11 @@ fn find_dmg_block<'a>(text: &'a str, p: &std::path::Path) -> Option<&'a str> {
 
 fn extract_mountpoint(block: &str) -> Option<String> {
     for line in block.lines() {
-        let toks: Vec<&str> = line.split('\t').map(|t| t.trim()).filter(|t| !t.is_empty()).collect();
+        let toks: Vec<&str> = line
+            .split('\t')
+            .map(|t| t.trim())
+            .filter(|t| !t.is_empty())
+            .collect();
         // Mountpoint ist ein Pfad, der nicht mit /dev/ beginnt
         for t in toks.iter().rev() {
             if t.starts_with('/') && !t.starts_with("/dev/") {
@@ -1029,9 +1020,8 @@ fn extract_root_device(block: &str) -> Option<String> {
     for line in block.lines() {
         for tok in line.split('\t') {
             let t = tok.trim();
-            if t.starts_with("/dev/disk") {
+            if let Some(suffix) = t.strip_prefix("/dev/disk") {
                 // root disk: keine 's' Partition
-                let suffix = &t["/dev/disk".len()..];
                 if suffix.chars().all(|c| c.is_ascii_digit()) {
                     return Some(t.to_string());
                 }
@@ -1051,7 +1041,10 @@ fn extract_root_device(block: &str) -> Option<String> {
 }
 
 fn find_existing_dmg_mount(p: &std::path::Path) -> Option<String> {
-    let info = std::process::Command::new("hdiutil").arg("info").output().ok()?;
+    let info = std::process::Command::new("hdiutil")
+        .arg("info")
+        .output()
+        .ok()?;
     if !info.status.success() {
         return None;
     }
@@ -1064,10 +1057,13 @@ fn find_existing_dmg_mount(p: &std::path::Path) -> Option<String> {
 async fn detach_dmg(path: String) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
         let p = expand_tilde(&path);
-        let info = std::process::Command::new("hdiutil").arg("info").output()
+        let info = std::process::Command::new("hdiutil")
+            .arg("info")
+            .output()
             .map_err(|e| format!("hdiutil: {}", e))?;
         let text = String::from_utf8_lossy(&info.stdout);
-        let block = find_dmg_block(&text, &p).ok_or_else(|| "Image ist nicht gemountet".to_string())?;
+        let block =
+            find_dmg_block(&text, &p).ok_or_else(|| "Image ist nicht gemountet".to_string())?;
         let dev = extract_root_device(block).ok_or_else(|| "Device nicht gefunden".to_string())?;
         let out = std::process::Command::new("hdiutil")
             .args(["detach", &dev])
@@ -1108,7 +1104,7 @@ async fn clipboard_write_files(paths: Vec<String>) -> Result<(), String> {
 
 #[tauri::command]
 async fn clipboard_read_files() -> Result<Vec<String>, String> {
-    tauri::async_runtime::spawn_blocking(|| promise_drag::clipboard_read_files())
+    tauri::async_runtime::spawn_blocking(promise_drag::clipboard_read_files)
         .await
         .map_err(|e| e.to_string())?
 }
@@ -1169,7 +1165,9 @@ async fn mount_dmg(path: String) -> Result<String, String> {
         if let Some(mut stdin) = child.stdin.take() {
             let _ = stdin.write_all(b"Y\n");
         }
-        let out = child.wait_with_output().map_err(|e| format!("hdiutil: {}", e))?;
+        let out = child
+            .wait_with_output()
+            .map_err(|e| format!("hdiutil: {}", e))?;
         if !out.status.success() {
             let err = String::from_utf8_lossy(&out.stderr);
             // Falls "resource busy": evtl. doch schon gemountet — nochmal nachsehen
@@ -1292,6 +1290,76 @@ fn remove_path(p: &Path) -> std::io::Result<()> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(e) => Err(e),
     }
+}
+
+/// Sockets, FIFOs und Geräte sind keine kopierbaren Dateien. Dazu zählt etwa
+/// Gits lokaler File-Monitor-Socket `.git/fsmonitor--daemon.ipc`: `copyfile`
+/// kann ihn nicht lesen und bricht mit EOPNOTSUPP ab. Symlinks bleiben bewusst
+/// zulässig, weil sie separat behandelt bzw. auf Netzlaufwerken dereferenziert
+/// werden können.
+fn is_untransferable_file(meta: &std::fs::Metadata) -> bool {
+    let ty = meta.file_type();
+    !ty.is_file() && !ty.is_dir() && !ty.is_symlink()
+}
+
+/// Löst auch noch nicht existierende Zielpfade soweit wie möglich auf. Damit
+/// werden Symlinks in vorhandenen Elternordnern berücksichtigt, bevor geprüft
+/// wird, ob ein Ordner in sich selbst kopiert werden soll.
+fn canonicalize_target_path(path: &Path) -> std::io::Result<PathBuf> {
+    let mut missing = Vec::new();
+    let mut current = path;
+    loop {
+        match std::fs::canonicalize(current) {
+            Ok(mut base) => {
+                for component in missing.iter().rev() {
+                    base.push(component);
+                }
+                return Ok(base);
+            }
+            Err(_) => {
+                let name = current.file_name().ok_or_else(|| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        format!("ungültiger Zielpfad: {}", path.display()),
+                    )
+                })?;
+                missing.push(name.to_os_string());
+                current = current.parent().ok_or_else(|| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        format!("ungültiger Zielpfad: {}", path.display()),
+                    )
+                })?;
+            }
+        }
+    }
+}
+
+/// Ein Verzeichnis darf nicht in sich selbst oder einen seiner Unterordner
+/// kopiert werden. Sonst würde der rekursive Kopierer den neuen Zielbaum beim
+/// weiteren Durchlaufen der Quelle erneut als Eingabe finden.
+fn destination_is_within_source(src: &Path, dst: &Path) -> std::io::Result<bool> {
+    // Symlinks werden als Link kopiert; sie werden nicht rekursiv durchlaufen.
+    // Zwei Arbeitskopien können (wie Trunk) auf dasselbe Cache-Verzeichnis
+    // verlinken, ohne dass dadurch eine Selbstkopie entsteht.
+    let link_meta = match std::fs::symlink_metadata(src) {
+        Ok(meta) => meta,
+        // Zwischen Vorschau und Ausführung können temporäre Dateien (etwa
+        // Git-Referenzen oder Editor-Backups) bereits verschwunden sein. Für
+        // einen nicht mehr vorhandenen Quellpfad gibt es keine Selbstkopie.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(e) => return Err(e),
+    };
+    if link_meta.file_type().is_symlink() || !link_meta.is_dir() {
+        return Ok(false);
+    }
+    let source = match std::fs::canonicalize(src) {
+        Ok(path) => path,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(e) => return Err(e),
+    };
+    let target = canonicalize_target_path(dst)?;
+    Ok(target == source || target.starts_with(source))
 }
 
 #[cfg(target_os = "macos")]
@@ -1438,25 +1506,59 @@ fn copy_file_retry(src: &Path, dst: &Path, cancel: &AtomicBool) -> std::io::Resu
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CopyOutcome {
+    Copied,
+    Skipped,
+}
+
+fn remove_source_after_move(src: &Path, outcome: CopyOutcome) -> Result<(), String> {
+    if outcome == CopyOutcome::Skipped {
+        return Err(format!(
+            "{}: Verschieben abgebrochen, weil nicht alle Einträge kopiert wurden; die Quelle wurde nicht gelöscht",
+            src.display()
+        ));
+    }
+    remove_path(src).map_err(|e| {
+        format!(
+            "{}: Quelle wurde kopiert, konnte aber nicht gelöscht werden: {}",
+            src.display(),
+            e
+        )
+    })
+}
+
 fn copy_recursive(
     src: &Path,
     dst: &Path,
     overwrite: bool,
     ctx: &mut JobCtx,
-) -> std::io::Result<()> {
+) -> std::io::Result<CopyOutcome> {
     if ctx.cancel.load(Ordering::SeqCst) {
         return Err(std::io::Error::new(
             std::io::ErrorKind::Interrupted,
             "cancelled",
         ));
     }
-    let meta = std::fs::symlink_metadata(src)?;
+    let meta = match std::fs::symlink_metadata(src) {
+        Ok(meta) => meta,
+        // Die Synchronisationsvorschau ist nur eine Momentaufnahme. Wenn ein
+        // Quellobjekt anschließend verschwindet, ist Überspringen korrekt und
+        // verhindert, dass ein flüchtiges Git-/Tool-Artefakt den ganzen Job
+        // abbricht. Bei Verschiebe-Jobs sorgt `Skipped` weiterhin dafür, dass
+        // keine verbliebene Quelle gelöscht wird.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(CopyOutcome::Skipped),
+        Err(e) => return Err(e),
+    };
+    if is_untransferable_file(&meta) {
+        return Ok(CopyOutcome::Skipped);
+    }
     if meta.file_type().is_symlink() {
         if dst.exists() {
             if overwrite {
                 remove_path(dst)?;
             } else {
-                return Ok(());
+                return Ok(CopyOutcome::Skipped);
             }
         }
         let target = std::fs::read_link(src)?;
@@ -1465,6 +1567,7 @@ fn copy_recursive(
             match std::os::unix::fs::symlink(&target, dst) {
                 Ok(()) => {
                     ctx.emit(&src.to_string_lossy());
+                    Ok(CopyOutcome::Copied)
                 }
                 Err(e) if is_enotsup(&e) => {
                     // Ziel-Dateisystem (WebDAV/SMB/FAT …) unterstützt keine Symlinks
@@ -1475,50 +1578,57 @@ fn copy_recursive(
                     match std::fs::metadata(src) {
                         Ok(tmeta) => {
                             if ctx.deref_depth >= 64 {
-                                return Err(std::io::Error::new(
-                                    std::io::ErrorKind::Other,
+                                return Err(std::io::Error::other(
                                     "Symlink-Schleife oder zu tiefe Verschachtelung beim Dereferenzieren",
                                 ));
                             }
                             ctx.deref_depth += 1;
-                            let res: std::io::Result<()> = if tmeta.is_dir() {
+                            let res: std::io::Result<CopyOutcome> = if tmeta.is_dir() {
                                 // read_dir folgt dem Symlink und liest das Zielverzeichnis.
                                 // Fortschritt zählen die Kind-Kopien selbst.
                                 if !dst.exists() {
                                     std::fs::create_dir_all(dst)?;
                                 }
                                 (|| {
+                                    let mut outcome = CopyOutcome::Copied;
                                     for entry in std::fs::read_dir(src)? {
                                         let entry = entry?;
                                         let from = entry.path();
                                         let to = dst.join(entry.file_name());
-                                        copy_recursive(&from, &to, overwrite, ctx)?;
+                                        if copy_recursive(&from, &to, overwrite, ctx)?
+                                            == CopyOutcome::Skipped
+                                        {
+                                            outcome = CopyOutcome::Skipped;
+                                        }
                                     }
-                                    Ok(())
+                                    Ok(outcome)
                                 })()
                             } else {
                                 // copyfile folgt dem Symlink und kopiert die Zieldaten.
                                 copy_file_retry(src, dst, ctx.cancel).map(|_| {
                                     ctx.emit(&src.to_string_lossy());
+                                    CopyOutcome::Copied
                                 })
                             };
                             ctx.deref_depth -= 1;
-                            res?;
+                            res
                         }
                         Err(_) => {
                             // Defekter (dangling) Symlink: auf einem FS ohne Symlink-
                             // Unterstützung nicht abbildbar → überspringen statt abbrechen.
                             ctx.emit(&src.to_string_lossy());
+                            Ok(CopyOutcome::Skipped)
                         }
                     }
                 }
-                Err(e) => return Err(e),
+                Err(e) => Err(e),
             }
         }
         #[cfg(not(unix))]
         {
             let _ = &target;
             ctx.emit(&src.to_string_lossy());
+            Ok(CopyOutcome::Copied)
         }
     } else if meta.is_dir() {
         if !dst.exists() {
@@ -1528,21 +1638,25 @@ fn copy_recursive(
                 std::fs::remove_file(dst)?;
                 std::fs::create_dir_all(dst)?;
             } else {
-                return Ok(());
+                return Ok(CopyOutcome::Skipped);
             }
         }
+        let mut outcome = CopyOutcome::Copied;
         for entry in std::fs::read_dir(src)? {
             let entry = entry?;
             let from = entry.path();
             let to = dst.join(entry.file_name());
-            copy_recursive(&from, &to, overwrite, ctx)?;
+            if copy_recursive(&from, &to, overwrite, ctx)? == CopyOutcome::Skipped {
+                outcome = CopyOutcome::Skipped;
+            }
         }
+        Ok(outcome)
     } else {
         if dst.exists() {
             if overwrite {
                 remove_path(dst)?;
             } else {
-                return Ok(());
+                return Ok(CopyOutcome::Skipped);
             }
         }
         if let Some(parent) = dst.parent() {
@@ -1550,8 +1664,8 @@ fn copy_recursive(
         }
         copy_file_retry(src, dst, ctx.cancel)?;
         ctx.emit(&src.to_string_lossy());
+        Ok(CopyOutcome::Copied)
     }
-    Ok(())
 }
 
 #[tauri::command]
@@ -1595,6 +1709,15 @@ async fn run_job(
             }
             let src = expand_tilde(&it.src);
             let dst = expand_tilde(&it.dst);
+            if destination_is_within_source(&src, &dst)
+                .map_err(|e| format!("{}: Zielpfad prüfen fehlgeschlagen: {}", src.display(), e))?
+            {
+                return Err(format!(
+                    "{}: Ziel {} liegt innerhalb der Quelle",
+                    src.display(),
+                    dst.display()
+                ));
+            }
             let is_move = kind == "move";
             let mut handled = false;
             if is_move && !dst.exists() {
@@ -1614,9 +1737,9 @@ async fn run_job(
                             return Err(format!("{}: {}", src.display(), e));
                         }
                     }
-                    Ok(()) => {
+                    Ok(outcome) => {
                         if is_move {
-                            let _ = remove_path(&src);
+                            remove_source_after_move(&src, outcome)?;
                         }
                         ctx.done += 1;
                         ctx.emit(&it.src);
@@ -1719,6 +1842,29 @@ fn is_apple_double_name(name: &str) -> bool {
 /// massenhaft falsche Einträge (z. B. 1000+ `._`-Dateien in .app-Bundles).
 fn is_os_metadata_name(name: &str) -> bool {
     name == ".DS_Store" || is_apple_double_name(name)
+}
+
+/// Trunk legt diese Unterordner als kurzlebigen Tool-Cache und Laufzeitstatus
+/// an. Sie enthalten keine Projektquellen und ändern sich fortlaufend. Alle
+/// anderen versteckten Dateien (auch `.git` und `.trunk`-Konfigurationen)
+/// bleiben ausdrücklich Teil der Synchronisation.
+fn is_transient_trunk_path(rel: &Path) -> bool {
+    let mut components = rel.components();
+    if components.next().and_then(|part| part.as_os_str().to_str()) != Some(".trunk") {
+        return false;
+    }
+    matches!(
+        components.next().and_then(|part| part.as_os_str().to_str()),
+        Some("tools" | "out" | "plugins" | "logs" | "actions" | "notifications")
+    )
+}
+
+/// Der Wurzelordner kann eigene Konfigurationsdateien enthalten. Er wird bei
+/// einem fehlenden Ziel daher einzeln durchlaufen, nicht pauschal kopiert.
+fn is_trunk_root(rel: &Path) -> bool {
+    let mut components = rel.components();
+    components.next().and_then(|part| part.as_os_str().to_str()) == Some(".trunk")
+        && components.next().is_none()
 }
 
 /// `symlink_metadata` mit Wiederholung bei transienten Netzwerkfehlern
@@ -1863,17 +2009,20 @@ fn preview_walk_src(
     cur: &Path,
     out: &mut Vec<SyncEntry>,
 ) -> Result<(), String> {
-    let entries =
-        read_dir_retry(cur).map_err(|e| format!("Quelle lesen fehlgeschlagen: {e}"))?;
+    let entries = read_dir_retry(cur).map_err(|e| format!("Quelle lesen fehlgeschlagen: {e}"))?;
     for entry in entries {
         let p = entry.path();
         let rel = match p.strip_prefix(src_root) {
             Ok(r) => r,
             Err(_) => continue,
         };
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if is_transient_trunk_path(rel) {
+            continue;
+        }
         // macOS-Metadaten (._X, .DS_Store) nicht kopieren – sie werden auf dem
         // Ziel (falls nötig) vom System selbst erzeugt.
-        if is_os_metadata_name(&entry.file_name().to_string_lossy()) {
+        if is_os_metadata_name(&name) {
             continue;
         }
         let rel_str = rel.to_string_lossy().into_owned();
@@ -1883,12 +2032,21 @@ fn preview_walk_src(
             Err(_) => continue,
         };
 
+        // Lokale IPC-Sockets (z. B. `.git/fsmonitor--daemon.ipc`), FIFOs und
+        // Geräte sind Laufzeitobjekte und lassen sich nicht sinnvoll kopieren.
+        if is_untransferable_file(&link_meta) {
+            continue;
+        }
+
         if link_meta.file_type().is_symlink() {
             preview_compare_file(rel_str, &p, &dst_path, &link_meta, out)?;
             continue;
         }
         if link_meta.is_dir() {
             match symlink_metadata_retry(&dst_path) {
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound && is_trunk_root(rel) => {
+                    preview_walk_src(src_root, dst_root, &p, out)?;
+                }
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                     // Ganzer Teilbaum ist neu → als Einheit melden, nicht rekursieren.
                     out.push(SyncEntry {
@@ -1938,6 +2096,10 @@ fn preview_walk_dst(
         };
         let name = entry.file_name().to_string_lossy().into_owned();
 
+        if is_transient_trunk_path(rel) {
+            continue;
+        }
+
         // `.DS_Store` ist reines Finder-Artefakt – nie löschen (wird neu erzeugt).
         if name == ".DS_Store" {
             continue;
@@ -1961,10 +2123,17 @@ fn preview_walk_dst(
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
             Err(e) => return Err(format!("Ziel-Metadaten lesen fehlgeschlagen: {e}")),
         };
+        // Sonderdateien sind Laufzeitobjekte und werden weder synchronisiert
+        // noch als überzählige Zieldateien zum Löschen vorgeschlagen.
+        if is_untransferable_file(&dmeta) {
+            continue;
+        }
         let is_dir = dmeta.is_dir() && !dmeta.file_type().is_symlink();
         // `exists()` folgt Symlinks – so werden dereferenzierte Ziel-Inhalte
         // korrekt der Quelle zugeordnet und nicht fälschlich zum Löschen markiert.
-        if !src_root.join(rel).exists() {
+        if !src_root.join(rel).exists() && is_dir && is_trunk_root(rel) {
+            preview_walk_dst(src_root, dst_root, &p, out)?;
+        } else if !src_root.join(rel).exists() {
             out.push(SyncEntry {
                 rel: rel.to_string_lossy().into_owned(),
                 action: "delete".into(),
@@ -2004,7 +2173,10 @@ fn sync_preview_inner(src: &str, dst: &str, delete_extra: bool) -> Result<Vec<Sy
     let src_root = expand_tilde(src);
     let dst_root = expand_tilde(dst);
     if !src_root.is_dir() {
-        return Err(format!("Quelle ist kein Verzeichnis: {}", src_root.display()));
+        return Err(format!(
+            "Quelle ist kein Verzeichnis: {}",
+            src_root.display()
+        ));
     }
     let mut out: Vec<SyncEntry> = Vec::new();
 
@@ -2045,17 +2217,23 @@ fn watch_path(app: AppHandle, pane_id: String, path: String) -> Result<(), Strin
     let pane_for_cb = pane_id.clone();
     let path_for_cb = p.to_string_lossy().into_owned();
 
-    let mut debouncer = new_debouncer(Duration::from_millis(250), move |res: Result<Vec<notify_debouncer_mini::DebouncedEvent>, notify_debouncer_mini::notify::Error>| {
-        if res.is_ok() {
-            let _ = app_for_cb.emit(
-                "pane-changed",
-                PaneChanged {
-                    pane_id: pane_for_cb.clone(),
-                    path: path_for_cb.clone(),
-                },
-            );
-        }
-    })
+    let mut debouncer = new_debouncer(
+        Duration::from_millis(250),
+        move |res: Result<
+            Vec<notify_debouncer_mini::DebouncedEvent>,
+            notify_debouncer_mini::notify::Error,
+        >| {
+            if res.is_ok() {
+                let _ = app_for_cb.emit(
+                    "pane-changed",
+                    PaneChanged {
+                        pane_id: pane_for_cb.clone(),
+                        path: path_for_cb.clone(),
+                    },
+                );
+            }
+        },
+    )
     .map_err(|e| e.to_string())?;
 
     debouncer
@@ -2095,7 +2273,9 @@ fn glob_match(pat: &[char], txt: &[char]) -> bool {
             return false;
         }
     }
-    while pi < pat.len() && pat[pi] == '*' { pi += 1; }
+    while pi < pat.len() && pat[pi] == '*' {
+        pi += 1;
+    }
     pi == pat.len()
 }
 
@@ -2115,9 +2295,13 @@ fn search_in_dir(
     // Glob ohne Anker -> als Teilstring matchen (umschließe mit *...*)
     let pattern: Vec<char> = if use_glob {
         let mut s = String::new();
-        if !q.starts_with('*') { s.push('*'); }
+        if !q.starts_with('*') {
+            s.push('*');
+        }
         s.push_str(&q);
-        if !q.ends_with('*') { s.push('*'); }
+        if !q.ends_with('*') {
+            s.push('*');
+        }
         s.chars().collect()
     } else {
         Vec::new()
@@ -2207,10 +2391,12 @@ fn search_in_dir(
     Ok(out)
 }
 
-#[tauri::command]
-fn zip_create(srcs: Vec<String>, dst: String) -> Result<(), String> {
+const ZIP_MAX_ENTRY_COUNT: usize = 100_000;
+const ZIP_MAX_UNCOMPRESSED_BYTES: u64 = 20 * 1024 * 1024 * 1024;
+
+fn zip_create_inner(srcs: Vec<String>, dst: String) -> Result<(), String> {
     use std::fs::File;
-    use std::io::{Read, Write};
+    use std::io::copy;
     use zip::write::SimpleFileOptions;
 
     let dst_path = expand_tilde(&dst);
@@ -2222,33 +2408,40 @@ fn zip_create(srcs: Vec<String>, dst: String) -> Result<(), String> {
 
     for src in srcs {
         let p = expand_tilde(&src);
-        let base = p.file_name().ok_or_else(|| format!("ungültiger Pfad: {}", src))?.to_string_lossy().into_owned();
+        let base = p
+            .file_name()
+            .ok_or_else(|| format!("ungültiger Pfad: {}", src))?
+            .to_string_lossy()
+            .into_owned();
         if p.is_dir() {
             for entry in WalkDir::new(&p) {
                 let e = entry.map_err(|err| err.to_string())?;
                 let path = e.path();
                 let rel = path.strip_prefix(&p).map_err(|err| err.to_string())?;
-                if rel.as_os_str().is_empty() { continue; }
+                if rel.as_os_str().is_empty() {
+                    continue;
+                }
                 let mut name = base.clone();
                 name.push('/');
                 name.push_str(&rel.to_string_lossy());
                 if e.file_type().is_dir() {
-                    if !name.ends_with('/') { name.push('/'); }
-                    zw.add_directory(name, options).map_err(|err| err.to_string())?;
+                    if !name.ends_with('/') {
+                        name.push('/');
+                    }
+                    zw.add_directory(name, options)
+                        .map_err(|err| err.to_string())?;
                 } else if e.file_type().is_file() {
-                    zw.start_file(name, options).map_err(|err| err.to_string())?;
+                    zw.start_file(name, options)
+                        .map_err(|err| err.to_string())?;
                     let mut f = File::open(path).map_err(|err| err.to_string())?;
-                    let mut buf = Vec::new();
-                    f.read_to_end(&mut buf).map_err(|err| err.to_string())?;
-                    zw.write_all(&buf).map_err(|err| err.to_string())?;
+                    copy(&mut f, &mut zw).map_err(|err| err.to_string())?;
                 }
             }
         } else if p.is_file() {
-            zw.start_file(base, options).map_err(|err| err.to_string())?;
+            zw.start_file(base, options)
+                .map_err(|err| err.to_string())?;
             let mut f = File::open(&p).map_err(|err| err.to_string())?;
-            let mut buf = Vec::new();
-            f.read_to_end(&mut buf).map_err(|err| err.to_string())?;
-            zw.write_all(&buf).map_err(|err| err.to_string())?;
+            copy(&mut f, &mut zw).map_err(|err| err.to_string())?;
         }
     }
     zw.finish().map_err(|e| e.to_string())?;
@@ -2256,8 +2449,14 @@ fn zip_create(srcs: Vec<String>, dst: String) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn zip_extract(src: String, dst_dir: String) -> Result<(), String> {
-    use std::fs::{self, File};
+async fn zip_create(srcs: Vec<String>, dst: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || zip_create_inner(srcs, dst))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+fn zip_extract_inner(src: String, dst_dir: String) -> Result<(), String> {
+    use std::fs::{self, File, OpenOptions};
     use std::io::copy;
 
     let src_path = expand_tilde(&src);
@@ -2266,9 +2465,24 @@ fn zip_extract(src: String, dst_dir: String) -> Result<(), String> {
 
     let file = File::open(&src_path).map_err(|e| e.to_string())?;
     let mut archive = zip::ZipArchive::new(file).map_err(|e| e.to_string())?;
+    if archive.len() > ZIP_MAX_ENTRY_COUNT {
+        return Err(format!(
+            "ZIP enthält zu viele Einträge (maximal {ZIP_MAX_ENTRY_COUNT})"
+        ));
+    }
 
+    let mut total_uncompressed = 0u64;
     for i in 0..archive.len() {
         let mut entry = archive.by_index(i).map_err(|e| e.to_string())?;
+        total_uncompressed = total_uncompressed
+            .checked_add(entry.size())
+            .ok_or_else(|| "ZIP-Größe ist ungültig".to_string())?;
+        if total_uncompressed > ZIP_MAX_UNCOMPRESSED_BYTES {
+            return Err(format!(
+                "ZIP entpackt mehr als {} GiB und wurde aus Sicherheitsgründen abgebrochen",
+                ZIP_MAX_UNCOMPRESSED_BYTES / 1024 / 1024 / 1024
+            ));
+        }
         let rel = match entry.enclosed_name() {
             Some(p) => p.to_path_buf(),
             None => continue,
@@ -2293,11 +2507,25 @@ fn zip_extract(src: String, dst_dir: String) -> Result<(), String> {
             if let Some(parent) = out_path.parent() {
                 fs::create_dir_all(parent).map_err(|e| e.to_string())?;
             }
-            let mut out = File::create(&out_path).map_err(|e| e.to_string())?;
+            // Das Zielverzeichnis wird von der UI immer neu angelegt. `create_new`
+            // verhindert, dass doppelte ZIP-Einträge oder ein zwischenzeitlich
+            // angelegter Pfad unbemerkt überschrieben werden.
+            let mut out = OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&out_path)
+                .map_err(|e| e.to_string())?;
             copy(&mut entry, &mut out).map_err(|e| e.to_string())?;
         }
     }
     Ok(())
+}
+
+#[tauri::command]
+async fn zip_extract(src: String, dst_dir: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || zip_extract_inner(src, dst_dir))
+        .await
+        .map_err(|e| e.to_string())?
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -2316,16 +2544,50 @@ fn favorites_file() -> Result<PathBuf, String> {
 }
 
 fn default_favorites() -> Vec<Favorite> {
-    let home = dirs::home_dir().map(|p| p.to_string_lossy().into_owned()).unwrap_or_else(|| "/".into());
+    let home = dirs::home_dir()
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "/".into());
     vec![
-        Favorite { name: "Home".into(), icon: "🏠".into(), path: home.clone() },
-        Favorite { name: "Desktop".into(), icon: "🖥".into(), path: format!("{home}/Desktop") },
-        Favorite { name: "Dokumente".into(), icon: "📄".into(), path: format!("{home}/Documents") },
-        Favorite { name: "Downloads".into(), icon: "⬇️".into(), path: format!("{home}/Downloads") },
-        Favorite { name: "Bilder".into(), icon: "🖼".into(), path: format!("{home}/Pictures") },
-        Favorite { name: "Musik".into(), icon: "🎵".into(), path: format!("{home}/Music") },
-        Favorite { name: "Filme".into(), icon: "🎬".into(), path: format!("{home}/Movies") },
-        Favorite { name: "Programme".into(), icon: "🧰".into(), path: "/Applications".into() },
+        Favorite {
+            name: "Home".into(),
+            icon: "🏠".into(),
+            path: home.clone(),
+        },
+        Favorite {
+            name: "Desktop".into(),
+            icon: "🖥".into(),
+            path: format!("{home}/Desktop"),
+        },
+        Favorite {
+            name: "Dokumente".into(),
+            icon: "📄".into(),
+            path: format!("{home}/Documents"),
+        },
+        Favorite {
+            name: "Downloads".into(),
+            icon: "⬇️".into(),
+            path: format!("{home}/Downloads"),
+        },
+        Favorite {
+            name: "Bilder".into(),
+            icon: "🖼".into(),
+            path: format!("{home}/Pictures"),
+        },
+        Favorite {
+            name: "Musik".into(),
+            icon: "🎵".into(),
+            path: format!("{home}/Music"),
+        },
+        Favorite {
+            name: "Filme".into(),
+            icon: "🎬".into(),
+            path: format!("{home}/Movies"),
+        },
+        Favorite {
+            name: "Programme".into(),
+            icon: "🧰".into(),
+            path: "/Applications".into(),
+        },
     ]
 }
 
@@ -2366,11 +2628,13 @@ fn classify(ext: &str, is_dir: bool) -> &'static str {
     }
     let e = ext.to_ascii_lowercase();
     match e.as_str() {
-        "png" | "jpg" | "jpeg" | "gif" | "bmp" | "webp" | "tiff" | "tif" | "heic" | "svg" | "ico" => "image",
-        "txt" | "md" | "markdown" | "rs" | "ts" | "tsx" | "js" | "jsx" | "json" | "toml" | "yaml" | "yml"
-        | "html" | "htm" | "css" | "scss" | "sh" | "zsh" | "bash" | "py" | "rb" | "go" | "java" | "c"
-        | "h" | "cpp" | "hpp" | "cs" | "swift" | "kt" | "php" | "sql" | "xml" | "ini" | "cfg" | "conf"
-        | "log" | "csv" | "tsv" | "lock" | "gitignore" | "env" => "text",
+        "png" | "jpg" | "jpeg" | "gif" | "bmp" | "webp" | "tiff" | "tif" | "heic" | "svg"
+        | "ico" => "image",
+        "txt" | "md" | "markdown" | "rs" | "ts" | "tsx" | "js" | "jsx" | "json" | "toml"
+        | "yaml" | "yml" | "html" | "htm" | "css" | "scss" | "sh" | "zsh" | "bash" | "py"
+        | "rb" | "go" | "java" | "c" | "h" | "cpp" | "hpp" | "cs" | "swift" | "kt" | "php"
+        | "sql" | "xml" | "ini" | "cfg" | "conf" | "log" | "csv" | "tsv" | "lock" | "gitignore"
+        | "env" => "text",
         "" => "other",
         _ => "binary",
     }
@@ -2416,7 +2680,7 @@ fn read_text_preview(path: String, max_bytes: usize) -> Result<String, String> {
     use std::io::Read;
     let p = expand_tilde(&path);
     let mut f = std::fs::File::open(&p).map_err(|e| e.to_string())?;
-    let cap = max_bytes.min(1_048_576).max(1);
+    let cap = max_bytes.clamp(1, 1_048_576);
     let mut buf = vec![0u8; cap];
     let n = f.read(&mut buf).map_err(|e| e.to_string())?;
     buf.truncate(n);
@@ -2454,8 +2718,17 @@ fn read_image_thumb(path: String, size: u32) -> Result<String, String> {
         return Err("qlmanage fehlgeschlagen".into());
     }
     // qlmanage writes <stem>.png — find it
-    let expected = tmp_dir.join(format!("{}.png", p.file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default()));
-    let final_path = if expected.exists() { expected } else { out_path };
+    let expected = tmp_dir.join(format!(
+        "{}.png",
+        p.file_name()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_default()
+    ));
+    let final_path = if expected.exists() {
+        expected
+    } else {
+        out_path
+    };
     if !final_path.exists() {
         // fallback: search dir for any png with our stem
         if let Ok(rd) = std::fs::read_dir(&tmp_dir) {
@@ -2539,18 +2812,45 @@ async fn get_properties(path: String) -> Result<Properties, String> {
     tauri::async_runtime::spawn_blocking(move || -> Result<Properties, String> {
         use std::os::unix::fs::MetadataExt;
         let p = expand_tilde(&path);
-        let symlink_meta = std::fs::symlink_metadata(&p).map_err(|e| format!("{}: {}", p.display(), e))?;
+        let symlink_meta =
+            std::fs::symlink_metadata(&p).map_err(|e| format!("{}: {}", p.display(), e))?;
         let is_symlink = symlink_meta.file_type().is_symlink();
         let symlink_target = if is_symlink {
-            std::fs::read_link(&p).ok().map(|t| t.to_string_lossy().into_owned())
-        } else { None };
+            std::fs::read_link(&p)
+                .ok()
+                .map(|t| t.to_string_lossy().into_owned())
+        } else {
+            None
+        };
         let meta = std::fs::metadata(&p).unwrap_or_else(|_| symlink_meta.clone());
-        let name = p.file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| p.to_string_lossy().into_owned());
-        let ext = p.extension().and_then(|s| s.to_str()).map(|s| s.to_ascii_lowercase()).unwrap_or_default();
+        let name = p
+            .file_name()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_else(|| p.to_string_lossy().into_owned());
+        let ext = p
+            .extension()
+            .and_then(|s| s.to_str())
+            .map(|s| s.to_ascii_lowercase())
+            .unwrap_or_default();
         let kind = ext_to_kind(&ext, meta.is_dir(), is_symlink);
-        let mtime = meta.modified().ok().and_then(|t| t.duration_since(UNIX_EPOCH).ok()).map(|d| d.as_secs() as i64).unwrap_or(0);
-        let btime = meta.created().ok().and_then(|t| t.duration_since(UNIX_EPOCH).ok()).map(|d| d.as_secs() as i64).unwrap_or(0);
-        let atime = meta.accessed().ok().and_then(|t| t.duration_since(UNIX_EPOCH).ok()).map(|d| d.as_secs() as i64).unwrap_or(0);
+        let mtime = meta
+            .modified()
+            .ok()
+            .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        let btime = meta
+            .created()
+            .ok()
+            .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        let atime = meta
+            .accessed()
+            .ok()
+            .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
         let mode = meta.mode();
         let mode_str = mode_to_rwx(mode);
         let owner = uid_to_name(meta.uid());
@@ -2560,8 +2860,14 @@ async fn get_properties(path: String) -> Result<Properties, String> {
             let mut s: u64 = 0;
             let mut fc: u64 = 0;
             let mut dc: u64 = 0;
-            for entry in walkdir::WalkDir::new(&p).follow_links(false).into_iter().filter_map(|e| e.ok()) {
-                if entry.path() == p { continue; }
+            for entry in walkdir::WalkDir::new(&p)
+                .follow_links(false)
+                .into_iter()
+                .filter_map(|e| e.ok())
+            {
+                if entry.path() == p {
+                    continue;
+                }
                 if let Ok(m) = entry.metadata() {
                     if m.is_dir() {
                         dc += 1;
@@ -2578,11 +2884,23 @@ async fn get_properties(path: String) -> Result<Properties, String> {
 
         Ok(Properties {
             path: p.to_string_lossy().into_owned(),
-            name, kind, is_dir: meta.is_dir(), is_symlink, symlink_target,
-            size, file_count, dir_count,
-            mtime, btime, atime,
-            owner, group, uid: meta.uid(), gid: meta.gid(),
-            mode, mode_str,
+            name,
+            kind,
+            is_dir: meta.is_dir(),
+            is_symlink,
+            symlink_target,
+            size,
+            file_count,
+            dir_count,
+            mtime,
+            btime,
+            atime,
+            owner,
+            group,
+            uid: meta.uid(),
+            gid: meta.gid(),
+            mode,
+            mode_str,
         })
     })
     .await
@@ -2603,7 +2921,7 @@ async fn set_permissions(path: String, mode: u32) -> Result<(), String> {
 
 fn base64_encode(input: &[u8]) -> String {
     const CHARS: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut out = String::with_capacity((input.len() + 2) / 3 * 4);
+    let mut out = String::with_capacity(input.len().div_ceil(3) * 4);
     let mut i = 0;
     while i + 3 <= input.len() {
         let n = ((input[i] as u32) << 16) | ((input[i + 1] as u32) << 8) | (input[i + 2] as u32);
@@ -2636,7 +2954,11 @@ fn shell_single_quote(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + 2);
     out.push('\'');
     for ch in s.chars() {
-        if ch == '\'' { out.push_str("'\\''"); } else { out.push(ch); }
+        if ch == '\'' {
+            out.push_str("'\\''");
+        } else {
+            out.push(ch);
+        }
     }
     out.push('\'');
     out
@@ -2670,7 +2992,11 @@ fn run_with_admin(shell_cmd: &str) -> Result<String, String> {
         .map_err(|e| e.to_string())?;
     if !output.status.success() {
         let err = String::from_utf8_lossy(&output.stderr).into_owned();
-        return Err(if err.is_empty() { "Befehl fehlgeschlagen".into() } else { err });
+        return Err(if err.is_empty() {
+            "Befehl fehlgeschlagen".into()
+        } else {
+            err
+        });
     }
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
@@ -2740,8 +3066,11 @@ fn build_and_set_menu(app: &tauri::AppHandle, lang: &str) -> tauri::Result<()> {
         .comments(Some("Erstellt mit Claude Opus / Built with Claude Opus"))
         .build();
 
-    let about_item =
-        PredefinedMenuItem::about(app, Some(s("Über DualBeam", "About DualBeam")), Some(about_meta))?;
+    let about_item = PredefinedMenuItem::about(
+        app,
+        Some(s("Über DualBeam", "About DualBeam")),
+        Some(about_meta),
+    )?;
     let hide_item = PredefinedMenuItem::hide(app, Some(s("DualBeam ausblenden", "Hide DualBeam")))?;
     let quit_item = PredefinedMenuItem::quit(app, Some(s("DualBeam beenden", "Quit DualBeam")))?;
 
@@ -2787,7 +3116,8 @@ fn build_and_set_menu(app: &tauri::AppHandle, lang: &str) -> tauri::Result<()> {
         .build(app)?;
     let minimize_item = PredefinedMenuItem::minimize(app, Some(s("Im Dock ablegen", "Minimize")))?;
     let maximize_item = PredefinedMenuItem::maximize(app, Some(s("Zoomen", "Zoom")))?;
-    let close_item = PredefinedMenuItem::close_window(app, Some(s("Fenster schließen", "Close Window")))?;
+    let close_item =
+        PredefinedMenuItem::close_window(app, Some(s("Fenster schließen", "Close Window")))?;
 
     let window_menu = SubmenuBuilder::new(app, s("Fenster", "Window"))
         .item(&new_window_item)
@@ -2842,7 +3172,6 @@ fn set_menu_language(app: tauri::AppHandle, lang: String) -> Result<(), String> 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
-        .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_drag::init())
         .manage(JobManager::default())
         .manage(WatcherManager::default())
@@ -2892,7 +3221,7 @@ pub fn run() {
             home_dir,
             list_dir,
             open_default,
-            open_url,
+            open_privacy_settings,
             create_dir,
             create_file,
             create_symlink,
@@ -2902,13 +3231,10 @@ pub fn run() {
             force_delete_admin,
             path_exists,
             path_is_network,
-            bust_dir_cache,
             list_volumes,
             list_network_bookmarks,
             mount_network_url,
             app_version,
-            check_update,
-            download_and_open_update,
             set_menu_language,
             eject_volume,
             mount_dmg,
@@ -2945,7 +3271,11 @@ pub fn run() {
         .expect("error while running tauri application")
         .run(|_app_handle, _event| {
             #[cfg(target_os = "macos")]
-            if let tauri::RunEvent::Reopen { has_visible_windows, .. } = &_event {
+            if let tauri::RunEvent::Reopen {
+                has_visible_windows,
+                ..
+            } = &_event
+            {
                 if !*has_visible_windows {
                     open_new_window(_app_handle);
                 }
@@ -2955,10 +3285,18 @@ pub fn run() {
 
 #[cfg(all(test, target_os = "macos"))]
 mod copy_tests {
-    use super::copy_file_with_metadata;
+    use super::{
+        copy_file_with_metadata, destination_is_within_source, is_protected_admin_root,
+        is_untransferable_file, parse_mount_url, preview_walk_src, remove_source_after_move,
+        search_in_dir, sync_preview_inner, zip_extract_inner, CopyOutcome,
+    };
     use std::ffi::CString;
     use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::net::UnixDatagram;
     use std::path::PathBuf;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static TEST_PATH_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
     extern "C" {
         fn setxattr(
@@ -2982,12 +3320,13 @@ mod copy_tests {
     fn tmp_path(name: &str) -> PathBuf {
         let mut p = std::env::temp_dir();
         let uniq = format!(
-            "dualbeam_copytest_{}_{}",
+            "dualbeam_copytest_{}_{}_{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
-                .as_nanos()
+                .as_nanos(),
+            TEST_PATH_SEQUENCE.fetch_add(1, Ordering::Relaxed),
         );
         p.push(uniq);
         std::fs::create_dir_all(&p).unwrap();
@@ -3061,5 +3400,210 @@ mod copy_tests {
         assert_eq!(std::fs::read(&dst).unwrap(), b"neuer Inhalt");
 
         let _ = std::fs::remove_dir_all(src.parent().unwrap());
+    }
+
+    #[test]
+    fn marks_unix_sockets_as_untransferable() {
+        // Unix-Socket-Pfade sind auf macOS auf rund 104 Bytes begrenzt;
+        // `temp_dir()` kann unter `/var/folders/...` bereits länger sein.
+        let socket_path = PathBuf::from(format!(
+            "/tmp/dualbeam_socket_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos(),
+        ));
+        let socket = UnixDatagram::bind(&socket_path).unwrap();
+
+        let meta = std::fs::symlink_metadata(&socket_path).unwrap();
+        assert!(is_untransferable_file(&meta));
+
+        drop(socket);
+        let _ = std::fs::remove_file(socket_path);
+    }
+
+    #[test]
+    fn excludes_unix_sockets_from_sync_preview() {
+        let root = PathBuf::from(format!(
+            "/tmp/dualbeam_sync_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos(),
+        ));
+        let src = root.join("src");
+        let dst = root.join("dst");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::create_dir_all(&dst).unwrap();
+        let socket = UnixDatagram::bind(src.join("fsmonitor--daemon.ipc")).unwrap();
+
+        let mut entries = Vec::new();
+        preview_walk_src(&src, &dst, &src, &mut entries).unwrap();
+        assert!(entries.is_empty());
+
+        drop(socket);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn synchronizes_hidden_project_files_but_excludes_transient_trunk_dirs() {
+        let root = tmp_path("hidden-sync-root");
+        let src = root.join("src");
+        let dst = root.join("dst");
+        std::fs::create_dir_all(src.join(".hidden")).unwrap();
+        std::fs::create_dir_all(src.join(".trunk").join("logs")).unwrap();
+        std::fs::create_dir_all(&dst).unwrap();
+        std::fs::write(src.join(".hidden").join("config"), b"keep me").unwrap();
+        std::fs::write(src.join(".trunk").join("trunk.yaml"), b"keep config").unwrap();
+        std::fs::write(src.join(".trunk").join("logs").join("active"), b"ephemeral").unwrap();
+
+        let entries =
+            sync_preview_inner(&src.to_string_lossy(), &dst.to_string_lossy(), true).unwrap();
+        assert!(entries.iter().any(|entry| entry.rel == ".hidden"));
+        assert!(entries.iter().any(|entry| entry.rel == ".trunk/trunk.yaml"));
+        assert!(!entries
+            .iter()
+            .any(|entry| entry.rel.starts_with(".trunk/logs")));
+
+        let _ = std::fs::remove_dir_all(root.parent().unwrap());
+    }
+
+    #[test]
+    fn rejects_copying_a_folder_into_its_own_subfolder() {
+        let src = tmp_path("source");
+        std::fs::create_dir_all(src.join("child")).unwrap();
+        let dst = src.join("child").join("source");
+
+        assert!(destination_is_within_source(&src, &dst).unwrap());
+
+        let _ = std::fs::remove_dir_all(src.parent().unwrap());
+    }
+
+    #[test]
+    fn allows_a_source_that_disappeared_after_sync_preview() {
+        let root = tmp_path("vanished-source-root");
+        let vanished = root.join("temporary-reference");
+        let target = root.join("target").join("temporary-reference");
+
+        // Simulates a temporary Git/tool path that vanished after the preview.
+        assert!(!destination_is_within_source(&vanished, &target).unwrap());
+
+        let _ = std::fs::remove_dir_all(root.parent().unwrap());
+    }
+
+    #[test]
+    fn allows_two_symlinks_to_the_same_directory() {
+        let root = tmp_path("symlink-root");
+        std::fs::create_dir_all(&root).unwrap();
+        let source = root.parent().unwrap().join("source-link");
+        let target = root.parent().unwrap().join("target-link");
+        std::os::unix::fs::symlink(&root, &source).unwrap();
+        std::os::unix::fs::symlink(&root, &target).unwrap();
+
+        assert!(!destination_is_within_source(&source, &target).unwrap());
+
+        let _ = std::fs::remove_file(source);
+        let _ = std::fs::remove_file(target);
+        let _ = std::fs::remove_dir_all(root.parent().unwrap());
+    }
+
+    #[test]
+    fn protects_system_roots_from_admin_delete() {
+        assert!(is_protected_admin_root(std::path::Path::new("/")));
+        assert!(is_protected_admin_root(std::path::Path::new("/System/..")));
+        assert!(!is_protected_admin_root(std::path::Path::new(
+            "/tmp/dualbeam-test-file"
+        )));
+    }
+
+    #[test]
+    fn extracts_a_safe_zip_entry() {
+        use std::io::Write;
+        use zip::write::SimpleFileOptions;
+
+        let zip_path = tmp_path("safe.zip");
+        let out_dir = zip_path.parent().unwrap().join("out");
+        let file = std::fs::File::create(&zip_path).unwrap();
+        let mut archive = zip::ZipWriter::new(file);
+        archive
+            .start_file("hello.txt", SimpleFileOptions::default())
+            .unwrap();
+        archive.write_all(b"hello dualbeam").unwrap();
+        archive.finish().unwrap();
+
+        zip_extract_inner(
+            zip_path.to_string_lossy().into_owned(),
+            out_dir.to_string_lossy().into_owned(),
+        )
+        .unwrap();
+        assert_eq!(
+            std::fs::read(out_dir.join("hello.txt")).unwrap(),
+            b"hello dualbeam"
+        );
+
+        let _ = std::fs::remove_dir_all(zip_path.parent().unwrap());
+    }
+
+    #[test]
+    fn retains_source_when_a_move_copy_is_incomplete() {
+        let src = tmp_path("move-source.txt");
+        std::fs::write(&src, b"keep me").unwrap();
+
+        assert!(remove_source_after_move(&src, CopyOutcome::Skipped).is_err());
+        assert!(src.exists());
+
+        let _ = std::fs::remove_dir_all(src.parent().unwrap());
+    }
+
+    #[test]
+    fn accepts_secure_mounts_and_rejects_credentials() {
+        assert!(parse_mount_url("smb://nas.local/share", false).is_ok());
+        assert!(parse_mount_url("https://webdav.example.test/remote.php/dav", false).is_ok());
+        assert_eq!(
+            parse_mount_url("smb://alice:secret@nas.local/share", false).unwrap_err(),
+            "err.network.credentials"
+        );
+    }
+
+    #[test]
+    fn allows_insecure_protocols_only_for_confirmed_local_ips() {
+        assert!(parse_mount_url("nfs://192.168.1.20/export", true).is_ok());
+        assert!(parse_mount_url("http://[fd00::1]/dav", true).is_ok());
+        assert_eq!(
+            parse_mount_url("nfs://nas.local/export", true).unwrap_err(),
+            "err.network.localIpOnly"
+        );
+        assert_eq!(
+            parse_mount_url("http://8.8.8.8/dav", true).unwrap_err(),
+            "err.network.localIpOnly"
+        );
+        assert_eq!(
+            parse_mount_url("nfs://192.168.1.20/export", false).unwrap_err(),
+            "err.network.insecureConfirm"
+        );
+    }
+
+    #[test]
+    fn search_finds_files_in_nested_directories() {
+        let root = tmp_path("search-root");
+        let nested = root.join("one").join("two");
+        std::fs::create_dir_all(&nested).unwrap();
+        let needle = nested.join("Needle.txt");
+        std::fs::write(&needle, b"found recursively").unwrap();
+
+        let results = search_in_dir(
+            root.to_string_lossy().into_owned(),
+            "needle".into(),
+            false,
+            10,
+        )
+        .expect("recursive search should succeed");
+        assert!(results
+            .iter()
+            .any(|entry| entry.path == needle.to_string_lossy()));
+
+        let _ = std::fs::remove_dir_all(root.parent().unwrap());
     }
 }

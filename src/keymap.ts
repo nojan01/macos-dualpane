@@ -1,7 +1,30 @@
-import { state, setActive, setCursor, selectOnly, loadPane, toggleHidden, forceRefreshPane, setFilter, requestFocusFilter, toggleSidebar, togglePreview, toggleHelp, newTab, closeActiveTab, switchTab } from "./state";
+import {
+  state,
+  setActive,
+  setCursor,
+  selectOnly,
+  loadPane,
+  toggleHidden,
+  forceRefreshPane,
+  setFilter,
+  toggleSidebar,
+  togglePreview,
+  toggleHelp,
+  newTab,
+  closeActiveTab,
+  switchTab,
+} from "./state";
 import { openDefault, quickLook, clipboardWriteFiles } from "./ipc";
 import { openProperties } from "./components/PropertiesDialog";
-import { startTransfer, deleteSelected, makeFolder, beginRename, duplicateSelected, archiveAction, pasteFromClipboard } from "./jobs";
+import {
+  startTransfer,
+  deleteSelected,
+  makeFolder,
+  beginRename,
+  duplicateSelected,
+  archiveAction,
+  pasteFromClipboard,
+} from "./jobs";
 import { openRenameDialog } from "./rename";
 import { openSearch } from "./components/SearchDialog";
 import { connectToServer } from "./network";
@@ -49,8 +72,11 @@ function typeAhead(pane: PaneId, ch: string) {
   if (n === 0) return;
 
   // Wiederholt man denselben Buchstaben, zyklisch zum nächsten Treffer springen.
-  const sameChar = typeAheadBuffer.length === 1 && typeAheadBuffer === ch.toLowerCase();
-  typeAheadBuffer = sameChar ? typeAheadBuffer : typeAheadBuffer + ch.toLowerCase();
+  const sameChar =
+    typeAheadBuffer.length === 1 && typeAheadBuffer === ch.toLowerCase();
+  typeAheadBuffer = sameChar
+    ? typeAheadBuffer
+    : typeAheadBuffer + ch.toLowerCase();
   const prefix = typeAheadBuffer;
 
   const start = sameChar ? p.cursor + 1 : p.cursor;
@@ -67,7 +93,11 @@ export function attachKeymap() {
   window.addEventListener("keydown", async (ev) => {
     // Eingaben in Inputs nicht abfangen
     const t = ev.target as HTMLElement | null;
-    if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable)) return;
+    if (
+      t &&
+      (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable)
+    )
+      return;
 
     const pane = state.active;
     const p = state[pane];
@@ -189,10 +219,18 @@ export function attachKeymap() {
         case "C": {
           ev.preventDefault();
           const sel = p.entries.filter((e) => p.selected.has(e.path));
-          const items = sel.length > 0 ? sel : (p.entries[p.cursor] ? [p.entries[p.cursor]] : []);
+          const items =
+            sel.length > 0
+              ? sel
+              : p.entries[p.cursor]
+                ? [p.entries[p.cursor]]
+                : [];
           if (items.length === 0) return;
-          try { await clipboardWriteFiles(items.map((e) => e.path)); }
-          catch (e) { console.error("clipboardWriteFiles failed", e); }
+          try {
+            await clipboardWriteFiles(items.map((e) => e.path));
+          } catch (e) {
+            console.error("clipboardWriteFiles failed", e);
+          }
           return;
         }
         case "v":
@@ -222,11 +260,7 @@ export function attachKeymap() {
           return;
         case "f":
           ev.preventDefault();
-          if (ev.shiftKey) {
-            openSearch();
-          } else {
-            requestFocusFilter(pane);
-          }
+          openSearch();
           return;
         case "F":
           ev.preventDefault();
@@ -259,7 +293,13 @@ export function attachKeymap() {
     }
 
     // Type-ahead: einzelnes druckbares Zeichen ohne Modifier -> zum Eintrag springen.
-    if (!ev.metaKey && !ev.ctrlKey && !ev.altKey && ev.key.length === 1 && ev.key !== " ") {
+    if (
+      !ev.metaKey &&
+      !ev.ctrlKey &&
+      !ev.altKey &&
+      ev.key.length === 1 &&
+      ev.key !== " "
+    ) {
       typeAhead(pane, ev.key);
       return;
     }

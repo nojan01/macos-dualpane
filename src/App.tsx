@@ -1,7 +1,25 @@
-import { createSignal, createEffect, onMount, onCleanup } from "solid-js";
+import { createSignal, createEffect, onMount, onCleanup, Show } from "solid-js";
 import { listen } from "@tauri-apps/api/event";
-import { cycleThemeMode, getThemeMode, onThemeChange, themeIcon, themeLabel, setThemeMode, type ThemeMode } from "./theme";
-import { cycleLangMode, getLangMode, getResolvedLang, onLangChange, langIcon, langLabel, setLangMode, type LangMode, t } from "./i18n";
+import {
+  cycleThemeMode,
+  getThemeMode,
+  onThemeChange,
+  themeIcon,
+  themeLabel,
+  setThemeMode,
+  type ThemeMode,
+} from "./theme";
+import {
+  cycleLangMode,
+  getLangMode,
+  getResolvedLang,
+  onLangChange,
+  langIcon,
+  langLabel,
+  setLangMode,
+  type LangMode,
+  t,
+} from "./i18n";
 import { Pane } from "./components/Pane";
 import { Sidebar } from "./components/Sidebar";
 import { PreviewPane } from "./components/PreviewPane";
@@ -15,10 +33,31 @@ import { PropertiesDialog } from "./components/PropertiesDialog";
 import { JobBar } from "./components/JobBar";
 import { AboutDialog, openAbout } from "./components/AboutDialog";
 import { HelpDialog, openHelp } from "./components/HelpDialog";
-import { loadPane, state, setActive, setState, refreshPane, forceRefreshAll, toggleCompareMode } from "./state";
-import { homeDir, openTerminal, setDockBadge, setMenuLanguage, type JobProgress, type PaneChanged } from "./ipc";
+import {
+  loadPane,
+  state,
+  setActive,
+  setState,
+  refreshPane,
+  forceRefreshAll,
+  toggleCompareMode,
+  toggleHidden,
+} from "./state";
+import {
+  homeDir,
+  openTerminal,
+  setDockBadge,
+  setMenuLanguage,
+  type JobProgress,
+  type PaneChanged,
+} from "./ipc";
 import { attachKeymap } from "./keymap";
-import { setHoverTarget, setDragEffect, defaultDragMode, toggleDefaultDragMode } from "./dnd";
+import {
+  setHoverTarget,
+  setDragEffect,
+  defaultDragMode,
+  toggleDefaultDragMode,
+} from "./dnd";
 import { transferEntries, syncPanes } from "./jobs";
 import { loadPersisted, applyPersisted, attachPersist } from "./persist";
 import { attachWindowState } from "./windowState";
@@ -28,7 +67,10 @@ import type { Entry, PaneId } from "./types";
 type TauriDragPos = { x: number; y: number };
 type TauriDragPayload = { paths: string[]; position: TauriDragPos };
 
-function findDropTarget(cssX: number, cssY: number): { pane: PaneId; folderIdx: number | null } | null {
+function findDropTarget(
+  cssX: number,
+  cssY: number,
+): { pane: PaneId; folderIdx: number | null } | null {
   const el = document.elementFromPoint(cssX, cssY);
   if (!el) return null;
   const paneEl = (el as HTMLElement).closest(".pane") as HTMLElement | null;
@@ -90,56 +132,61 @@ export function App() {
     cancelAnimationFrame(syncRaf);
     syncRaf = requestAnimationFrame(() => {
       if (!toolbarEl || !syncCenterEl || !splitSplitterEl) return;
-    const tbRect = toolbarEl.getBoundingClientRect();
-    // Tatsächliche Bildschirm-X-Mitte des Pane-Splitters.
-    const splRect = splitSplitterEl.getBoundingClientRect();
-    const dividerX = splRect.left + splRect.width / 2;
-    // `left` bei absoluter Positionierung zählt ab der Padding-Box der Toolbar
-    // (innere Border-Kante) – die Toolbar hat keinen linken Rand, also direkt
-    // relativ zu tbRect.left.
-    let centerX = dividerX - tbRect.left;
-    // Anker = visuelle Mitte zwischen den Zentren von Button 1 (←) und 2 (→).
-    const groupRect = syncCenterEl.getBoundingClientRect();
-    const btn1 = syncCenterEl.children[0] as HTMLElement | undefined;
-    const btn2 = syncCenterEl.children[1] as HTMLElement | undefined;
-    let anchor = groupRect.width / 2;
-    if (btn1 && btn2) {
-      const r1 = btn1.getBoundingClientRect();
-      const r2 = btn2.getBoundingClientRect();
-      const c1 = r1.left + r1.width / 2 - groupRect.left;
-      const c2 = r2.left + r2.width / 2 - groupRect.left;
-      anchor = (c1 + c2) / 2;
-    }
-    // Verschieben begrenzen, damit die Gruppe die benachbarten Buttons nicht
-    // überlagert. Linke Grenze = rechte Kante des letzten linken Buttons,
-    // rechte Grenze = linke Kante des ersten rechten Buttons (je + Abstand).
-    const gap = 8;
-    const groupW = groupRect.width;
-    const spacer = syncCenterEl.previousElementSibling as HTMLElement | null;
-    const lastLeft = (spacer?.previousElementSibling ?? spacer) as HTMLElement | null;
-    const firstRight = syncCenterEl.nextElementSibling as HTMLElement | null;
-    if (lastLeft) {
-      const lr = lastLeft.getBoundingClientRect();
-      const minCenter = lr.right - tbRect.left + gap + anchor;
-      if (centerX < minCenter) centerX = minCenter;
-    }
-    if (firstRight) {
-      const rr = firstRight.getBoundingClientRect();
-      const maxCenter = rr.left - tbRect.left - gap - (groupW - anchor);
-      if (centerX > maxCenter) centerX = maxCenter;
-    }
-    syncCenterEl.style.setProperty("--sync-left", `${centerX}px`);
-    syncCenterEl.style.setProperty("--sync-shift", `-${anchor}px`);
+      const tbRect = toolbarEl.getBoundingClientRect();
+      // Tatsächliche Bildschirm-X-Mitte des Pane-Splitters.
+      const splRect = splitSplitterEl.getBoundingClientRect();
+      const dividerX = splRect.left + splRect.width / 2;
+      // `left` bei absoluter Positionierung zählt ab der Padding-Box der Toolbar
+      // (innere Border-Kante) – die Toolbar hat keinen linken Rand, also direkt
+      // relativ zu tbRect.left.
+      let centerX = dividerX - tbRect.left;
+      // Anker = visuelle Mitte zwischen den Zentren von Button 1 (←) und 2 (→).
+      const groupRect = syncCenterEl.getBoundingClientRect();
+      const btn1 = syncCenterEl.children[0] as HTMLElement | undefined;
+      const btn2 = syncCenterEl.children[1] as HTMLElement | undefined;
+      let anchor = groupRect.width / 2;
+      if (btn1 && btn2) {
+        const r1 = btn1.getBoundingClientRect();
+        const r2 = btn2.getBoundingClientRect();
+        const c1 = r1.left + r1.width / 2 - groupRect.left;
+        const c2 = r2.left + r2.width / 2 - groupRect.left;
+        anchor = (c1 + c2) / 2;
+      }
+      // Verschieben begrenzen, damit die Gruppe die benachbarten Buttons nicht
+      // überlagert. Linke Grenze = rechte Kante des letzten linken Buttons,
+      // rechte Grenze = linke Kante des ersten rechten Buttons (je + Abstand).
+      const gap = 8;
+      const groupW = groupRect.width;
+      const spacer = syncCenterEl.previousElementSibling as HTMLElement | null;
+      const lastLeft = (spacer?.previousElementSibling ??
+        spacer) as HTMLElement | null;
+      const firstRight = syncCenterEl.nextElementSibling as HTMLElement | null;
+      if (lastLeft) {
+        const lr = lastLeft.getBoundingClientRect();
+        const minCenter = lr.right - tbRect.left + gap + anchor;
+        if (centerX < minCenter) centerX = minCenter;
+      }
+      if (firstRight) {
+        const rr = firstRight.getBoundingClientRect();
+        const maxCenter = rr.left - tbRect.left - gap - (groupW - anchor);
+        if (centerX > maxCenter) centerX = maxCenter;
+      }
+      syncCenterEl.style.setProperty("--sync-left", `${centerX}px`);
+      syncCenterEl.style.setProperty("--sync-shift", `-${anchor}px`);
     });
   };
 
-  const startColResize = (ev: MouseEvent, kind: "sidebar" | "split" | "preview") => {
+  const startColResize = (
+    ev: MouseEvent,
+    kind: "sidebar" | "split" | "preview",
+  ) => {
     ev.preventDefault();
     const startX = ev.clientX;
     const startSidebar = state.sidebarWidth;
     const startPreview = state.previewWidth;
     const startSplit = state.paneSplit;
-    const panesEl = (ev.currentTarget as HTMLElement).parentElement as HTMLElement | null;
+    const panesEl = (ev.currentTarget as HTMLElement)
+      .parentElement as HTMLElement | null;
     document.body.classList.add("col-resizing");
     (ev.currentTarget as HTMLElement).classList.add("dragging");
     const target = ev.currentTarget as HTMLElement;
@@ -155,9 +202,10 @@ export function App() {
       } else if (panesEl) {
         // Verfügbare Pane-Breite = panesEl.clientWidth minus Sidebar/Preview/Splitter
         const total = panesEl.clientWidth;
-        const used = (state.sidebarVisible ? state.sidebarWidth + 4 : 0)
-          + 4
-          + (state.previewVisible ? state.previewWidth + 4 : 0);
+        const used =
+          (state.sidebarVisible ? state.sidebarWidth + 4 : 0) +
+          4 +
+          (state.previewVisible ? state.previewWidth + 4 : 0);
         const avail = Math.max(200, total - used);
         const leftBase = startSplit * avail;
         const newLeft = Math.max(120, Math.min(avail - 120, leftBase + dx));
@@ -195,16 +243,23 @@ export function App() {
     // Dock-Badge bei laufenden Jobs.
     createEffect(() => {
       const job = state.job;
-      const label = job && job.total > 0 ? `${job.done}/${job.total}` : job ? "…" : null;
+      const label =
+        job && job.total > 0 ? `${job.done}/${job.total}` : job ? "…" : null;
       void setDockBadge(label).catch(() => {});
-    });    await listen<JobProgress>("job-progress", (ev) => {
+    });
+    await listen<JobProgress>("job-progress", (ev) => {
       const p = ev.payload;
       if (p.finished) {
         setState("job", null);
         return;
       }
       if (state.job && state.job.id === p.jobId) {
-        setState("job", { ...state.job, done: p.done, total: p.total, current: p.current });
+        setState("job", {
+          ...state.job,
+          done: p.done,
+          total: p.total,
+          current: p.current,
+        });
       }
     });
 
@@ -279,11 +334,16 @@ export function App() {
     const persisted = loadPersisted();
     if (persisted) {
       applyPersisted(persisted);
-      const lCwd = persisted.panes.left.tabs[persisted.panes.left.activeTab].cwd;
-      const rCwd = persisted.panes.right.tabs[persisted.panes.right.activeTab].cwd;
+      const lCwd =
+        persisted.panes.left.tabs[persisted.panes.left.activeTab].cwd;
+      const rCwd =
+        persisted.panes.right.tabs[persisted.panes.right.activeTab].cwd;
       // Beide Panes parallel laden: liegt eines (oder beide) auf einem langsamen
       // Netzlaufwerk (HiDrive/WebDAV), blockiert es so nicht das jeweils andere.
-      await Promise.all([loadPane("left", lCwd || home), loadPane("right", rCwd || home)]);
+      await Promise.all([
+        loadPane("left", lCwd || home),
+        loadPane("right", rCwd || home),
+      ]);
       setActive(persisted.active);
     } else {
       await Promise.all([loadPane("left", home), loadPane("right", home)]);
@@ -311,7 +371,12 @@ export function App() {
 
   return (
     <div class="app">
-      <div class="toolbar" ref={(el) => { toolbarEl = el; }}>
+      <div
+        class="toolbar"
+        ref={(el) => {
+          toolbarEl = el;
+        }}
+      >
         <button
           class="tb-glyph"
           classList={{ active: state.sidebarVisible }}
@@ -321,14 +386,70 @@ export function App() {
           <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true">
             <rect x="2" y="3" width="20" height="18" rx="3" fill="#2a6fb8" />
             <rect x="2" y="3" width="9" height="18" rx="3" fill="#5cd0f5" />
-            <rect x="4" y="6" width="1.6" height="1.6" rx="0.3" fill="#0a5a82" />
-            <rect x="6.4" y="6" width="3.2" height="1.6" rx="0.3" fill="#0a5a82" />
-            <rect x="4" y="9" width="1.6" height="1.6" rx="0.3" fill="#0a5a82" />
-            <rect x="6.4" y="9" width="3.2" height="1.6" rx="0.3" fill="#0a5a82" />
-            <rect x="4" y="12" width="1.6" height="1.6" rx="0.3" fill="#0a5a82" />
-            <rect x="6.4" y="12" width="3.2" height="1.6" rx="0.3" fill="#0a5a82" />
-            <rect x="4" y="15" width="1.6" height="1.6" rx="0.3" fill="#0a5a82" />
-            <rect x="6.4" y="15" width="3.2" height="1.6" rx="0.3" fill="#0a5a82" />
+            <rect
+              x="4"
+              y="6"
+              width="1.6"
+              height="1.6"
+              rx="0.3"
+              fill="#0a5a82"
+            />
+            <rect
+              x="6.4"
+              y="6"
+              width="3.2"
+              height="1.6"
+              rx="0.3"
+              fill="#0a5a82"
+            />
+            <rect
+              x="4"
+              y="9"
+              width="1.6"
+              height="1.6"
+              rx="0.3"
+              fill="#0a5a82"
+            />
+            <rect
+              x="6.4"
+              y="9"
+              width="3.2"
+              height="1.6"
+              rx="0.3"
+              fill="#0a5a82"
+            />
+            <rect
+              x="4"
+              y="12"
+              width="1.6"
+              height="1.6"
+              rx="0.3"
+              fill="#0a5a82"
+            />
+            <rect
+              x="6.4"
+              y="12"
+              width="3.2"
+              height="1.6"
+              rx="0.3"
+              fill="#0a5a82"
+            />
+            <rect
+              x="4"
+              y="15"
+              width="1.6"
+              height="1.6"
+              rx="0.3"
+              fill="#0a5a82"
+            />
+            <rect
+              x="6.4"
+              y="15"
+              width="3.2"
+              height="1.6"
+              rx="0.3"
+              fill="#0a5a82"
+            />
           </svg>
         </button>
         <button
@@ -349,7 +470,37 @@ export function App() {
         </button>
         <button
           class="tb-glyph"
-          onClick={() => { const cwd = state[state.active]?.cwd; if (cwd) void openTerminal(cwd); }}
+          classList={{ active: state.showHidden }}
+          onClick={() => toggleHidden()}
+          title={t(
+            state.showHidden ? "toolbar.hiddenHide" : "toolbar.hiddenShow",
+          )}
+          aria-pressed={state.showHidden}
+        >
+          <svg
+            viewBox="0 0 24 24"
+            width="19"
+            height="19"
+            aria-hidden="true"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="1.9"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+          >
+            <path d="M2 12s3.6-6 10-6 10 6 10 6-3.6 6-10 6S2 12 2 12Z" />
+            <circle cx="12" cy="12" r="2.5" />
+            <Show when={!state.showHidden}>
+              <path d="M4 4 20 20" />
+            </Show>
+          </svg>
+        </button>
+        <button
+          class="tb-glyph"
+          onClick={() => {
+            const cwd = state[state.active]?.cwd;
+            if (cwd) void openTerminal(cwd);
+          }}
           title={t("toolbar.terminal")}
         >
           🖥️
@@ -369,62 +520,207 @@ export function App() {
           title={t("toolbar.compare")}
         >
           <svg viewBox="0 0 24 24" width="21" height="21" aria-hidden="true">
-            <rect x="1" y="2" width="10" height="20" rx="2" fill="#5cd0f5" stroke="#2a6fb8" stroke-width="1.2" />
-            <rect x="13" y="2" width="10" height="20" rx="2" fill="#2a6fb8" stroke="#0a5a82" stroke-width="1.2" />
-            <line x1="3.5" y1="7" x2="8.5" y2="7" stroke="#0a5a82" stroke-width="1.4" stroke-linecap="round" />
-            <line x1="3.5" y1="11" x2="8.5" y2="11" stroke="#0a5a82" stroke-width="1.4" stroke-linecap="round" />
-            <line x1="3.5" y1="15" x2="6.5" y2="15" stroke="#0a5a82" stroke-width="1.4" stroke-linecap="round" />
-            <line x1="15.5" y1="7" x2="20.5" y2="7" stroke="#cfeefc" stroke-width="1.4" stroke-linecap="round" />
-            <line x1="15.5" y1="11" x2="20.5" y2="11" stroke="#cfeefc" stroke-width="1.4" stroke-linecap="round" />
-            <line x1="15.5" y1="15" x2="18.5" y2="15" stroke="#cfeefc" stroke-width="1.4" stroke-linecap="round" />
+            <rect
+              x="1"
+              y="2"
+              width="10"
+              height="20"
+              rx="2"
+              fill="#5cd0f5"
+              stroke="#2a6fb8"
+              stroke-width="1.2"
+            />
+            <rect
+              x="13"
+              y="2"
+              width="10"
+              height="20"
+              rx="2"
+              fill="#2a6fb8"
+              stroke="#0a5a82"
+              stroke-width="1.2"
+            />
+            <line
+              x1="3.5"
+              y1="7"
+              x2="8.5"
+              y2="7"
+              stroke="#0a5a82"
+              stroke-width="1.4"
+              stroke-linecap="round"
+            />
+            <line
+              x1="3.5"
+              y1="11"
+              x2="8.5"
+              y2="11"
+              stroke="#0a5a82"
+              stroke-width="1.4"
+              stroke-linecap="round"
+            />
+            <line
+              x1="3.5"
+              y1="15"
+              x2="6.5"
+              y2="15"
+              stroke="#0a5a82"
+              stroke-width="1.4"
+              stroke-linecap="round"
+            />
+            <line
+              x1="15.5"
+              y1="7"
+              x2="20.5"
+              y2="7"
+              stroke="#cfeefc"
+              stroke-width="1.4"
+              stroke-linecap="round"
+            />
+            <line
+              x1="15.5"
+              y1="11"
+              x2="20.5"
+              y2="11"
+              stroke="#cfeefc"
+              stroke-width="1.4"
+              stroke-linecap="round"
+            />
+            <line
+              x1="15.5"
+              y1="15"
+              x2="18.5"
+              y2="15"
+              stroke="#cfeefc"
+              stroke-width="1.4"
+              stroke-linecap="round"
+            />
           </svg>
         </button>
         <button
           class="tb-glyph"
           classList={{ active: defaultDragMode() === "copy" }}
           onClick={() => toggleDefaultDragMode()}
-          title={defaultDragMode() === "copy" ? t("toolbar.dragCopy") : t("toolbar.dragMove")}
+          title={
+            defaultDragMode() === "copy"
+              ? t("toolbar.dragCopy")
+              : t("toolbar.dragMove")
+          }
         >
           {defaultDragMode() === "copy" ? (
             <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true">
-              <rect x="2" y="2" width="15" height="18" rx="2" fill="#5cd0f5" stroke="#2a6fb8" stroke-width="1.2" />
-              <rect x="7" y="6" width="15" height="18" rx="2" fill="#2a6fb8" stroke="#1a4a7a" stroke-width="1.2" />
-              <line x1="10" y1="11" x2="19" y2="11" stroke="#fff" stroke-width="1.4" />
-              <line x1="10" y1="15" x2="19" y2="15" stroke="#fff" stroke-width="1.4" />
-              <line x1="10" y1="19" x2="16" y2="19" stroke="#fff" stroke-width="1.4" />
+              <rect
+                x="2"
+                y="2"
+                width="15"
+                height="18"
+                rx="2"
+                fill="#5cd0f5"
+                stroke="#2a6fb8"
+                stroke-width="1.2"
+              />
+              <rect
+                x="7"
+                y="6"
+                width="15"
+                height="18"
+                rx="2"
+                fill="#2a6fb8"
+                stroke="#1a4a7a"
+                stroke-width="1.2"
+              />
+              <line
+                x1="10"
+                y1="11"
+                x2="19"
+                y2="11"
+                stroke="#fff"
+                stroke-width="1.4"
+              />
+              <line
+                x1="10"
+                y1="15"
+                x2="19"
+                y2="15"
+                stroke="#fff"
+                stroke-width="1.4"
+              />
+              <line
+                x1="10"
+                y1="19"
+                x2="16"
+                y2="19"
+                stroke="#fff"
+                stroke-width="1.4"
+              />
             </svg>
           ) : (
             <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true">
-              <rect x="1" y="5" width="13" height="14" rx="1.6" fill="#5cd0f5" stroke="#2a6fb8" stroke-width="1.2" />
-              <path d="M14 12 L23 12 M18 7 L23 12 L18 17" fill="none" stroke="#e87a2a" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round" />
+              <rect
+                x="1"
+                y="5"
+                width="13"
+                height="14"
+                rx="1.6"
+                fill="#5cd0f5"
+                stroke="#2a6fb8"
+                stroke-width="1.2"
+              />
+              <path
+                d="M14 12 L23 12 M18 7 L23 12 L18 17"
+                fill="none"
+                stroke="#e87a2a"
+                stroke-width="2.6"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+              />
             </svg>
           )}
         </button>
         <div class="spacer" />
-        <div class="sync-center" ref={(el) => { syncCenterEl = el; queueMicrotask(updateSyncCenter); }}>
+        <div
+          class="sync-center"
+          ref={(el) => {
+            syncCenterEl = el;
+            queueMicrotask(updateSyncCenter);
+          }}
+        >
           <button
             class="tb-glyph"
             onClick={() => syncPanes("left")}
-            title={state.syncMode === "nav" ? "Verzeichnis nach links übernehmen" : "Inhalte nach links spiegeln (kopieren, auf Wunsch löschen) – mit Vorschau"}
+            title={
+              state.syncMode === "nav"
+                ? "Verzeichnis nach links übernehmen"
+                : "Inhalte nach links spiegeln (kopieren, auf Wunsch löschen) – mit Vorschau"
+            }
           >
             <span class="tb-icon-text">←</span>
           </button>
           <button
             class="tb-glyph"
             onClick={() => syncPanes("right")}
-            title={state.syncMode === "nav" ? "Verzeichnis nach rechts übernehmen" : "Inhalte nach rechts spiegeln (kopieren, auf Wunsch löschen) – mit Vorschau"}
+            title={
+              state.syncMode === "nav"
+                ? "Verzeichnis nach rechts übernehmen"
+                : "Inhalte nach rechts spiegeln (kopieren, auf Wunsch löschen) – mit Vorschau"
+            }
           >
             <span class="tb-icon-text">→</span>
           </button>
           <button
             class="tb-glyph"
             classList={{ active: state.syncMode === "merge" }}
-            onClick={() => setState("syncMode", state.syncMode === "nav" ? "merge" : "nav")}
-            title={state.syncMode === "nav"
-              ? "Sync-Modus: Navigation (nur Verzeichnis übernehmen) – klicken für Merge"
-              : "Sync-Modus: Merge (Dateien kopieren) – klicken für Navigation"}
+            onClick={() =>
+              setState("syncMode", state.syncMode === "nav" ? "merge" : "nav")
+            }
+            title={
+              state.syncMode === "nav"
+                ? "Sync-Modus: Navigation (nur Verzeichnis übernehmen) – klicken für Merge"
+                : "Sync-Modus: Merge (Dateien kopieren) – klicken für Navigation"
+            }
           >
-            <span class="tb-icon-text">{state.syncMode === "nav" ? "↔" : "⇄"}</span>
+            <span class="tb-icon-text">
+              {state.syncMode === "nav" ? "↔" : "⇄"}
+            </span>
           </button>
         </div>
         <button
@@ -456,14 +752,37 @@ export function App() {
           <span class="tb-icon-text">?</span>
         </button>
       </div>
-      <div class={`panes panes-grid ${state.sidebarVisible ? "" : "no-sidebar"} ${state.previewVisible ? "with-preview" : ""}`}
-        ref={(el) => createEffect(() => el.style.setProperty("--panes-tpl", panesTemplate()))}>
+      <div
+        class={`panes panes-grid ${state.sidebarVisible ? "" : "no-sidebar"} ${state.previewVisible ? "with-preview" : ""}`}
+        ref={(el) =>
+          createEffect(() =>
+            el.style.setProperty("--panes-tpl", panesTemplate()),
+          )
+        }
+      >
         {state.sidebarVisible && <Sidebar />}
-        {state.sidebarVisible && <div class="splitter" onMouseDown={(ev) => startColResize(ev, "sidebar")} />}
+        {state.sidebarVisible && (
+          <div
+            class="splitter"
+            onMouseDown={(ev) => startColResize(ev, "sidebar")}
+          />
+        )}
         <Pane id="left" />
-        <div class="splitter" ref={(el) => { splitSplitterEl = el; queueMicrotask(updateSyncCenter); }} onMouseDown={(ev) => startColResize(ev, "split")} />
+        <div
+          class="splitter"
+          ref={(el) => {
+            splitSplitterEl = el;
+            queueMicrotask(updateSyncCenter);
+          }}
+          onMouseDown={(ev) => startColResize(ev, "split")}
+        />
         <Pane id="right" />
-        {state.previewVisible && <div class="splitter" onMouseDown={(ev) => startColResize(ev, "preview")} />}
+        {state.previewVisible && (
+          <div
+            class="splitter"
+            onMouseDown={(ev) => startColResize(ev, "preview")}
+          />
+        )}
         {state.previewVisible && <PreviewPane />}
       </div>
       <JobBar />

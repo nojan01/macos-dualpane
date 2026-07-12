@@ -1,5 +1,6 @@
 import { For } from "solid-js";
-import { state, setActive, loadPane } from "../state";
+import { state, setActive, loadPane, goBackInHistory } from "../state";
+import { t } from "../i18n";
 import type { PaneId } from "../types";
 
 function segments(path: string): { label: string; path: string }[] {
@@ -28,10 +29,16 @@ export function PathBar(props: { id: PaneId }) {
     <div class="path-bar" onMouseDown={() => setActive(id)}>
       <button
         class="path-up"
-        title="Übergeordneter Ordner"
+        title={t("path.up")}
         onClick={(e) => { e.stopPropagation(); goUp(); }}
         disabled={!state[id].cwd || state[id].cwd === "/"}
       >↑</button>
+      <button
+        class="path-back"
+        title={t("path.back")}
+        onClick={(e) => { e.stopPropagation(); void goBackInHistory(id); }}
+        disabled={state[id].historyIndex <= 0}
+      >←</button>
       <For each={segs()}>
         {(s, i) => (
           <>

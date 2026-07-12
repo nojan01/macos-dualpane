@@ -279,7 +279,8 @@ body.col-resizing * { cursor: col-resize !important; -webkit-user-select: none !
 .path-bar .seg { color: var(--text); }
 .path-bar .seg:hover { text-decoration: underline; }
 .path-bar .sep { color: var(--text-dim); margin: 0 2px; }
-.path-bar .path-up {
+.path-bar .path-up,
+.path-bar .path-back {
   background: #2a6fb8;
   color: #fff;
   border: 1px solid #2a6fb8;
@@ -290,8 +291,12 @@ body.col-resizing * { cursor: col-resize !important; -webkit-user-select: none !
   line-height: 1.4;
   cursor: pointer;
 }
-.path-bar .path-up:hover:not(:disabled) { background: #3a82cf; border-color: #3a82cf; }
-.path-bar .path-up:disabled { opacity: 0.4; cursor: default; }
+.path-bar .path-up { margin-right: 3px; }
+.path-bar .path-back { margin-right: 6px; }
+.path-bar .path-up:hover:not(:disabled),
+.path-bar .path-back:hover:not(:disabled) { background: #3a82cf; border-color: #3a82cf; }
+.path-bar .path-up:disabled,
+.path-bar .path-back:disabled { opacity: 0.4; cursor: default; }
 
 .col-header {
   display: grid;

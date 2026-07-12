@@ -42,7 +42,12 @@ async function reloadPreview() {
   }
 }
 
-export async function openSyncDialog(src: string, dst: string, srcName: string, target: PaneId) {
+export async function openSyncDialog(
+  src: string,
+  dst: string,
+  srcName: string,
+  target: PaneId,
+) {
   if (state.job) return;
   setSyncDeleteExtra(false);
   setSyncEntries([]);
@@ -67,9 +72,13 @@ export async function confirmSync() {
   const entries = syncEntries();
   setSyncDialog(null);
 
-  const copies = entries.filter((e) => e.action === "copy" || e.action === "update");
+  const copies = entries.filter(
+    (e) => e.action === "copy" || e.action === "update",
+  );
   // Löschungen nur ausführen, wenn der Nutzer sie ausdrücklich bestätigt hat.
-  const deletes = syncDeleteExtra() ? entries.filter((e) => e.action === "delete") : [];
+  const deletes = syncDeleteExtra()
+    ? entries.filter((e) => e.action === "delete")
+    : [];
   if (copies.length === 0 && deletes.length === 0) return;
 
   const id = newJobId();
@@ -80,13 +89,25 @@ export async function confirmSync() {
         dst: joinPath(s.dst, e.rel),
         overwrite: e.action === "update",
       }));
-      setState("job", { id, kind: "copy", done: 0, total: items.length, current: "" });
+      setState("job", {
+        id,
+        kind: "copy",
+        done: 0,
+        total: items.length,
+        current: "",
+      });
       await runJob(id, "copy", items);
     }
     if (deletes.length > 0) {
       // Löschen läuft als einzelner Batch-Aufruf ohne Fortschrittsereignisse –
       // die Statusleiste soll trotzdem "Löschen" (nicht "Kopieren") anzeigen.
-      setState("job", { id, kind: "delete", done: 0, total: deletes.length, current: "" });
+      setState("job", {
+        id,
+        kind: "delete",
+        done: 0,
+        total: deletes.length,
+        current: "",
+      });
       await moveToTrash(deletes.map((e) => joinPath(s.dst, e.rel)));
       setState("job", "done", deletes.length);
     }
@@ -106,7 +127,7 @@ export async function syncToOther() {
   const dstPane: PaneId = srcPane === "left" ? "right" : "left";
   const p = state[srcPane];
   const cur = p.entries.filter((e) => p.selected.has(e.path));
-  const folder = (cur.length > 0 ? cur[0] : p.entries[p.cursor]);
+  const folder = cur.length > 0 ? cur[0] : p.entries[p.cursor];
   if (!folder || !folder.isDir) {
     await notifyError(t("sync.selectFolder"));
     return;

@@ -6,6 +6,18 @@ export function joinPath(dir: string, name: string): string {
   return dir + "/" + name;
 }
 
+/**
+ * Prüft rein lexikalisch, ob `candidate` mit `root` identisch ist oder darin
+ * liegt. Die Backend-Prüfung löst zusätzlich Symlinks auf; diese schnelle
+ * Variante verhindert den Fehler schon vor dem Konfliktdialog.
+ */
+export function isSameOrChildPath(root: string, candidate: string): boolean {
+  const clean = (path: string) => path.replace(/\/+$/, "") || "/";
+  const parent = clean(root);
+  const child = clean(candidate);
+  return child === parent || (parent !== "/" && child.startsWith(parent + "/"));
+}
+
 export function splitName(name: string): { base: string; ext: string } {
   const i = name.lastIndexOf(".");
   if (i <= 0 || i === name.length - 1) return { base: name, ext: "" };

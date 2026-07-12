@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { joinPath, splitName } from "./paths";
+import { isSameOrChildPath, joinPath, splitName } from "./paths";
 
 describe("joinPath", () => {
   it("fügt einen Separator ein, wenn keiner vorhanden ist", () => {
@@ -34,5 +34,15 @@ describe("splitName", () => {
 
   it("behandelt einen abschließenden Punkt als Teil der Basis", () => {
     expect(splitName("name.")).toEqual({ base: "name.", ext: "" });
+  });
+});
+
+describe("isSameOrChildPath", () => {
+  it("erkennt einen Unterordner", () => {
+    expect(isSameOrChildPath("/Users/nojan/A", "/Users/nojan/A/B/A")).toBe(true);
+  });
+
+  it("verwechselt gleichlautende Präfixe nicht", () => {
+    expect(isSameOrChildPath("/Users/nojan/A", "/Users/nojan/Archiv/A")).toBe(false);
   });
 });

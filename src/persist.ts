@@ -39,7 +39,14 @@ function sanitizeTab(t: any): Tab | null {
     t.sortKey === "size" || t.sortKey === "mtime" ? t.sortKey : "name";
   const sortDir: SortDir = t.sortDir === "desc" ? "desc" : "asc";
   const filter = typeof t.filter === "string" ? t.filter : "";
-  return { cwd: t.cwd, sortKey, sortDir, filter };
+  const storedHistory = Array.isArray(t.history)
+    ? t.history.filter((path: unknown): path is string => typeof path === "string" && path.length > 0).slice(-100)
+    : [];
+  const history = storedHistory.length ? storedHistory : [t.cwd];
+  const historyIndex = typeof t.historyIndex === "number"
+    ? Math.max(0, Math.min(history.length - 1, t.historyIndex))
+    : history.length - 1;
+  return { cwd: t.cwd, history, historyIndex, sortKey, sortDir, filter };
 }
 
 export function loadPersisted(): Persisted | null {
@@ -82,6 +89,8 @@ function snapshot(): Persisted {
       const s = state[pane];
       return {
         cwd: s.cwd || t.cwd,
+        history: s.history,
+        historyIndex: s.historyIndex,
         sortKey: s.sortKey,
         sortDir: s.sortDir,
         filter: s.filter,
@@ -136,6 +145,10 @@ export function attachPersist() {
     void state.tabs.right.length;
     void state.left.cwd;
     void state.right.cwd;
+    void state.left.history.length;
+    void state.right.history.length;
+    void state.left.historyIndex;
+    void state.right.historyIndex;
     void state.left.sortKey;
     void state.left.sortDir;
     void state.left.filter;
@@ -163,6 +176,18 @@ export function applyPersisted(p: Persisted) {
   // Aktiven Tab-State in PaneState spiegeln (cwd lädt der Aufrufer via loadPane).
   const lt = p.panes.left.tabs[p.panes.left.activeTab];
   const rt = p.panes.right.tabs[p.panes.right.activeTab];
-  setState("left", { sortKey: lt.sortKey, sortDir: lt.sortDir, filter: lt.filter });
-  setState("right", { sortKey: rt.sortKey, sortDir: rt.sortDir, filter: rt.filter });
+  setState("left", {
+    history: lt.history,
+    historyIndex: lt.historyIndex,
+    sortKey: lt.sortKey,
+    sortDir: lt.sortDir,
+    filter: lt.filter,
+  });
+  setState("right", {
+    history: rt.history,
+    historyIndex: rt.historyIndex,
+    sortKey: rt.sortKey,
+    sortDir: rt.sortDir,
+    filter: rt.filter,
+  });
 }

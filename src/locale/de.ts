@@ -17,13 +17,20 @@ export const de: Record<string, string> = {
   "toolbar.sidebar": "Sidebar (⌘B)",
   "toolbar.preview": "Vorschau (⌘I)",
   "toolbar.refresh": "Aktualisieren (⌘⇧R)",
+  "toolbar.hiddenShow": "Versteckte Dateien anzeigen (⌘.)",
+  "toolbar.hiddenHide": "Versteckte Dateien ausblenden (⌘.)",
   "toolbar.terminal": "Terminal hier öffnen",
   "toolbar.columns": "Erweiterte Ansicht (Spalten)",
   "toolbar.compare": "Vergleichs-Modus (links/rechts)",
   "toolbar.dragCopy": "Maus-Drag: Kopieren (Alt = Verschieben)",
   "toolbar.dragMove": "Maus-Drag: Verschieben (Alt = Kopieren)",
-  "toolbar.themeTitle": "Thema: {label} — klicken zum Wechseln (Auto/Hell/Dunkel)",
+  "toolbar.themeTitle":
+    "Thema: {label} — klicken zum Wechseln (Auto/Hell/Dunkel)",
   "toolbar.langTitle": "Sprache: {label} — klicken zum Wechseln (Auto/DE/EN)",
+
+  // Path bar
+  "path.up": "Übergeordneter Ordner",
+  "path.back": "Vorheriger Ordner",
 
   // Tab bar
   "tab.close": "Tab schließen",
@@ -46,7 +53,7 @@ export const de: Record<string, string> = {
   // Pane
   "pane.filter.placeholder": "Filter (⌘F)",
   "pane.filter.clear": "Filter löschen",
-  "pane.filter.searchRecursive": "Rekursiv suchen (⇧⌘F)",
+  "pane.filter.searchRecursive": "Rekursiv suchen (⌘F)",
   "pane.col.name": "Name",
   "pane.col.size": "Größe",
   "pane.col.modified": "Geändert",
@@ -93,11 +100,13 @@ export const de: Record<string, string> = {
   "pane.rename.title": "Umbenennen",
   "pane.rename.placeholder": "Name",
   "pane.dmg.mountedTitle": "DMG ist bereits gemountet",
-  "pane.dmg.mountedMessage": "Mountpunkt: {path}\n\nMöchten Sie das Volume auswerfen? (Abbrechen öffnet es)",
+  "pane.dmg.mountedMessage":
+    "Mountpunkt: {path}\n\nMöchten Sie das Volume auswerfen? (Abbrechen öffnet es)",
   "pane.dmg.eject": "Auswerfen",
   "pane.dmg.openInstead": "Öffnen",
   "pane.dmg.failed": "DMG-Aktion fehlgeschlagen",
-  "pane.error.permission": "Zugriff verweigert. Der App fehlt vermutlich die Berechtigung für diesen Ordner.",
+  "pane.error.permission":
+    "Zugriff verweigert. Der App fehlt vermutlich die Berechtigung für diesen Ordner.",
   "pane.error.openSettings": "Systemeinstellungen öffnen",
 
   // Preview
@@ -176,7 +185,8 @@ export const de: Record<string, string> = {
   "rn.newExtTitle": "Neue Erweiterung",
   "rn.newExtPh": ".jpg (leer = entfernen)",
   "rn.summary": "{changed} von {total} Objekten werden umbenannt",
-  "rn.summaryConflicts": "{changed} von {total} Objekten werden umbenannt · Konflikte",
+  "rn.summaryConflicts":
+    "{changed} von {total} Objekten werden umbenannt · Konflikte",
   "rn.do": "Umbenennen",
   "rn.replaceLabel": "Text ersetzen:",
   "rn.withLabel": "Mit Text:",
@@ -215,7 +225,7 @@ export const de: Record<string, string> = {
   "sidebar.eject": "Auswerfen",
   "sidebar.reconnect": "Neu verbinden",
   "sidebar.ejectTitle": "Volume auswerfen",
-  "sidebar.ejectConfirm": "Soll \"{name}\" ausgeworfen werden?",
+  "sidebar.ejectConfirm": 'Soll "{name}" ausgeworfen werden?',
   "sidebar.ejectFailed": "Auswerfen fehlgeschlagen",
 
   // Statusbar
@@ -277,6 +287,8 @@ export const de: Record<string, string> = {
 
   // jobs.ts
   "jobs.sameSrcDst": "Quelle und Ziel sind identisch.",
+  "jobs.recursiveTarget":
+    "„{name}“ kann nicht in sich selbst oder einen Unterordner kopiert bzw. verschoben werden.",
   "jobs.newFolder.title": "Neuer Ordner",
   "jobs.newFolder.prompt": "Name des neuen Ordners:",
   "jobs.newFolder.placeholder": "Neuer Ordner",
@@ -284,14 +296,18 @@ export const de: Record<string, string> = {
   "jobs.newFile.prompt": "Name der neuen Datei:",
   "jobs.newFile.placeholder": "Neue Datei.txt",
   "jobs.trash.title": "In den Papierkorb verschieben?",
-  "jobs.trash.one": "\"{name}\" wird in den Papierkorb verschoben.",
+  "jobs.trash.one": '"{name}" wird in den Papierkorb verschoben.',
   "jobs.trash.many": "{count} Einträge werden in den Papierkorb verschoben.",
-  "jobs.trash.forceAdmin": "Papierkorb-Verschieben fehlgeschlagen:\n{msg}\n\nEndgültig als Administrator löschen?",
-  "jobs.trash.protectedAdmin": "\"{name}\" ist geschützt und kann nicht in den Papierkorb verschoben werden.\n\nEndgültig als Administrator löschen?",
+  "jobs.trash.forceAdmin":
+    "Papierkorb-Verschieben fehlgeschlagen:\n{msg}\n\nEndgültig als Administrator löschen?",
+  "jobs.trash.protectedAdmin":
+    '"{name}" ist geschützt und kann nicht in den Papierkorb verschoben werden.\n\nEndgültig als Administrator löschen?',
   "jobs.trash.deleteAsAdmin": "Als Admin löschen",
   "jobs.trash.deletePermTitle": "Endgültig löschen?",
-  "jobs.trash.permOne": "\"{name}\" liegt auf einem Netzlaufwerk ohne Papierkorb und wird endgültig gelöscht.",
-  "jobs.trash.permMany": "{count} Einträge liegen auf einem Netzlaufwerk ohne Papierkorb und werden endgültig gelöscht.",
+  "jobs.trash.permOne":
+    '"{name}" liegt auf einem Netzlaufwerk ohne Papierkorb und wird endgültig gelöscht.',
+  "jobs.trash.permMany":
+    "{count} Einträge liegen auf einem Netzlaufwerk ohne Papierkorb und werden endgültig gelöscht.",
   "jobs.trash.deletePerm": "Endgültig löschen",
   "jobs.trash.timeMachine.title": "Time Machine",
   "jobs.trash.timeMachine.message":
@@ -301,16 +317,20 @@ export const de: Record<string, string> = {
 
   // Sync (sync.ts / SyncDialog)
   "sync.title": "Verzeichnis synchronisieren",
-  "sync.summary": "\"{name}\" einweg in den anderen Pane synchronisieren.",
+  "sync.summary": '"{name}" einweg in den anderen Pane synchronisieren.',
   "sync.copyCount": "Neu: {count}",
   "sync.updateCount": "Geändert: {count}",
   "sync.deleteCount": "Zu löschen: {count}",
   "sync.upToDate": "Alles ist bereits aktuell.",
-  "sync.deleteExtra": "Dateien im Ziel löschen, die in der Quelle nicht existieren",
-  "sync.extrasPrompt": "{count} Element(e) sind im Ziel vorhanden, aber nicht (mehr) in der Quelle. Auch im Ziel löschen (in den Papierkorb)?",
+  "sync.deleteExtra":
+    "Dateien im Ziel löschen, die in der Quelle nicht existieren",
+  "sync.extrasPrompt":
+    "{count} Element(e) sind im Ziel vorhanden, aber nicht (mehr) in der Quelle. Auch im Ziel löschen (in den Papierkorb)?",
   "sync.start": "Synchronisieren",
-  "sync.selectFolder": "Bitte genau einen Ordner zum Synchronisieren auswählen.",
-  "sync.preparing": "Synchronisation wird vorbereitet – bei Netzlaufwerken kann das etwas dauern…",
+  "sync.selectFolder":
+    "Bitte genau einen Ordner zum Synchronisieren auswählen.",
+  "sync.preparing":
+    "Synchronisation wird vorbereitet – bei Netzlaufwerken kann das etwas dauern…",
   "sync.details": "Details anzeigen",
   "sync.actionNew": "Neu",
   "sync.actionChanged": "Geändert",
@@ -319,9 +339,14 @@ export const de: Record<string, string> = {
   // Netzwerk / Mit Server verbinden (⌘K)
   "network.connectServer": "Mit Server verbinden…",
   "network.connectTitle": "Mit Server verbinden",
-  "network.connectLabel": "Serveradresse (z. B. smb://server/freigabe, https://webdav.example.com)",
+  "network.connectLabel":
+    "Serveradresse (SMB oder HTTPS-WebDAV; z. B. smb://server/freigabe)",
   "network.connect": "Verbinden",
   "network.connectFailed": "Verbinden fehlgeschlagen",
+  "network.insecureTitle": "Unsichere Verbindung",
+  "network.insecureWarning":
+    "{url} verwendet ein unsicheres Netzwerkprotokoll. Daten und Zugangsdaten können dabei mitgelesen oder verändert werden. Fortfahren?",
+  "network.insecureConnect": "Unsicher verbinden",
 
   // Über-Dialog
   "about.title": "Über DualBeam",
@@ -333,26 +358,43 @@ export const de: Record<string, string> = {
   "about.checkUpdates": "Nach Updates suchen",
   "about.checking": "Suche nach Updates…",
   "about.upToDate": "DualBeam ist aktuell (Version {version}).",
-  "about.updateAvailable": "Neue Version {version} verfügbar (installiert: {current}).",
+  "about.updateAvailable":
+    "Neue Version {version} verfügbar (installiert: {current}).",
   "about.updateOpen": "Download öffnen",
   "about.updateInstall": "Herunterladen & installieren",
   "about.downloading": "Wird heruntergeladen…",
-  "about.downloaded": "Download abgeschlossen. Ziehe DualBeam in den Programme-Ordner und starte die App neu.",
+  "about.downloaded":
+    "Download abgeschlossen. Ziehe DualBeam in den Programme-Ordner und starte die App neu.",
   "about.updateFailed": "Update-Prüfung fehlgeschlagen.",
   "toolbar.about": "Über DualBeam",
   "toolbar.help": "Hilfe",
 
   // Backend-Fehler-Codes
-  "err.network.scheme": "Nicht unterstützte Adresse. Erlaubt sind smb://, afp://, nfs://, ftp(s):// oder http(s):// (WebDAV).",
+  "err.network.scheme":
+    "Nicht unterstützte Adresse. Erlaubt sind smb:// und https:// (WebDAV). Unsichere Protokolle sind nur für direkte lokale IP-Adressen nach Bestätigung erlaubt.",
   "err.network.badchars": "Ungültige Zeichen in der Adresse.",
+  "err.network.invalidUrl": "Ungültige Serveradresse.",
+  "err.network.credentials":
+    "Zugangsdaten dürfen nicht in der Adresse stehen. Verwende den macOS-Anmeldedialog oder die Schlüsselbundverwaltung.",
+  "err.network.localIpOnly":
+    "Unsichere Protokolle sind nur für direkte private, Link-Local- oder Loopback-IP-Adressen im lokalen Netzwerk erlaubt.",
+  "err.network.insecureConfirm":
+    "Diese unsichere Verbindung wurde nicht bestätigt.",
   "err.url.scheme": "Nicht erlaubtes URL-Schema.",
   "err.exists": "Existiert bereits: {0}",
   "err.path.invalidChar": "Ungültiges Zeichen im Pfad/Namen.",
   "err.path.forbidden": "Unerlaubter Pfad: {0}",
   "err.mount.failed": "Verbinden fehlgeschlagen.",
-  "err.mount.notWebdav": "Verbinden fehlgeschlagen. Unter http(s):// kann macOS nur WebDAV-Server einhängen — ein gewöhnlicher Webserver lässt sich nicht als Laufwerk verbinden.",
-  "err.mount.ftp": "Verbinden fehlgeschlagen. FTP wird vom Finder nur eingeschränkt unterstützt und lässt sich nicht als beschreibbares Laufwerk einhängen. Nutze SMB oder WebDAV.",
-  "err.mount.unreachable": "Server nicht erreichbar. Adresse, Port und Netzwerkverbindung prüfen. Hinweis: NFS fragt kein Passwort ab — der Zugriff wird über die Export-/Freigabeliste des Servers geregelt.",
+  "err.mount.notWebdav":
+    "Verbinden fehlgeschlagen. Unter http(s):// kann macOS nur WebDAV-Server einhängen — ein gewöhnlicher Webserver lässt sich nicht als Laufwerk verbinden.",
+  "err.mount.ftp":
+    "Verbinden fehlgeschlagen. FTP wird vom Finder nur eingeschränkt unterstützt und lässt sich nicht als beschreibbares Laufwerk einhängen. Nutze SMB oder WebDAV.",
+  "err.mount.unreachable":
+    "Server nicht erreichbar. Adresse, Port und Netzwerkverbindung prüfen. Hinweis: NFS fragt kein Passwort ab — der Zugriff wird über die Export-/Freigabeliste des Servers geregelt.",
+  "err.mount.timeout":
+    "Die Verbindung hat nach zwei Minuten nicht geantwortet.",
   "err.eject.failed": "Aushängen fehlgeschlagen: {0}",
+  "err.eject.invalidMount":
+    "Nur eingebundene Volumes unter /Volumes können ausgehängt werden.",
   "err.update.failed": "Update-Prüfung fehlgeschlagen.",
 };

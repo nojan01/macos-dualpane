@@ -1,7 +1,7 @@
 import { createSignal, For, Show, onCleanup } from "solid-js";
-import { state, loadPane, selectOnly } from "../state";
+import { state, loadPane, selectOnly, setActive } from "../state";
 import { searchInDir } from "../ipc";
-import type { Entry } from "../types";
+import type { Entry, PaneId } from "../types";
 import { t, errMsg } from "../i18n";
 
 export const [searchOpen, setSearchOpen] = createSignal(false);
@@ -28,8 +28,13 @@ export function SearchDialog() {
   const [info, setInfo] = createSignal("");
   let inputEl: HTMLInputElement | undefined;
   let timer: ReturnType<typeof setTimeout> | null = null;
+  let request = 0;
+  let resultPane: PaneId | null = null;
 
   const close = () => {
+    request += 1;
+    resultPane = null;
+    setBusy(false);
     setSearchOpen(false);
     setQuery("");
     setResults([]);
@@ -37,6 +42,7 @@ export function SearchDialog() {
   };
 
   const run = async () => {
+    const requestId = ++request;
     const q = query().trim();
     if (q.length < 1) {
       setResults([]);
@@ -49,24 +55,42 @@ export function SearchDialog() {
     setBusy(true);
     setInfo(t("search.searchingIn", { path: root }));
     try {
-      const list = await searchInDir(root, q, state.showHidden, SEARCH_RESULT_LIMIT);
+      const list = await searchInDir(
+        root,
+        q,
+        state.showHidden,
+        SEARCH_RESULT_LIMIT,
+      );
+      if (requestId !== request || !searchOpen()) return;
+      resultPane = pane;
       setResults(list);
-      setInfo(list.length >= SEARCH_RESULT_LIMIT ? t("search.hitsMax", { count: list.length }) : t("search.hits", { count: list.length }));
+      setInfo(
+        list.length >= SEARCH_RESULT_LIMIT
+          ? t("search.hitsMax", { count: list.length })
+          : t("search.hits", { count: list.length }),
+      );
     } catch (e) {
+      if (requestId !== request || !searchOpen()) return;
       setInfo(t("common.error", { msg: errMsg(e) }));
     } finally {
-      setBusy(false);
+      if (requestId === request) setBusy(false);
     }
   };
 
   const onInput = (ev: InputEvent) => {
     setQuery((ev.currentTarget as HTMLInputElement).value);
+    request += 1;
+    resultPane = null;
+    setBusy(false);
+    setResults([]);
+    setInfo("");
     if (timer) clearTimeout(timer);
     timer = setTimeout(run, SEARCH_DEBOUNCE_MS);
   };
 
   const reveal = async (e: Entry) => {
-    const pane = state.active;
+    const pane = resultPane ?? state.active;
+    setActive(pane);
     const parent = dirname(e.path);
     await loadPane(pane, parent);
     const idx = state[pane].entries.findIndex((x) => x.path === e.path);
@@ -89,6 +113,7 @@ export function SearchDialog() {
   setTimeout(() => inputEl?.focus(), 0);
 
   onCleanup(() => {
+    request += 1;
     if (timer) clearTimeout(timer);
   });
 
@@ -97,8 +122,12 @@ export function SearchDialog() {
       <div class="search-overlay" onClick={close}>
         <div class="search-dialog" onClick={(e) => e.stopPropagation()}>
           <div class="search-header">
-            <span>{t("search.title", { path: state[state.active].cwd || "—" })}</span>
-            <button class="search-close" onClick={close}>×</button>
+            <span>
+              {t("search.title", { path: state[state.active].cwd || "—" })}
+            </span>
+            <button class="search-close" onClick={close}>
+              ×
+            </button>
           </div>
           <input
             ref={inputEl}
@@ -115,8 +144,11 @@ export function SearchDialog() {
           <div class="search-results">
             <For each={results()}>
               {(e) => (
-                <div class="search-row" onDblClick={() => reveal(e)}>
-                  <span class="search-name">{e.isDir ? "📁 " : "📄 "}{e.name}</span>
+                <div class="search-row" onClick={() => void reveal(e)}>
+                  <span class="search-name">
+                    {e.isDir ? "📁 " : "📄 "}
+                    {e.name}
+                  </span>
                   <span class="search-path">{dirname(e.path)}</span>
                 </div>
               )}

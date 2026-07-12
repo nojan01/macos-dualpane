@@ -1,4 +1,11 @@
-import { For, Show, createEffect, createSignal, onMount, onCleanup } from "solid-js";
+import {
+  For,
+  Show,
+  createEffect,
+  createSignal,
+  onMount,
+  onCleanup,
+} from "solid-js";
 import { state, loadPane, volumesTick, handleVolumeGone } from "../state";
 import {
   homeDir,
@@ -72,6 +79,13 @@ export function Sidebar() {
 
   async function ejectBookmark(b: NetworkBookmark) {
     if (mounting()) return;
+    const confirmed = await askConfirm({
+      title: t("sidebar.eject"),
+      message: t("sidebar.ejectConfirm", { name: b.name }),
+      okLabel: t("sidebar.eject"),
+      danger: true,
+    });
+    if (!confirmed) return;
     setMounting(b.url);
     try {
       await ejectVolume(b.mountPath);
@@ -131,7 +145,10 @@ export function Sidebar() {
     if (!cwd) return;
     const name = basename(cwd) || cwd;
     if (favs().some((f) => f.path === cwd)) {
-      await notify({ title: t("sidebar.favorites"), message: t("sidebar.alreadyFav", { name }) });
+      await notify({
+        title: t("sidebar.favorites"),
+        message: t("sidebar.alreadyFav", { name }),
+      });
       return;
     }
     await persist([...favs(), { name, icon: "📁", path: cwd }]);
@@ -274,7 +291,13 @@ export function Sidebar() {
       <aside class="sidebar">
         <div class="sb-section">
           <span>{t("sidebar.favorites")}</span>
-          <button class="sb-add" title={t("sidebar.addCurrent")} onClick={addCurrent}>＋</button>
+          <button
+            class="sb-add"
+            title={t("sidebar.addCurrent")}
+            onClick={addCurrent}
+          >
+            ＋
+          </button>
         </div>
         <For each={favs()}>
           {(f, i) => (
@@ -322,7 +345,10 @@ export function Sidebar() {
           )}
         </For>
         <div class="sb-section">{t("sidebar.volumes")}</div>
-        <Show when={vols().filter((v) => v.kind !== "network").length > 0} fallback={<div class="sb-empty">{t("sidebar.none")}</div>}>
+        <Show
+          when={vols().filter((v) => v.kind !== "network").length > 0}
+          fallback={<div class="sb-empty">{t("sidebar.none")}</div>}
+        >
           <For each={vols().filter((v) => v.kind !== "network")}>
             {(v) => (
               <div
@@ -349,73 +375,92 @@ export function Sidebar() {
         </Show>
         <div class="sb-section sb-section-spaced">
           <span>{t("sidebar.network")}</span>
-          <button class="sb-add" title={t("network.connectServer")} onClick={() => void connectToServer()}>＋</button>
+          <button
+            class="sb-add"
+            title={t("network.connectServer")}
+            onClick={() => void connectToServer()}
+          >
+            ＋
+          </button>
         </div>
         <For each={bookmarks()}>
-            {(b) => (
-              <div
-                class={`sb-item ${state[state.active].cwd === b.mountPath ? "active" : ""} ${b.connected ? "" : "disconnected"}`}
-                onClick={() => (b.connected ? go(b.mountPath) : mountBookmark(b))}
-                title={b.connected ? b.mountPath : `${b.url} — ${t("sidebar.clickToMount")}`}
-              >
-                <span class="sb-icon">{b.connected ? "🌐" : "🔌"}</span>
-                <span class="sb-label">{b.name}</span>
-                <Show when={mounting() === b.url}>
-                  <span class="sb-spin">…</span>
-                </Show>
-                <Show when={b.connected && mounting() !== b.url}>
-                  <button
-                    class="sb-eject"
-                    title={t("sidebar.reconnect")}
-                    onClick={(ev) => {
-                      ev.stopPropagation();
-                      void reconnectBookmark(b);
-                    }}
-                  >
-                    ↻
-                  </button>
-                  <button
-                    class="sb-eject"
-                    title={t("sidebar.eject")}
-                    onClick={(ev) => {
-                      ev.stopPropagation();
-                      void ejectBookmark(b);
-                    }}
-                  >
-                    ⏏
-                  </button>
-                </Show>
-              </div>
-            )}
-          </For>
-          <For each={vols().filter((v) => v.kind === "network" && !bookmarks().some((b) => b.mountPath === v.path))}>
-            {(v) => (
-              <div
-                class={`sb-item ${state[state.active].cwd === v.path ? "active" : ""}`}
-                onClick={() => go(v.path)}
-                onContextMenu={(ev) => openVolMenu(v, ev)}
-                title={v.path}
-              >
-                <span class="sb-icon">🌐</span>
-                <span class="sb-label">{v.name}</span>
+          {(b) => (
+            <div
+              class={`sb-item ${state[state.active].cwd === b.mountPath ? "active" : ""} ${b.connected ? "" : "disconnected"}`}
+              onClick={() => (b.connected ? go(b.mountPath) : mountBookmark(b))}
+              title={
+                b.connected
+                  ? b.mountPath
+                  : `${b.url} — ${t("sidebar.clickToMount")}`
+              }
+            >
+              <span class="sb-icon">{b.connected ? "🌐" : "🔌"}</span>
+              <span class="sb-label">{b.name}</span>
+              <Show when={mounting() === b.url}>
+                <span class="sb-spin">…</span>
+              </Show>
+              <Show when={b.connected && mounting() !== b.url}>
+                <button
+                  class="sb-eject"
+                  title={t("sidebar.reconnect")}
+                  onClick={(ev) => {
+                    ev.stopPropagation();
+                    void reconnectBookmark(b);
+                  }}
+                >
+                  ↻
+                </button>
                 <button
                   class="sb-eject"
                   title={t("sidebar.eject")}
                   onClick={(ev) => {
                     ev.stopPropagation();
-                    void doEject(v);
+                    void ejectBookmark(b);
                   }}
                 >
                   ⏏
                 </button>
-              </div>
-            )}
-          </For>
+              </Show>
+            </div>
+          )}
+        </For>
+        <For
+          each={vols().filter(
+            (v) =>
+              v.kind === "network" &&
+              !bookmarks().some((b) => b.mountPath === v.path),
+          )}
+        >
+          {(v) => (
+            <div
+              class={`sb-item ${state[state.active].cwd === v.path ? "active" : ""}`}
+              onClick={() => go(v.path)}
+              onContextMenu={(ev) => openVolMenu(v, ev)}
+              title={v.path}
+            >
+              <span class="sb-icon">🌐</span>
+              <span class="sb-label">{v.name}</span>
+              <button
+                class="sb-eject"
+                title={t("sidebar.eject")}
+                onClick={(ev) => {
+                  ev.stopPropagation();
+                  void doEject(v);
+                }}
+              >
+                ⏏
+              </button>
+            </div>
+          )}
+        </For>
         <Show when={menu()}>
           {(m) => (
             <div
               class="ctx-menu sidebar-ctx"
-              ref={(el) => { el.style.setProperty("--cx", `${m().x}px`); el.style.setProperty("--cy", `${m().y}px`); }}
+              ref={(el) => {
+                el.style.setProperty("--cx", `${m().x}px`);
+                el.style.setProperty("--cy", `${m().y}px`);
+              }}
               onClick={(e) => e.stopPropagation()}
             >
               <div
@@ -445,7 +490,10 @@ export function Sidebar() {
           {(m) => (
             <div
               class="ctx-menu sidebar-ctx"
-              ref={(el) => { el.style.setProperty("--cx", `${m().x}px`); el.style.setProperty("--cy", `${m().y}px`); }}
+              ref={(el) => {
+                el.style.setProperty("--cx", `${m().x}px`);
+                el.style.setProperty("--cy", `${m().y}px`);
+              }}
               onClick={(e) => e.stopPropagation()}
             >
               <div
@@ -465,5 +513,3 @@ export function Sidebar() {
     </Show>
   );
 }
-
-

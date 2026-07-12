@@ -1,25 +1,36 @@
 import { createSignal } from "solid-js";
 import { createStore, type SetStoreFunction } from "solid-js/store";
 import type { Entry, PaneId, SortKey, SortDir } from "./types";
-import { listDir, watchPath, pathExists, pathIsNetwork, homeDir, unwatchPane, bustDirCache } from "./ipc";
+import {
+  listDir,
+  watchPath,
+  pathExists,
+  pathIsNetwork,
+  homeDir,
+  unwatchPane,
+} from "./ipc";
 import { errMsg } from "./i18n";
 
 export type PaneState = {
   cwd: string;
-  entriesRaw: Entry[];      // ungefiltert, sortiert
-  entries: Entry[];         // sichtbar nach Filter
-  cursor: number;          // Index in entries (sorted)
-  selected: Set<string>;   // Paths
-  anchor: number | null;   // Anker für Shift-Klick
+  history: string[];
+  historyIndex: number;
+  entriesRaw: Entry[]; // ungefiltert, sortiert
+  entries: Entry[]; // sichtbar nach Filter
+  cursor: number; // Index in entries (sorted)
+  selected: Set<string>; // Paths
+  anchor: number | null; // Anker für Shift-Klick
   loading: boolean;
   error: string | null;
   sortKey: SortKey;
   sortDir: SortDir;
-  filter: string;          // Substring-Filter (case-insensitive)
+  filter: string; // Substring-Filter (case-insensitive)
 };
 
 export type Tab = {
   cwd: string;
+  history: string[];
+  historyIndex: number;
   sortKey: SortKey;
   sortDir: SortDir;
   filter: string;
@@ -53,6 +64,8 @@ export type AppState = {
 
 const emptyPane = (): PaneState => ({
   cwd: "",
+  history: [],
+  historyIndex: -1,
   entriesRaw: [],
   entries: [],
   cursor: 0,
@@ -65,7 +78,14 @@ const emptyPane = (): PaneState => ({
   filter: "",
 });
 
-const emptyTab = (): Tab => ({ cwd: "", sortKey: "name", sortDir: "asc", filter: "" });
+const emptyTab = (): Tab => ({
+  cwd: "",
+  history: [],
+  historyIndex: -1,
+  sortKey: "name",
+  sortDir: "asc",
+  filter: "",
+});
 
 export const [state, setState] = createStore<AppState>({
   left: emptyPane(),
@@ -92,7 +112,10 @@ export const [selTick, setSelTick] = createSignal(0);
 const bumpSel = () => setSelTick((n) => n + 1);
 
 // Signal um Filter-Input in einer Pane zu fokussieren.
-export const [focusFilterTick, setFocusFilterTick] = createSignal<{ pane: PaneId; n: number } | null>(null);
+export const [focusFilterTick, setFocusFilterTick] = createSignal<{
+  pane: PaneId;
+  n: number;
+} | null>(null);
 let ffCounter = 0;
 export function requestFocusFilter(pane: PaneId) {
   ffCounter += 1;
@@ -111,20 +134,28 @@ function applyFilter(raw: Entry[], filter: string): Entry[] {
   return raw.filter((e) => e.name.toLowerCase().includes(f));
 }
 
-export function sortEntries(entries: Entry[], key: SortKey, dir: SortDir): Entry[] {
+export function sortEntries(
+  entries: Entry[],
+  key: SortKey,
+  dir: SortDir,
+): Entry[] {
   const sign = dir === "asc" ? 1 : -1;
   const group = (e: Entry) => {
     if (e.isDir && e.ext !== "app") return 0; // Ordner
     if (e.isDir && e.ext === "app") return 1; // Apps
-    return 2;                                  // Dateien
+    return 2; // Dateien
   };
   return [...entries].sort((a, b) => {
-    const ga = group(a), gb = group(b);
+    const ga = group(a),
+      gb = group(b);
     if (ga !== gb) return ga - gb;
     let cmp = 0;
     switch (key) {
       case "name":
-        cmp = a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: "base" });
+        cmp = a.name.localeCompare(b.name, undefined, {
+          numeric: true,
+          sensitivity: "base",
+        });
         break;
       case "size":
         cmp = a.size - b.size;
@@ -137,7 +168,31 @@ export function sortEntries(entries: Entry[], key: SortKey, dir: SortDir): Entry
   });
 }
 
-export async function loadPane(pane: PaneId, path: string) {
+const MAX_HISTORY_ENTRIES = 100;
+const paneLoadGeneration: Record<PaneId, number> = { left: 0, right: 0 };
+
+type LoadPaneOptions = {
+  recordHistory?: boolean;
+  historyIndex?: number;
+};
+
+function pushHistory(pane: PaneId, path: string) {
+  const { history, historyIndex } = state[pane];
+  if (historyIndex >= 0 && history[historyIndex] === path) return;
+
+  const next = history.slice(0, historyIndex + 1);
+  next.push(path);
+  const trimmed = next.slice(-MAX_HISTORY_ENTRIES);
+  setState(pane, { history: trimmed, historyIndex: trimmed.length - 1 });
+}
+
+export async function loadPane(
+  pane: PaneId,
+  path: string,
+  options: LoadPaneOptions = {},
+) {
+  const generation = ++paneLoadGeneration[pane];
+  const isCurrent = () => paneLoadGeneration[pane] === generation;
   setState(pane, "loading", true);
   setState(pane, "error", null);
   let target = path;
@@ -151,6 +206,7 @@ export async function loadPane(pane: PaneId, path: string) {
     try {
       isNet = await pathIsNetwork(target);
     } catch {}
+    if (!isCurrent()) return;
   }
   if (!isNet) {
     // Fallback, falls Pfad verschwunden ist (z.B. ausgeworfenes Volume / unmounted DMG):
@@ -170,9 +226,11 @@ export async function loadPane(pane: PaneId, path: string) {
     } catch {
       // pathExists/homeDir-Fehler ignorieren; listDir liefert ggf. eigene Fehlermeldung.
     }
+    if (!isCurrent()) return;
   }
   try {
     const raw = await listDir(target, state.showHidden);
+    if (!isCurrent()) return;
     const sorted = sortEntries(raw, state[pane].sortKey, state[pane].sortDir);
     const filter = state[pane].filter;
     const visible = applyFilter(sorted, filter);
@@ -185,17 +243,24 @@ export async function loadPane(pane: PaneId, path: string) {
       anchor: null,
       loading: false,
     });
+    if (options.historyIndex !== undefined) {
+      setState(pane, "historyIndex", options.historyIndex);
+    } else if (options.recordHistory !== false) {
+      pushHistory(pane, target);
+    }
     syncActiveTab(pane);
     bumpSel();
-    watchPath(pane, target).catch(() => {});
+    if (isCurrent()) watchPath(pane, target).catch(() => {});
   } catch (e) {
+    if (!isCurrent()) return;
     // Netzpfad nicht erreichbar (z. B. HiDrive ausgehängt): auf Home ausweichen,
     // damit die App sofort nutzbar bleibt, statt nur eine Fehlermeldung zu zeigen.
     if (isNet) {
       try {
         const home = await homeDir();
+        if (!isCurrent()) return;
         if (home && home !== target) {
-          await loadPane(pane, home);
+          await loadPane(pane, home, options);
           return;
         }
       } catch {}
@@ -205,17 +270,13 @@ export async function loadPane(pane: PaneId, path: string) {
 }
 
 export async function refreshPane(pane: PaneId) {
-  await loadPane(pane, state[pane].cwd);
+  await loadPane(pane, state[pane].cwd, { recordHistory: false });
 }
 
-// „Harter" Refresh für die explizite Nutzer-Aktion (Toolbar-Button / ⌘R / ⌘⇧R):
-// Vor dem Neuladen wird bei Netzlaufwerken der Verzeichnis-Cache angestoßen
-// (macOS webdavfs/smbfs liefert Listings sonst aus einem veralteten Cache, in
-// dem z. B. über die Web-GUI gelöschte Dateien noch als Geister erscheinen).
-// Best-effort – schlägt der Cache-Anstoß fehl, wird trotzdem neu geladen.
+// Ein manueller Refresh liest nur neu; er verändert auch auf Netzlaufwerken
+// keine Dateien, um den Cache des Betriebssystems anzustoßen.
 export async function forceRefreshPane(pane: PaneId) {
-  try { await bustDirCache(state[pane].cwd); } catch {}
-  await loadPane(pane, state[pane].cwd);
+  await loadPane(pane, state[pane].cwd, { recordHistory: false });
 }
 
 export async function forceRefreshAll() {
@@ -236,8 +297,10 @@ export async function handleVolumeGone(volPath: string) {
   for (const pane of panes) {
     const cwd = state[pane].cwd;
     if (cwd === volPath || cwd.startsWith(norm)) {
-      try { await unwatchPane(pane); } catch {}
-      await loadPane(pane, cwd);
+      try {
+        await unwatchPane(pane);
+      } catch {}
+      await loadPane(pane, cwd, { recordHistory: false });
     }
   }
 }
@@ -299,7 +362,13 @@ export function setSort(pane: PaneId, key: SortKey) {
     cur.sortKey === key ? (cur.sortDir === "asc" ? "desc" : "asc") : "asc";
   const sortedRaw = sortEntries(cur.entriesRaw, key, dir);
   const visible = applyFilter(sortedRaw, cur.filter);
-  setState(pane, { sortKey: key, sortDir: dir, entriesRaw: sortedRaw, entries: visible, cursor: 0 });
+  setState(pane, {
+    sortKey: key,
+    sortDir: dir,
+    entriesRaw: sortedRaw,
+    entries: visible,
+    cursor: 0,
+  });
 }
 
 export function setFilter(pane: PaneId, filter: string) {
@@ -309,7 +378,13 @@ export function setFilter(pane: PaneId, filter: string) {
   const visibleSet = new Set(visible.map((e) => e.path));
   const newSel = new Set<string>();
   for (const p of cur.selected) if (visibleSet.has(p)) newSel.add(p);
-  setState(pane, { filter, entries: visible, cursor: 0, selected: newSel, anchor: null });
+  setState(pane, {
+    filter,
+    entries: visible,
+    cursor: 0,
+    selected: newSel,
+    anchor: null,
+  });
   bumpSel();
 }
 
@@ -354,6 +429,8 @@ function syncActiveTab(pane: PaneId) {
   const s = state[pane];
   setState("tabs", pane, idx, {
     cwd: s.cwd,
+    history: s.history,
+    historyIndex: s.historyIndex,
     sortKey: s.sortKey,
     sortDir: s.sortDir,
     filter: s.filter,
@@ -364,12 +441,25 @@ export function newTab(pane: PaneId, path?: string) {
   // Aktuelle Tab zuerst synchronisieren
   syncActiveTab(pane);
   const target = path ?? state[pane].cwd;
-  const newTab: Tab = { cwd: target, sortKey: "name", sortDir: "asc", filter: "" };
+  const newTab: Tab = {
+    cwd: target,
+    history: [],
+    historyIndex: -1,
+    sortKey: "name",
+    sortDir: "asc",
+    filter: "",
+  };
   setState("tabs", pane, (arr) => [...arr, newTab]);
   const newIdx = state.tabs[pane].length - 1;
   setState("activeTab", pane, newIdx);
   // PaneState auf Defaults zurücksetzen für neuen Tab
-  setState(pane, { sortKey: "name", sortDir: "asc", filter: "" });
+  setState(pane, {
+    history: [],
+    historyIndex: -1,
+    sortKey: "name",
+    sortDir: "asc",
+    filter: "",
+  });
   loadPane(pane, target);
 }
 
@@ -384,8 +474,14 @@ export function closeTab(pane: PaneId, idx: number) {
     const newActive = Math.max(0, idx - 1);
     setState("activeTab", pane, newActive);
     const t = arr[newActive];
-    setState(pane, { sortKey: t.sortKey, sortDir: t.sortDir, filter: t.filter });
-    loadPane(pane, t.cwd);
+    setState(pane, {
+      history: t.history,
+      historyIndex: t.historyIndex,
+      sortKey: t.sortKey,
+      sortDir: t.sortDir,
+      filter: t.filter,
+    });
+    loadPane(pane, t.cwd, { recordHistory: false });
   } else if (active > idx) {
     setState("activeTab", pane, active - 1);
   }
@@ -397,12 +493,27 @@ export function switchTab(pane: PaneId, idx: number) {
   syncActiveTab(pane);
   setState("activeTab", pane, idx);
   const t = state.tabs[pane][idx];
-  setState(pane, { sortKey: t.sortKey, sortDir: t.sortDir, filter: t.filter });
-  loadPane(pane, t.cwd);
+  setState(pane, {
+    history: t.history,
+    historyIndex: t.historyIndex,
+    sortKey: t.sortKey,
+    sortDir: t.sortDir,
+    filter: t.filter,
+  });
+  loadPane(pane, t.cwd, { recordHistory: false });
 }
 
 export function closeActiveTab(pane: PaneId) {
   closeTab(pane, state.activeTab[pane]);
+}
+
+export async function goBackInHistory(pane: PaneId) {
+  const { history, historyIndex } = state[pane];
+  if (historyIndex <= 0) return;
+  await loadPane(pane, history[historyIndex - 1], {
+    recordHistory: false,
+    historyIndex: historyIndex - 1,
+  });
 }
 
 // Hilfs-Setter falls außerhalb benötigt

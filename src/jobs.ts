@@ -4,7 +4,7 @@ import { state, setState, refreshPane, loadPane } from "./state";
 import { askPrompt, askConfirm, notify, notifyError } from "./components/Dialogs";
 import type { Entry, PaneId } from "./types";
 import { t, errMsg } from "./i18n";
-import { joinPath, splitName, uniqueName } from "./paths";
+import { isSameOrChildPath, joinPath, splitName, uniqueName } from "./paths";
 import {
   checkConflicts,
   runJob,
@@ -75,6 +75,17 @@ export async function transferEntries(
     return parent === dstCwd.replace(/\/$/, "");
   });
   if (sameDir) return;
+
+  // Ein Ordner darf nie in sich selbst bzw. einen seiner Unterordner kopiert
+  // oder verschoben werden. Ohne diese Schranke würde der rekursive Backend-
+  // Kopierer seinen gerade erzeugten Zielbaum erneut mitkopieren.
+  const recursiveTarget = srcEntries.find((e) =>
+    e.isDir && isSameOrChildPath(e.path, joinPath(dstCwd, e.name)),
+  );
+  if (recursiveTarget) {
+    await notifyError(t("jobs.recursiveTarget", { name: recursiveTarget.name }));
+    return;
+  }
 
   let items: JobItem[] = srcEntries.map((e) => ({
     src: e.path,

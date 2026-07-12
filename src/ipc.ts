@@ -1,7 +1,10 @@
 import { invoke } from "@tauri-apps/api/core";
 import type { Entry } from "./types";
 
-export async function listDir(path: string, showHidden: boolean): Promise<Entry[]> {
+export async function listDir(
+  path: string,
+  showHidden: boolean,
+): Promise<Entry[]> {
   return invoke<Entry[]>("list_dir", { path, showHidden });
 }
 
@@ -9,8 +12,8 @@ export async function openDefault(path: string): Promise<void> {
   return invoke<void>("open_default", { path });
 }
 
-export async function openUrl(url: string): Promise<void> {
-  return invoke<void>("open_url", { url });
+export async function openPrivacySettings(): Promise<void> {
+  return invoke<void>("open_privacy_settings");
 }
 
 export async function homeDir(): Promise<string> {
@@ -25,15 +28,24 @@ export async function createFile(path: string): Promise<void> {
   return invoke<void>("create_file", { path });
 }
 
-export async function renamePath(oldPath: string, newPath: string): Promise<void> {
+export async function renamePath(
+  oldPath: string,
+  newPath: string,
+): Promise<void> {
   return invoke<void>("rename_path", { oldPath, newPath });
 }
 
-export async function createSymlink(target: string, linkPath: string): Promise<void> {
+export async function createSymlink(
+  target: string,
+  linkPath: string,
+): Promise<void> {
   return invoke<void>("create_symlink", { target, linkPath });
 }
 
-export async function createFinderAlias(target: string, linkPath: string): Promise<void> {
+export async function createFinderAlias(
+  target: string,
+  linkPath: string,
+): Promise<void> {
   return invoke<void>("create_finder_alias", { target, linkPath });
 }
 
@@ -53,12 +65,6 @@ export async function pathIsNetwork(path: string): Promise<boolean> {
   return invoke<boolean>("path_is_network", { path });
 }
 
-// Nudge the macOS network-drive (webdavfs/smbfs) directory cache so the next
-// read_dir returns a fresh listing. Best-effort; resolves even on failure.
-export async function bustDirCache(path: string): Promise<void> {
-  return invoke<void>("bust_dir_cache", { path });
-}
-
 export type Volume = { name: string; path: string; kind: "local" | "network" };
 
 export async function listVolumes(): Promise<Volume[]> {
@@ -69,34 +75,26 @@ export async function ejectVolume(path: string): Promise<void> {
   return invoke<void>("eject_volume", { path });
 }
 
-export type NetworkBookmark = { name: string; url: string; mountPath: string; connected: boolean };
+export type NetworkBookmark = {
+  name: string;
+  url: string;
+  mountPath: string;
+  connected: boolean;
+};
 
 export async function listNetworkBookmarks(): Promise<NetworkBookmark[]> {
   return invoke<NetworkBookmark[]>("list_network_bookmarks");
 }
 
-export async function mountNetworkUrl(url: string): Promise<string> {
-  return invoke<string>("mount_network_url", { url });
+export async function mountNetworkUrl(
+  url: string,
+  allowInsecureLocal = false,
+): Promise<string> {
+  return invoke<string>("mount_network_url", { url, allowInsecureLocal });
 }
 
 export async function appVersion(): Promise<string> {
   return invoke<string>("app_version");
-}
-
-export type UpdateInfo = {
-  current: string;
-  latest: string;
-  updateAvailable: boolean;
-  url: string;
-  assetUrl: string;
-};
-
-export async function checkUpdate(): Promise<UpdateInfo> {
-  return invoke<UpdateInfo>("check_update");
-}
-
-export async function downloadAndOpenUpdate(url: string): Promise<string> {
-  return invoke<string>("download_and_open_update", { url });
 }
 
 export async function setMenuLanguage(lang: string): Promise<void> {
@@ -126,7 +124,11 @@ export async function checkConflicts(items: JobItem[]): Promise<string[]> {
   return invoke<string[]>("check_conflicts", { items });
 }
 
-export async function runJob(jobId: string, kind: JobKind, items: JobItem[]): Promise<void> {
+export async function runJob(
+  jobId: string,
+  kind: JobKind,
+  items: JobItem[],
+): Promise<void> {
   return invoke<void>("run_job", { jobId, kind, items });
 }
 
@@ -135,9 +137,18 @@ export async function cancelJob(jobId: string): Promise<void> {
 }
 
 export type SyncAction = "copy" | "update" | "delete";
-export type SyncEntry = { rel: string; action: SyncAction; isDir: boolean; size: number };
+export type SyncEntry = {
+  rel: string;
+  action: SyncAction;
+  isDir: boolean;
+  size: number;
+};
 
-export async function syncPreview(src: string, dst: string, deleteExtra: boolean): Promise<SyncEntry[]> {
+export async function syncPreview(
+  src: string,
+  dst: string,
+  deleteExtra: boolean,
+): Promise<SyncEntry[]> {
   return invoke<SyncEntry[]>("sync_preview", { src, dst, deleteExtra });
 }
 
@@ -165,7 +176,12 @@ export async function searchInDir(
   showHidden: boolean,
   maxResults = 1000,
 ): Promise<Entry[]> {
-  return invoke<Entry[]>("search_in_dir", { root, query, showHidden, maxResults });
+  return invoke<Entry[]>("search_in_dir", {
+    root,
+    query,
+    showHidden,
+    maxResults,
+  });
 }
 
 export async function zipCreate(srcs: string[], dst: string): Promise<void> {
@@ -205,11 +221,17 @@ export const TEXT_PREVIEW_MAX_BYTES = 65536;
 /** Kantenlänge (px) für Bild-Thumbnails in der Vorschau. */
 export const IMAGE_THUMB_SIZE = 256;
 
-export async function readTextPreview(path: string, maxBytes = TEXT_PREVIEW_MAX_BYTES): Promise<string> {
+export async function readTextPreview(
+  path: string,
+  maxBytes = TEXT_PREVIEW_MAX_BYTES,
+): Promise<string> {
   return invoke<string>("read_text_preview", { path, maxBytes });
 }
 
-export async function readImageThumb(path: string, size = IMAGE_THUMB_SIZE): Promise<string> {
+export async function readImageThumb(
+  path: string,
+  size = IMAGE_THUMB_SIZE,
+): Promise<string> {
   return invoke<string>("read_image_thumb", { path, size });
 }
 
@@ -254,7 +276,10 @@ export async function getProperties(path: string): Promise<Properties> {
   return invoke<Properties>("get_properties", { path });
 }
 
-export async function setPermissions(path: string, mode: number): Promise<void> {
+export async function setPermissions(
+  path: string,
+  mode: number,
+): Promise<void> {
   return invoke<void>("set_permissions", { path, mode });
 }
 
@@ -274,7 +299,10 @@ export async function startPromiseDrag(paths: string[]): Promise<void> {
   return invoke<void>("start_promise_drag", { paths });
 }
 
-export async function resolvePromiseDrop(id: number, action: "overwrite" | "cancel" | "keep_both"): Promise<void> {
+export async function resolvePromiseDrop(
+  id: number,
+  action: "overwrite" | "cancel" | "keep_both",
+): Promise<void> {
   return invoke<void>("resolve_promise_drop", { id, action });
 }
 
