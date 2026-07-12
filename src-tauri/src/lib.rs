@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::cell::Cell;
 use std::collections::HashMap;
 use std::io::Write;
 use std::net::IpAddr;
@@ -436,9 +437,11 @@ fn is_time_machine_path(full: &Path, tm_mounts: &[std::path::PathBuf]) -> bool {
 #[tauri::command]
 fn move_to_trash(paths: Vec<String>) -> Result<(), String> {
     use std::os::macos::fs::MetadataExt;
+    use trash::macos::{DeleteMethod, TrashContextExtMacos};
     const PROTECT_MASK: u32 = 0x0002 | 0x0004 | 0x00020000 | 0x00040000 | 0x00080000 | 0x00100000;
     let tm_mounts = tm_mountpoints_canon();
     let fs = mount_fs_types();
+    let mut local_trash_paths = Vec::new();
     for p in &paths {
         let full = expand_tilde(p);
         // Bereits gelöscht? Auf Netzlaufwerken können verwaiste AppleDouble-
@@ -486,7 +489,18 @@ fn move_to_trash(paths: Vec<String>) -> Result<(), String> {
         if needs_admin {
             return Err(format!("NEEDS_ADMIN: {}", full.display()));
         }
-        trash::delete(&full).map_err(|e| format!("{}: {}", full.display(), e))?;
+        local_trash_paths.push(full);
+    }
+    if !local_trash_paths.is_empty() {
+        // Der Default des `trash`-Crates ruft Finder auf. Finder spielt für
+        // JEDES Objekt einen Löschton ab, was bei einer Sync-Löschung wie ein
+        // Maschinengewehr klingt. NSFileManager verschiebt dieselben Objekte
+        // lautlos in den Papierkorb und kann sie in einem Batch verarbeiten.
+        let mut trash_ctx = trash::TrashContext::new();
+        trash_ctx.set_delete_method(DeleteMethod::NsFileManager);
+        trash_ctx
+            .delete_all(&local_trash_paths)
+            .map_err(|e| format!("Papierkorb: {e}"))?;
     }
     Ok(())
 }
@@ -1244,10 +1258,26 @@ struct JobCtx<'a> {
     /// Verschachtelungstiefe beim Dereferenzieren von Symlinks (Schleifenschutz,
     /// falls das Ziel-Dateisystem keine Symlinks unterstützt).
     deref_depth: u32,
+    /// Dateinamen können sich beim rekursiven Kopieren sehr schnell ändern.
+    /// Die UI (und insbesondere die Dock-Markierung) darf dadurch nicht mit
+    /// hunderten nativen Aktualisierungen pro Sekunde belastet werden.
+    last_emit: Cell<Instant>,
+    last_reported_done: Cell<u64>,
 }
 
 impl<'a> JobCtx<'a> {
     fn emit(&self, current: &str) {
+        const MIN_PROGRESS_INTERVAL: Duration = Duration::from_millis(125);
+        let now = Instant::now();
+        // Ein echter Fortschrittsschritt muss sofort sichtbar werden. Reine
+        // Dateinamenwechsel innerhalb desselben Schritts werden gedrosselt.
+        if self.last_reported_done.get() == self.done
+            && now.duration_since(self.last_emit.get()) < MIN_PROGRESS_INTERVAL
+        {
+            return;
+        }
+        self.last_emit.set(now);
+        self.last_reported_done.set(self.done);
         // Sicherheitsnetz: `done` darf nie größer als `total` angezeigt werden.
         // Der Fortschritt zählt jetzt Einträge (siehe run_job), sodass dies im
         // Normalfall nicht eintritt.
@@ -1701,6 +1731,8 @@ async fn run_job(
             done: 0,
             total,
             deref_depth: 0,
+            last_emit: Cell::new(Instant::now()),
+            last_reported_done: Cell::new(u64::MAX),
         };
         ctx.emit("");
         for it in &items {

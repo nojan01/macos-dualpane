@@ -94,6 +94,7 @@ export function App() {
   const [themeMode, setThemeModeSig] = createSignal<ThemeMode>(getThemeMode());
   onThemeChange((m) => setThemeModeSig(m));
   const [langMode, setLangModeSig] = createSignal<LangMode>(getLangMode());
+  let lastDockBadge: string | null | undefined;
   onLangChange((m, r) => {
     setLangModeSig(m);
     // Natives macOS-Menü an die neue Sprache anpassen.
@@ -245,6 +246,8 @@ export function App() {
       const job = state.job;
       const label =
         job && job.total > 0 ? `${job.done}/${job.total}` : job ? "…" : null;
+      if (label === lastDockBadge) return;
+      lastDockBadge = label;
       void setDockBadge(label).catch(() => {});
     });
     await listen<JobProgress>("job-progress", (ev) => {
