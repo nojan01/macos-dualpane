@@ -53,6 +53,29 @@ export async function moveToTrash(paths: string[]): Promise<void> {
   return invoke<void>("move_to_trash", { paths });
 }
 
+export type UndoDeleteItem = { original: string; staged: string };
+export type UndoDeleteBatch = { token: string; items: UndoDeleteItem[] };
+
+export async function stageDeleteForUndo(
+  paths: string[],
+): Promise<UndoDeleteBatch> {
+  return invoke<UndoDeleteBatch>("stage_delete_for_undo", { paths });
+}
+
+export async function undoStagedDelete(items: UndoDeleteItem[]): Promise<void> {
+  return invoke<void>("undo_staged_delete", { items });
+}
+
+export async function finalizeStagedDelete(
+  items: UndoDeleteItem[],
+): Promise<void> {
+  return invoke<void>("finalize_staged_delete", { items });
+}
+
+export async function cleanupExpiredUndo(): Promise<void> {
+  return invoke<void>("cleanup_expired_undo");
+}
+
 export async function forceDeleteAdmin(paths: string[]): Promise<void> {
   return invoke<void>("force_delete_admin", { paths });
 }
@@ -136,7 +159,8 @@ export async function cancelJob(jobId: string): Promise<void> {
   return invoke<void>("cancel_job", { jobId });
 }
 
-export type SyncAction = "copy" | "update" | "delete";
+export type SyncAction =
+  "copy" | "update" | "delete" | "left_to_right" | "right_to_left" | "conflict";
 export type SyncEntry = {
   rel: string;
   action: SyncAction;
@@ -148,8 +172,30 @@ export async function syncPreview(
   src: string,
   dst: string,
   deleteExtra: boolean,
+  ignorePatterns: string[] = [],
+  verifyChecksums = false,
 ): Promise<SyncEntry[]> {
-  return invoke<SyncEntry[]>("sync_preview", { src, dst, deleteExtra });
+  return invoke<SyncEntry[]>("sync_preview", {
+    src,
+    dst,
+    deleteExtra,
+    ignorePatterns,
+    verifyChecksums,
+  });
+}
+
+export async function syncTwoWayPreview(
+  left: string,
+  right: string,
+  ignorePatterns: string[] = [],
+  verifyChecksums = false,
+): Promise<SyncEntry[]> {
+  return invoke<SyncEntry[]>("sync_two_way_preview", {
+    left,
+    right,
+    ignorePatterns,
+    verifyChecksums,
+  });
 }
 
 export type JobProgress = {

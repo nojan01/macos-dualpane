@@ -1,7 +1,8 @@
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::cell::Cell;
 use std::collections::HashMap;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::net::IpAddr;
 use std::process::{Command, Stdio};
 
@@ -503,6 +504,140 @@ fn move_to_trash(paths: Vec<String>) -> Result<(), String> {
             .map_err(|e| format!("Papierkorb: {e}"))?;
     }
     Ok(())
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct UndoDeleteItem {
+    original: String,
+    staged: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct UndoDeleteBatch {
+    token: String,
+    items: Vec<UndoDeleteItem>,
+}
+
+fn undo_staging_dir(token: &str) -> Result<PathBuf, String> {
+    let base = dirs::data_local_dir().ok_or_else(|| "Undo-Ordner nicht verfügbar".to_string())?;
+    Ok(base.join("DualBeam").join("Undo").join(token))
+}
+
+#[tauri::command]
+fn stage_delete_for_undo(paths: Vec<String>) -> Result<UndoDeleteBatch, String> {
+    use std::os::macos::fs::MetadataExt;
+
+    const PROTECT_MASK: u32 = 0x0002 | 0x0004 | 0x00020000 | 0x00040000 | 0x00080000 | 0x00100000;
+    let token = format!(
+        "{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or_default()
+    );
+    let dir = undo_staging_dir(&token)?;
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let tm_mounts = tm_mountpoints_canon();
+    let mut originals = Vec::new();
+    for raw in paths {
+        let original = expand_tilde(&raw);
+        let metadata = match std::fs::symlink_metadata(&original) {
+            Ok(metadata) => metadata,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) => return Err(format!("{}: {}", original.display(), e)),
+        };
+        if is_time_machine_path(&original, &tm_mounts) {
+            return Err(format!("TIMEMACHINE_PROTECTED\u{1f}{}", original.display()));
+        }
+        let needs_admin = (metadata.st_flags() & PROTECT_MASK) != 0
+            || original
+                .file_name()
+                .and_then(|n| n.to_str())
+                .map(|n| n.ends_with(".inprogress"))
+                .unwrap_or(false);
+        if needs_admin {
+            return Err(format!("NEEDS_ADMIN: {}", original.display()));
+        }
+        originals.push(original);
+    }
+
+    let mut items: Vec<UndoDeleteItem> = Vec::new();
+    for (index, original) in originals.into_iter().enumerate() {
+        let name = original
+            .file_name()
+            .ok_or_else(|| "Ungültiger Löschpfad".to_string())?;
+        let staged = dir.join(format!("{index}-{}", name.to_string_lossy()));
+        if let Err(e) = std::fs::rename(&original, &staged) {
+            // Eine teilweise verschobene Auswahl darf nie zurückbleiben.
+            for item in items.iter().rev() {
+                let _ = std::fs::rename(&item.staged, &item.original);
+            }
+            return Err(format!("{}: {}", original.display(), e));
+        }
+        items.push(UndoDeleteItem {
+            original: original.to_string_lossy().into_owned(),
+            staged: staged.to_string_lossy().into_owned(),
+        });
+    }
+    Ok(UndoDeleteBatch { token, items })
+}
+
+#[tauri::command]
+fn undo_staged_delete(items: Vec<UndoDeleteItem>) -> Result<(), String> {
+    for item in &items {
+        let original = PathBuf::from(&item.original);
+        let staged = PathBuf::from(&item.staged);
+        if original.exists() {
+            return Err(format!("{} existiert bereits", original.display()));
+        }
+        if let Some(parent) = original.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        }
+        std::fs::rename(&staged, &original)
+            .map_err(|e| format!("{}: {}", original.display(), e))?;
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn finalize_staged_delete(items: Vec<UndoDeleteItem>) -> Result<(), String> {
+    let staged: Vec<String> = items.into_iter().map(|item| item.staged).collect();
+    move_to_trash(staged)
+}
+
+/// Entfernt abgelaufene Rückgängig-Puffer aus früheren Sitzungen. Der Puffer
+/// liegt ausschließlich im App-Datenordner und wird erst nach zehn Minuten
+/// lautlos in den Papierkorb verschoben.
+#[tauri::command]
+fn cleanup_expired_undo() -> Result<(), String> {
+    let base = dirs::data_local_dir()
+        .ok_or_else(|| "Undo-Ordner nicht verfügbar".to_string())?
+        .join("DualBeam")
+        .join("Undo");
+    let expired = match std::fs::read_dir(&base) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e.to_string()),
+    };
+    let paths: Vec<String> = expired
+        .filter_map(Result::ok)
+        .filter_map(|entry| {
+            let meta = entry.metadata().ok()?;
+            if !meta.is_dir() {
+                return None;
+            }
+            let age = meta.modified().ok()?.elapsed().ok()?;
+            (age >= Duration::from_secs(10 * 60))
+                .then(|| entry.path().to_string_lossy().into_owned())
+        })
+        .collect();
+    if paths.is_empty() {
+        return Ok(());
+    }
+    move_to_trash(paths)
 }
 
 /// Ein privilegierter Löschvorgang darf nie auf einen System- oder
@@ -1859,6 +1994,29 @@ fn effective_src_mtime_secs(meta: &std::fs::Metadata) -> i64 {
 /// Durchlauf fälschlich als „geändert" erscheinen.
 const MTIME_TOLERANCE_SECS: i64 = 2;
 
+/// Vergleicht zwei reguläre Dateien in festen Blöcken per SHA-256. Fehler beim
+/// Lesen gelten bewusst als „ungleich“, damit eine angeforderte Verifikation
+/// niemals stillschweigend eine abweichende Datei als identisch einstuft.
+fn files_match_sha256(left: &Path, right: &Path) -> bool {
+    fn hash(path: &Path) -> std::io::Result<[u8; 32]> {
+        let mut file = std::fs::File::open(path)?;
+        let mut hasher = Sha256::new();
+        let mut buffer = [0u8; 128 * 1024];
+        loop {
+            let read = file.read(&mut buffer)?;
+            if read == 0 {
+                break;
+            }
+            hasher.update(&buffer[..read]);
+        }
+        Ok(hasher.finalize().into())
+    }
+    match (hash(left), hash(right)) {
+        (Ok(left), Ok(right)) => left == right,
+        _ => false,
+    }
+}
+
 /// AppleDouble-Begleitdatei (`._X`)? Auf Dateisystemen ohne nativen xattr-
 /// Support (WebDAV/HiDrive, SMB, FAT) legt macOS für jede Datei `X` mit
 /// erweiterten Attributen/Resource-Fork eine sichtbare Datei `._X` an.
@@ -1897,6 +2055,44 @@ fn is_trunk_root(rel: &Path) -> bool {
     let mut components = rel.components();
     components.next().and_then(|part| part.as_os_str().to_str()) == Some(".trunk")
         && components.next().is_none()
+}
+
+/// Liest `.dualbeamignore` aus der Quelle und ergänzt die optionalen Regeln
+/// eines gespeicherten Sync-Profils. Leere Zeilen und `#`-Kommentare werden
+/// ignoriert; Muster beziehen sich immer auf den relativen Pfad im Sync-Root.
+fn sync_ignore_patterns(src_root: &Path, extra: Vec<String>) -> Vec<String> {
+    let mut patterns = extra;
+    if let Ok(text) = std::fs::read_to_string(src_root.join(".dualbeamignore")) {
+        patterns.extend(text.lines().map(str::to_owned));
+    }
+    patterns
+        .into_iter()
+        .map(|line| line.trim().to_string())
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .collect()
+}
+
+/// Prüft einfache Gitignore-ähnliche Regeln. Ein Muster ohne `/` gilt für
+/// jeden Pfadbestandteil (`*.log`, `node_modules`); ein Muster mit `/` für den
+/// gesamten relativen Pfad. Ein abschließendes `/` schließt den Teilbaum aus.
+fn is_ignored_sync_path(rel: &Path, patterns: &[String]) -> bool {
+    let rel = rel.to_string_lossy().replace('\\', "/");
+    patterns.iter().any(|raw| {
+        let directory_rule = raw.ends_with('/');
+        let pattern = raw.trim_start_matches("./").trim_end_matches('/');
+        if pattern.is_empty() || raw.starts_with('!') {
+            return false;
+        }
+        if directory_rule && (rel == pattern || rel.starts_with(&format!("{pattern}/"))) {
+            return true;
+        }
+        let pat_chars: Vec<char> = pattern.chars().collect();
+        if pattern.contains('/') {
+            return glob_match(&pat_chars, &rel.chars().collect::<Vec<_>>());
+        }
+        rel.split('/')
+            .any(|component| glob_match(&pat_chars, &component.chars().collect::<Vec<_>>()))
+    })
 }
 
 /// `symlink_metadata` mit Wiederholung bei transienten Netzwerkfehlern
@@ -1951,6 +2147,7 @@ fn preview_compare_file(
     src_path: &Path,
     dst_path: &Path,
     link_meta: &std::fs::Metadata,
+    verify_checksums: bool,
     out: &mut Vec<SyncEntry>,
 ) -> Result<(), String> {
     // Effektive Quell-Metadaten bestimmen: Symlinks folgen, um mit einem ggf.
@@ -2015,9 +2212,18 @@ fn preview_compare_file(
                 // Datei-Vergleich: Größe oder (deutlich) neuere Quelle. Die
                 // Quell-mtime wird auf „jetzt" gekappt, damit zukunftsdatierte
                 // Dateien nicht bei jedem Sync als „geändert" erscheinen.
-                if f.len() != d.len()
-                    || effective_src_mtime_secs(&f) > file_mtime_secs(&d) + MTIME_TOLERANCE_SECS
-                {
+                let metadata_differs = f.len() != d.len()
+                    || effective_src_mtime_secs(&f) > file_mtime_secs(&d) + MTIME_TOLERANCE_SECS;
+                // Die Prüfsummenprüfung ist nur für Dateien nötig, die der
+                // schnelle Metadatenvergleich als gleich einstuft. Bei einer
+                // anderen Größe oder eindeutig neuerer Quelle steht das
+                // Ergebnis bereits fest. Die Dateien zusätzlich komplett zu
+                // lesen war besonders auf WebDAV/SMB extrem teuer und hat die
+                // Vorschau unnötig lange blockiert.
+                let checksum_differs = verify_checksums
+                    && !metadata_differs
+                    && !files_match_sha256(src_path, dst_path);
+                if metadata_differs || checksum_differs {
                     out.push(SyncEntry {
                         rel: rel_str,
                         action: "update".into(),
@@ -2039,6 +2245,8 @@ fn preview_walk_src(
     src_root: &Path,
     dst_root: &Path,
     cur: &Path,
+    ignore_patterns: &[String],
+    verify_checksums: bool,
     out: &mut Vec<SyncEntry>,
 ) -> Result<(), String> {
     let entries = read_dir_retry(cur).map_err(|e| format!("Quelle lesen fehlgeschlagen: {e}"))?;
@@ -2049,7 +2257,7 @@ fn preview_walk_src(
             Err(_) => continue,
         };
         let name = entry.file_name().to_string_lossy().into_owned();
-        if is_transient_trunk_path(rel) {
+        if is_transient_trunk_path(rel) || is_ignored_sync_path(rel, ignore_patterns) {
             continue;
         }
         // macOS-Metadaten (._X, .DS_Store) nicht kopieren – sie werden auf dem
@@ -2071,13 +2279,20 @@ fn preview_walk_src(
         }
 
         if link_meta.file_type().is_symlink() {
-            preview_compare_file(rel_str, &p, &dst_path, &link_meta, out)?;
+            preview_compare_file(rel_str, &p, &dst_path, &link_meta, verify_checksums, out)?;
             continue;
         }
         if link_meta.is_dir() {
             match symlink_metadata_retry(&dst_path) {
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound && is_trunk_root(rel) => {
-                    preview_walk_src(src_root, dst_root, &p, out)?;
+                    preview_walk_src(
+                        src_root,
+                        dst_root,
+                        &p,
+                        ignore_patterns,
+                        verify_checksums,
+                        out,
+                    )?;
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                     // Ganzer Teilbaum ist neu → als Einheit melden, nicht rekursieren.
@@ -2089,7 +2304,14 @@ fn preview_walk_src(
                     });
                 }
                 Err(e) => return Err(format!("Ziel-Metadaten lesen fehlgeschlagen: {e}")),
-                Ok(d) if d.is_dir() => preview_walk_src(src_root, dst_root, &p, out)?,
+                Ok(d) if d.is_dir() => preview_walk_src(
+                    src_root,
+                    dst_root,
+                    &p,
+                    ignore_patterns,
+                    verify_checksums,
+                    out,
+                )?,
                 Ok(_) => {
                     // Ziel existiert, ist aber kein Verzeichnis (z. B. Datei) →
                     // Teilbaum als Einheit kopieren (überschreiben), nicht rekursieren.
@@ -2104,7 +2326,7 @@ fn preview_walk_src(
             continue;
         }
         // Reguläre Datei.
-        preview_compare_file(rel_str, &p, &dst_path, &link_meta, out)?;
+        preview_compare_file(rel_str, &p, &dst_path, &link_meta, verify_checksums, out)?;
     }
     Ok(())
 }
@@ -2117,6 +2339,7 @@ fn preview_walk_dst(
     src_root: &Path,
     dst_root: &Path,
     cur: &Path,
+    ignore_patterns: &[String],
     out: &mut Vec<SyncEntry>,
 ) -> Result<(), String> {
     let entries = read_dir_retry(cur).map_err(|e| format!("Ziel lesen fehlgeschlagen: {e}"))?;
@@ -2128,7 +2351,7 @@ fn preview_walk_dst(
         };
         let name = entry.file_name().to_string_lossy().into_owned();
 
-        if is_transient_trunk_path(rel) {
+        if is_transient_trunk_path(rel) || is_ignored_sync_path(rel, ignore_patterns) {
             continue;
         }
 
@@ -2164,7 +2387,7 @@ fn preview_walk_dst(
         // `exists()` folgt Symlinks – so werden dereferenzierte Ziel-Inhalte
         // korrekt der Quelle zugeordnet und nicht fälschlich zum Löschen markiert.
         if !src_root.join(rel).exists() && is_dir && is_trunk_root(rel) {
-            preview_walk_dst(src_root, dst_root, &p, out)?;
+            preview_walk_dst(src_root, dst_root, &p, ignore_patterns, out)?;
         } else if !src_root.join(rel).exists() {
             out.push(SyncEntry {
                 rel: rel.to_string_lossy().into_owned(),
@@ -2174,7 +2397,7 @@ fn preview_walk_dst(
             });
             // Ganzer Teilbaum wird gelöscht → nicht weiter absteigen.
         } else if is_dir {
-            preview_walk_dst(src_root, dst_root, &p, out)?;
+            preview_walk_dst(src_root, dst_root, &p, ignore_patterns, out)?;
         }
     }
     Ok(())
@@ -2189,6 +2412,8 @@ async fn sync_preview(
     src: String,
     dst: String,
     delete_extra: bool,
+    ignore_patterns: Vec<String>,
+    verify_checksums: bool,
 ) -> Result<Vec<SyncEntry>, String> {
     // Der Verzeichnis-Abgleich kann auf langsamen Netzlaufwerken (WebDAV/HiDrive,
     // SMB) sehr lange dauern. Als synchroner Befehl liefe er auf dem Haupt-Thread
@@ -2196,12 +2421,20 @@ async fn sync_preview(
     // Vorbereitungs-Hinweis im Dialog könnte gar nicht erst gezeichnet werden.
     // Deshalb wird die eigentliche Arbeit auf einem Blocking-Thread ausgeführt,
     // sodass die UI weiterhin reagiert und den Hinweis anzeigt.
-    tauri::async_runtime::spawn_blocking(move || sync_preview_inner(&src, &dst, delete_extra))
-        .await
-        .map_err(|e| e.to_string())?
+    tauri::async_runtime::spawn_blocking(move || {
+        sync_preview_inner(&src, &dst, delete_extra, ignore_patterns, verify_checksums)
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
-fn sync_preview_inner(src: &str, dst: &str, delete_extra: bool) -> Result<Vec<SyncEntry>, String> {
+fn sync_preview_inner(
+    src: &str,
+    dst: &str,
+    delete_extra: bool,
+    extra_ignore_patterns: Vec<String>,
+    verify_checksums: bool,
+) -> Result<Vec<SyncEntry>, String> {
     let src_root = expand_tilde(src);
     let dst_root = expand_tilde(dst);
     if !src_root.is_dir() {
@@ -2210,16 +2443,123 @@ fn sync_preview_inner(src: &str, dst: &str, delete_extra: bool) -> Result<Vec<Sy
             src_root.display()
         ));
     }
+    // Die Ausführung eines Kopierjobs schützt bereits vor diesem Fall. Die
+    // Vorschau muss jedoch ebenso früh abbrechen: Liegt das Ziel innerhalb der
+    // Quelle, würde der rekursive Durchlauf den gerade angelegten Zielbaum
+    // wieder als Quelle besuchen (`Quelle/.../Quelle/...`) und nie fertig.
+    if destination_is_within_source(&src_root, &dst_root)
+        .map_err(|e| format!("Zielpfad prüfen fehlgeschlagen: {e}"))?
+    {
+        return Err(format!(
+            "Zielverzeichnis liegt innerhalb der Quelle: {}",
+            dst_root.display()
+        ));
+    }
     let mut out: Vec<SyncEntry> = Vec::new();
+    let ignore_patterns = sync_ignore_patterns(&src_root, extra_ignore_patterns);
 
     // Quelle durchlaufen → copy/update (robust gegen transiente Netzwerkfehler).
-    preview_walk_src(&src_root, &dst_root, &src_root, &mut out)?;
+    preview_walk_src(
+        &src_root,
+        &dst_root,
+        &src_root,
+        &ignore_patterns,
+        verify_checksums,
+        &mut out,
+    )?;
 
     // Ziel durchlaufen → delete (nur Extras; Teilbäume werden als Einheit gemeldet).
     if delete_extra && dst_root.is_dir() {
-        preview_walk_dst(&src_root, &dst_root, &dst_root, &mut out)?;
+        preview_walk_dst(&src_root, &dst_root, &dst_root, &ignore_patterns, &mut out)?;
     }
 
+    Ok(out)
+}
+
+/// Vorschau für einen konfliktbewussten Zwei-Wege-Sync. Änderungen, die nur
+/// auf einer Seite neuer sind, erhalten eine eindeutige Kopierrichtung. Bei
+/// gleichzeitigen bzw. nicht zeitlich auflösbaren Änderungen bleibt der
+/// Eintrag ein expliziter Konflikt für die Benutzerentscheidung.
+#[tauri::command]
+async fn sync_two_way_preview(
+    left: String,
+    right: String,
+    ignore_patterns: Vec<String>,
+    verify_checksums: bool,
+) -> Result<Vec<SyncEntry>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        sync_two_way_preview_inner(&left, &right, ignore_patterns, verify_checksums)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+fn newer_sync_side(left_root: &Path, right_root: &Path, rel: &str) -> Option<&'static str> {
+    let left = std::fs::metadata(left_root.join(rel)).ok()?;
+    let right = std::fs::metadata(right_root.join(rel)).ok()?;
+    if left.is_dir() || right.is_dir() {
+        return None;
+    }
+    let left_mtime = file_mtime_secs(&left);
+    let right_mtime = file_mtime_secs(&right);
+    if left_mtime > right_mtime + MTIME_TOLERANCE_SECS {
+        Some("left_to_right")
+    } else if right_mtime > left_mtime + MTIME_TOLERANCE_SECS {
+        Some("right_to_left")
+    } else {
+        None
+    }
+}
+
+fn sync_two_way_preview_inner(
+    left: &str,
+    right: &str,
+    ignore_patterns: Vec<String>,
+    verify_checksums: bool,
+) -> Result<Vec<SyncEntry>, String> {
+    let left_root = expand_tilde(left);
+    let right_root = expand_tilde(right);
+    let left_to_right = sync_preview_inner(
+        left,
+        right,
+        false,
+        ignore_patterns.clone(),
+        verify_checksums,
+    )?;
+    let right_to_left = sync_preview_inner(right, left, false, ignore_patterns, verify_checksums)?;
+    let mut combined: HashMap<String, (Option<SyncEntry>, Option<SyncEntry>)> = HashMap::new();
+    for entry in left_to_right {
+        let rel = entry.rel.clone();
+        combined.entry(rel).or_default().0 = Some(entry);
+    }
+    for entry in right_to_left {
+        let rel = entry.rel.clone();
+        combined.entry(rel).or_default().1 = Some(entry);
+    }
+    let mut out = Vec::with_capacity(combined.len());
+    for (rel, (from_left, from_right)) in combined {
+        let base = from_left
+            .as_ref()
+            .or(from_right.as_ref())
+            .expect("entry exists");
+        let is_dir = base.is_dir;
+        let size = base.size;
+        let action = match (&from_left, &from_right) {
+            (Some(_), None) => "left_to_right",
+            (None, Some(_)) => "right_to_left",
+            (Some(_), Some(_)) => {
+                newer_sync_side(&left_root, &right_root, &rel).unwrap_or("conflict")
+            }
+            (None, None) => unreachable!(),
+        };
+        out.push(SyncEntry {
+            rel,
+            action: action.into(),
+            is_dir,
+            size,
+        });
+    }
+    out.sort_by(|a, b| a.rel.cmp(&b.rel));
     Ok(out)
 }
 
@@ -3260,6 +3600,10 @@ pub fn run() {
             create_finder_alias,
             rename_path,
             move_to_trash,
+            stage_delete_for_undo,
+            undo_staged_delete,
+            finalize_staged_delete,
+            cleanup_expired_undo,
             force_delete_admin,
             path_exists,
             path_is_network,
@@ -3277,6 +3621,7 @@ pub fn run() {
             run_job,
             cancel_job,
             sync_preview,
+            sync_two_way_preview,
             watch_path,
             unwatch_pane,
             search_in_dir,
@@ -3320,7 +3665,8 @@ mod copy_tests {
     use super::{
         copy_file_with_metadata, destination_is_within_source, is_protected_admin_root,
         is_untransferable_file, parse_mount_url, preview_walk_src, remove_source_after_move,
-        search_in_dir, sync_preview_inner, zip_extract_inner, CopyOutcome,
+        search_in_dir, sync_preview_inner, sync_two_way_preview_inner, zip_extract_inner,
+        CopyOutcome,
     };
     use std::ffi::CString;
     use std::os::unix::ffi::OsStrExt;
@@ -3472,7 +3818,7 @@ mod copy_tests {
         let socket = UnixDatagram::bind(src.join("fsmonitor--daemon.ipc")).unwrap();
 
         let mut entries = Vec::new();
-        preview_walk_src(&src, &dst, &src, &mut entries).unwrap();
+        preview_walk_src(&src, &dst, &src, &[], false, &mut entries).unwrap();
         assert!(entries.is_empty());
 
         drop(socket);
@@ -3491,13 +3837,115 @@ mod copy_tests {
         std::fs::write(src.join(".trunk").join("trunk.yaml"), b"keep config").unwrap();
         std::fs::write(src.join(".trunk").join("logs").join("active"), b"ephemeral").unwrap();
 
-        let entries =
-            sync_preview_inner(&src.to_string_lossy(), &dst.to_string_lossy(), true).unwrap();
+        let entries = sync_preview_inner(
+            &src.to_string_lossy(),
+            &dst.to_string_lossy(),
+            true,
+            vec![],
+            false,
+        )
+        .unwrap();
         assert!(entries.iter().any(|entry| entry.rel == ".hidden"));
         assert!(entries.iter().any(|entry| entry.rel == ".trunk/trunk.yaml"));
         assert!(!entries
             .iter()
             .any(|entry| entry.rel.starts_with(".trunk/logs")));
+
+        let _ = std::fs::remove_dir_all(root.parent().unwrap());
+    }
+
+    #[test]
+    fn applies_profile_and_dualbeamignore_patterns_to_both_sides() {
+        let root = tmp_path("ignore-sync-root");
+        let src = root.join("src");
+        let dst = root.join("dst");
+        std::fs::create_dir_all(src.join("cache")).unwrap();
+        std::fs::create_dir_all(dst.join("cache")).unwrap();
+        std::fs::create_dir_all(dst.join("build")).unwrap();
+        std::fs::write(src.join("cache").join("source.tmp"), b"skip").unwrap();
+        std::fs::write(src.join("keep.txt"), b"copy").unwrap();
+        std::fs::write(dst.join("cache").join("target.tmp"), b"keep").unwrap();
+        std::fs::write(dst.join("build").join("old.log"), b"keep").unwrap();
+        std::fs::write(src.join(".dualbeamignore"), "cache/\n*.log\n").unwrap();
+
+        let entries = sync_preview_inner(
+            &src.to_string_lossy(),
+            &dst.to_string_lossy(),
+            true,
+            vec!["build/".into()],
+            false,
+        )
+        .unwrap();
+        assert!(entries.iter().any(|entry| entry.rel == "keep.txt"));
+        assert!(!entries.iter().any(|entry| entry.rel.starts_with("cache/")));
+        assert!(!entries.iter().any(|entry| entry.rel.starts_with("build/")));
+
+        let _ = std::fs::remove_dir_all(root.parent().unwrap());
+    }
+
+    #[test]
+    fn two_way_preview_assigns_directions_and_reports_conflicts() {
+        let root = tmp_path("two-way-sync-root");
+        let left = root.join("left");
+        let right = root.join("right");
+        std::fs::create_dir_all(&left).unwrap();
+        std::fs::create_dir_all(&right).unwrap();
+        std::fs::write(left.join("left-only.txt"), b"left").unwrap();
+        std::fs::write(right.join("right-only.txt"), b"right").unwrap();
+        std::fs::write(left.join("conflict.txt"), b"left version").unwrap();
+        std::fs::write(right.join("conflict.txt"), b"right version is longer").unwrap();
+
+        let entries = sync_two_way_preview_inner(
+            &left.to_string_lossy(),
+            &right.to_string_lossy(),
+            vec![],
+            false,
+        )
+        .unwrap();
+        assert!(entries
+            .iter()
+            .any(|entry| entry.rel == "left-only.txt" && entry.action == "left_to_right"));
+        assert!(entries
+            .iter()
+            .any(|entry| entry.rel == "right-only.txt" && entry.action == "right_to_left"));
+        assert!(entries
+            .iter()
+            .any(|entry| entry.rel == "conflict.txt" && entry.action == "conflict"));
+
+        let _ = std::fs::remove_dir_all(root.parent().unwrap());
+    }
+
+    #[test]
+    fn checksum_mode_detects_equal_size_files_with_different_contents() {
+        let root = tmp_path("checksum-sync-root");
+        let src = root.join("src");
+        let dst = root.join("dst");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::create_dir_all(&dst).unwrap();
+        std::fs::write(src.join("same-size.txt"), b"AAAA").unwrap();
+        std::fs::write(dst.join("same-size.txt"), b"BBBB").unwrap();
+
+        let without_checksums = sync_preview_inner(
+            &src.to_string_lossy(),
+            &dst.to_string_lossy(),
+            false,
+            vec![],
+            false,
+        )
+        .unwrap();
+        assert!(without_checksums.is_empty());
+
+        let with_checksums = sync_preview_inner(
+            &src.to_string_lossy(),
+            &dst.to_string_lossy(),
+            false,
+            vec![],
+            true,
+        )
+        .unwrap();
+        assert!(with_checksums
+            .iter()
+            .any(|entry| entry.rel == "same-size.txt"));
 
         let _ = std::fs::remove_dir_all(root.parent().unwrap());
     }
@@ -3509,6 +3957,27 @@ mod copy_tests {
         let dst = src.join("child").join("source");
 
         assert!(destination_is_within_source(&src, &dst).unwrap());
+
+        let _ = std::fs::remove_dir_all(src.parent().unwrap());
+    }
+
+    #[test]
+    fn rejects_sync_preview_when_target_is_inside_source() {
+        let src = tmp_path("source");
+        std::fs::create_dir_all(src.join("child")).unwrap();
+        let dst = src.join("child").join("source");
+
+        let result = sync_preview_inner(
+            &src.to_string_lossy(),
+            &dst.to_string_lossy(),
+            false,
+            vec![],
+            true,
+        );
+        assert!(matches!(
+            result,
+            Err(error) if error.contains("innerhalb der Quelle")
+        ));
 
         let _ = std::fs::remove_dir_all(src.parent().unwrap());
     }

@@ -1,7 +1,12 @@
 // Orchestriert Datei-Operationen: Konfliktprüfung, Job-Lauf, Refresh.
 import { createSignal } from "solid-js";
 import { state, setState, refreshPane, loadPane } from "./state";
-import { askPrompt, askConfirm, notify, notifyError } from "./components/Dialogs";
+import {
+  askPrompt,
+  askConfirm,
+  notify,
+  notifyError,
+} from "./components/Dialogs";
 import type { Entry, PaneId } from "./types";
 import { t, errMsg } from "./i18n";
 import { isSameOrChildPath, joinPath, splitName, uniqueName } from "./paths";
@@ -12,6 +17,7 @@ import {
   createFile,
   renamePath,
   moveToTrash,
+  stageDeleteForUndo,
   forceDeleteAdmin,
   pathExists,
   pathIsNetwork,
@@ -24,6 +30,7 @@ import {
   type JobKind,
 } from "./ipc";
 import { openSyncDialog } from "./sync";
+import { rememberStagedDelete } from "./undo";
 
 const newJobId = () => `job-${Date.now()}-${Math.floor(Math.random() * 1e6)}`;
 
@@ -38,10 +45,14 @@ export function selectedEntries(pane: PaneId) {
 export type ConflictChoice = "overwrite" | "skip" | "rename" | "cancel";
 export type ConflictPrompt = { count: number; sample: string[] } | null;
 
-export const [conflictPrompt, setConflictPrompt] = createSignal<ConflictPrompt>(null);
+export const [conflictPrompt, setConflictPrompt] =
+  createSignal<ConflictPrompt>(null);
 let pendingResolve: ((c: ConflictChoice) => void) | null = null;
 
-export function askConflict(count: number, sample: string[]): Promise<ConflictChoice> {
+export function askConflict(
+  count: number,
+  sample: string[],
+): Promise<ConflictChoice> {
   setConflictPrompt({ count, sample });
   return new Promise<ConflictChoice>((resolve) => {
     pendingResolve = resolve;
@@ -79,11 +90,13 @@ export async function transferEntries(
   // Ein Ordner darf nie in sich selbst bzw. einen seiner Unterordner kopiert
   // oder verschoben werden. Ohne diese Schranke würde der rekursive Backend-
   // Kopierer seinen gerade erzeugten Zielbaum erneut mitkopieren.
-  const recursiveTarget = srcEntries.find((e) =>
-    e.isDir && isSameOrChildPath(e.path, joinPath(dstCwd, e.name)),
+  const recursiveTarget = srcEntries.find(
+    (e) => e.isDir && isSameOrChildPath(e.path, joinPath(dstCwd, e.name)),
   );
   if (recursiveTarget) {
-    await notifyError(t("jobs.recursiveTarget", { name: recursiveTarget.name }));
+    await notifyError(
+      t("jobs.recursiveTarget", { name: recursiveTarget.name }),
+    );
     return;
   }
 
@@ -98,10 +111,11 @@ export async function transferEntries(
     let choice: ConflictChoice;
     if (conflictMode === "skip") choice = "skip";
     else if (conflictMode === "overwrite") choice = "overwrite";
-    else choice = await askConflict(
-      conflicts.length,
-      conflicts.slice(0, 5).map((p) => p.split("/").pop() || p),
-    );
+    else
+      choice = await askConflict(
+        conflicts.length,
+        conflicts.slice(0, 5).map((p) => p.split("/").pop() || p),
+      );
     if (choice === "cancel") return;
     if (choice === "skip") {
       items = items.filter((i) => !conflicts.includes(i.dst));
@@ -116,7 +130,11 @@ export async function transferEntries(
         if (conflicts.includes(i.dst)) {
           const name = i.dst.split("/").pop()!;
           const fresh = await uniqueName(dstCwd, name);
-          resolved.push({ src: i.src, dst: joinPath(dstCwd, fresh), overwrite: false });
+          resolved.push({
+            src: i.src,
+            dst: joinPath(dstCwd, fresh),
+            overwrite: false,
+          });
         } else {
           resolved.push(i);
         }
@@ -212,16 +230,18 @@ export async function deleteSelected(skipConfirm = false) {
   const pane = state.active;
   const sel = selectedEntries(pane);
   if (sel.length === 0) return;
+  let onNetwork = false;
+  try {
+    onNetwork = await pathIsNetwork(sel[0].path);
+  } catch {}
 
   if (!skipConfirm) {
     // Auf Netzlaufwerken (z. B. HiDrive/WebDAV) gibt es keinen Papierkorb –
     // dort wird direkt und dauerhaft gelöscht. Das in der Bestätigung klar sagen.
-    let onNetwork = false;
-    try {
-      onNetwork = await pathIsNetwork(sel[0].path);
-    } catch {}
     const ok = await askConfirm({
-      title: onNetwork ? t("jobs.trash.deletePermTitle") : t("jobs.trash.title"),
+      title: onNetwork
+        ? t("jobs.trash.deletePermTitle")
+        : t("jobs.trash.title"),
       message: onNetwork
         ? sel.length === 1
           ? t("jobs.trash.permOne", { name: sel[0].name })
@@ -235,7 +255,12 @@ export async function deleteSelected(skipConfirm = false) {
     if (!ok) return;
   }
   try {
-    await moveToTrash(sel.map((e) => e.path));
+    if (onNetwork) {
+      await moveToTrash(sel.map((e) => e.path));
+    } else {
+      const batch = await stageDeleteForUndo(sel.map((e) => e.path));
+      if (batch.items.length > 0) rememberStagedDelete(batch.items);
+    }
   } catch (e) {
     const raw = errMsg(e);
     if (raw.includes("TIMEMACHINE_PROTECTED")) {
@@ -361,7 +386,11 @@ export async function archiveAction() {
   if (sel.length === 0) return;
 
   // Wenn genau ein .zip ausgewählt ist → entpacken
-  if (sel.length === 1 && !sel[0].isDir && sel[0].name.toLowerCase().endsWith(".zip")) {
+  if (
+    sel.length === 1 &&
+    !sel[0].isDir &&
+    sel[0].name.toLowerCase().endsWith(".zip")
+  ) {
     const entry = sel[0];
     const baseName = entry.name.slice(0, -4);
     const target = await uniqueDirName(p.cwd, baseName);
@@ -380,7 +409,10 @@ export async function archiveAction() {
   const name = await uniqueFileName(p.cwd, defaultName);
   const dst = joinPath(p.cwd, name);
   try {
-    await zipCreate(sel.map((e) => e.path), dst);
+    await zipCreate(
+      sel.map((e) => e.path),
+      dst,
+    );
   } catch (err) {
     await notifyError(t("jobs.zipFailed", { msg: errMsg(err) }));
   }

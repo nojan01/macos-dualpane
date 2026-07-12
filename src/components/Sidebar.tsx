@@ -22,6 +22,8 @@ import {
 import { askConfirm, notify, notifyError } from "./Dialogs";
 import { connectToServer } from "../network";
 import { t, errMsg } from "../i18n";
+import { runSyncProfile } from "../sync";
+import { syncProfiles } from "../syncProfiles";
 
 function basename(p: string): string {
   const trimmed = p.endsWith("/") ? p.slice(0, -1) : p;
@@ -260,6 +262,11 @@ export function Sidebar() {
   const onGlobalKey = (ev: KeyboardEvent) => {
     if (ev.key === "Escape") closeMenu();
   };
+  const onOpenFavorite = (ev: Event) => {
+    const idx = (ev as CustomEvent<number>).detail;
+    const favorite = favs()[idx];
+    if (favorite) go(favorite.path);
+  };
 
   onMount(async () => {
     try {
@@ -272,10 +279,12 @@ export function Sidebar() {
     const t = setInterval(refreshVols, 5000);
     window.addEventListener("click", onGlobalClick);
     window.addEventListener("keydown", onGlobalKey);
+    window.addEventListener("dualbeam:open-favorite", onOpenFavorite);
     onCleanup(() => {
       clearInterval(t);
       window.removeEventListener("click", onGlobalClick);
       window.removeEventListener("keydown", onGlobalKey);
+      window.removeEventListener("dualbeam:open-favorite", onOpenFavorite);
     });
   });
 
@@ -451,8 +460,27 @@ export function Sidebar() {
                 ⏏
               </button>
             </div>
-          )}
-        </For>
+            )}
+          </For>
+        <div class="sb-section">{t("sidebar.syncProfiles")}</div>
+        <Show
+          when={syncProfiles().length > 0}
+          fallback={<div class="sb-empty">{t("sidebar.none")}</div>}
+        >
+          <For each={syncProfiles()}>
+            {(profile) => (
+              <button
+                class="sb-item sb-sync-profile"
+                disabled={!!state.job}
+                onClick={() => void runSyncProfile(profile.id)}
+                title={`${profile.src} → ${profile.dst}`}
+              >
+                <span class="sb-icon">⇄</span>
+                <span class="sb-label">{profile.name}</span>
+              </button>
+            )}
+          </For>
+        </Show>
         <Show when={menu()}>
           {(m) => (
             <div

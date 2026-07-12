@@ -34,6 +34,7 @@ notify-debouncer-mini = "0.4"
 zip = { version = "2", default-features = false, features = ["deflate"] }
 libc = "0.2"
 url = "2"
+sha2 = "0.10"
 
 [profile.release]
 codegen-units = 1

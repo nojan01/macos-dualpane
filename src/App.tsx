@@ -62,6 +62,7 @@ import { transferEntries, syncPanes } from "./jobs";
 import { loadPersisted, applyPersisted, attachPersist } from "./persist";
 import { attachWindowState } from "./windowState";
 import { attachPromiseDropHandler } from "./promiseDrop";
+import { cleanupUndoBuffer, undoAction, undoLastAction } from "./undo";
 import type { Entry, PaneId } from "./types";
 
 type TauriDragPos = { x: number; y: number };
@@ -227,6 +228,12 @@ export function App() {
     attachKeymap();
     void attachWindowState();
     void attachPromiseDropHandler();
+    void cleanupUndoBuffer().catch(() => {});
+    const undoCleanupTimer = window.setInterval(
+      () => void cleanupUndoBuffer().catch(() => {}),
+      60_000,
+    );
+    onCleanup(() => window.clearInterval(undoCleanupTimer));
     // Sync-Symbolgruppe an der Pane-Mittellinie ausrichten – reagiert auf
     // Layout-Änderungen (Sidebar/Preview/Split) und Fenstergröße.
     createEffect(() => {
@@ -470,6 +477,14 @@ export function App() {
           title={t("toolbar.refresh")}
         >
           <span class="tb-ico">🔄</span>
+        </button>
+        <button
+          class="tb-glyph"
+          disabled={!undoAction()}
+          onClick={() => void undoLastAction()}
+          title={t("toolbar.undo")}
+        >
+          ↶
         </button>
         <button
           class="tb-glyph"
@@ -795,8 +810,8 @@ export function App() {
       <ConflictDialog />
       <RenameDialog />
       <SearchDialog />
-      <Dialogs />
       <SyncDialog />
+      <Dialogs />
       <PropertiesDialog />
       <AboutDialog />
       <HelpDialog />

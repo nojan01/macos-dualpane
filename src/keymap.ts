@@ -28,6 +28,7 @@ import {
 import { openRenameDialog } from "./rename";
 import { openSearch } from "./components/SearchDialog";
 import { connectToServer } from "./network";
+import { undoAction, undoLastAction } from "./undo";
 import type { PaneId } from "./types";
 
 function parentDir(path: string): string {
@@ -101,6 +102,24 @@ export function attachKeymap() {
 
     const pane = state.active;
     const p = state[pane];
+
+    // Die ersten neun Favoriten sind ohne Maus erreichbar. `code` statt
+    // `key` funktioniert auch bei Tastaturlayouts, bei denen ⌥+Ziffern
+    // Sonderzeichen erzeugen.
+    if (
+      ev.altKey &&
+      !ev.metaKey &&
+      !ev.ctrlKey &&
+      /^Digit[1-9]$/.test(ev.code)
+    ) {
+      ev.preventDefault();
+      window.dispatchEvent(
+        new CustomEvent<number>("dualbeam:open-favorite", {
+          detail: Number(ev.code.slice(-1)) - 1,
+        }),
+      );
+      return;
+    }
 
     switch (ev.key) {
       case "Tab":
@@ -194,6 +213,13 @@ export function attachKeymap() {
     // Cmd-Kombinationen
     if (ev.metaKey) {
       switch (ev.key) {
+        case "z":
+        case "Z":
+          if (undoAction()) {
+            ev.preventDefault();
+            await undoLastAction();
+          }
+          return;
         case ".":
           ev.preventDefault();
           toggleHidden();

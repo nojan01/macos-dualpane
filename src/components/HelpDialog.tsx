@@ -87,6 +87,10 @@ const CONTENT: Record<"de" | "en", { title: string; sections: Section[] }> = {
             desc: "Seitenleiste mit Favoriten, Volumes und Netzwerk ein-/ausblenden.",
           },
           {
+            term: "Favoriten (⌥1–⌥9)",
+            desc: "Öffnet einen der ersten neun Favoriten im aktiven Bereich.",
+          },
+          {
             term: "Im Terminal öffnen",
             desc: "Den aktuellen Ordner im Terminal öffnen.",
           },
@@ -207,6 +211,10 @@ const CONTENT: Record<"de" | "en", { title: string; sections: Section[] }> = {
           {
             term: "Sidebar (⌘B)",
             desc: "Toggle the sidebar with favorites, volumes and network.",
+          },
+          {
+            term: "Favorites (⌥1–⌥9)",
+            desc: "Open one of the first nine favorites in the active pane.",
           },
           {
             term: "Open in Terminal",
