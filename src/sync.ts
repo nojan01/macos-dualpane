@@ -199,6 +199,15 @@ export function setSyncDelete(v: boolean) {
   // Nur den Schalter umlegen – die Extras sind bereits in der Vorschau enthalten,
   // ein erneuter (bei Netzlaufwerken langsamer) Preview-Roundtrip entfällt.
   setSyncDeleteExtra(v);
+  // Ein über die Sidebar gestartetes Profil soll dieselbe Löschentscheidung
+  // verwenden. Bisher war dafür zusätzlich „Profil speichern“ nötig, wodurch
+  // der sichtbar gesetzte Schalter beim nächsten Sidebar-Start wieder verloren
+  // ging. Die Änderung ist klein und wird sofort im aktiven Profil gesichert.
+  const id = activeSyncProfileId();
+  const profile = id
+    ? syncProfiles().find((item) => item.id === id)
+    : undefined;
+  if (profile) saveSyncProfile({ ...profile, deleteExtra: v });
 }
 
 export function setSyncIgnoreText(value: string) {
