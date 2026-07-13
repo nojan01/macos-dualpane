@@ -472,10 +472,7 @@ fn move_to_trash(paths: Vec<String>) -> Result<(), String> {
         // `.Trashes` liegt auf demselben Server, und das Verschieben großer
         // Dateien dorthin scheitert und hinterlässt eine 0-Byte-Leiche. Dort
         // – wie der Finder – direkt und dauerhaft löschen.
-        if path_fstype(&full, &fs)
-            .map(|t| is_network_fstype(&t))
-            .unwrap_or(false)
-        {
+        if is_network_path(&full, &fs) {
             remove_path(&full).map_err(|e| format!("{}: {}", full.display(), e))?;
             continue;
         }
@@ -541,6 +538,7 @@ fn stage_delete_for_undo(paths: Vec<String>) -> Result<UndoDeleteBatch, String> 
     let dir = undo_staging_dir(&token)?;
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     let tm_mounts = tm_mountpoints_canon();
+    let mounts = mount_fs_types();
     let mut originals = Vec::new();
     for raw in paths {
         let original = expand_tilde(&raw);
@@ -551,6 +549,9 @@ fn stage_delete_for_undo(paths: Vec<String>) -> Result<UndoDeleteBatch, String> 
         };
         if is_time_machine_path(&original, &tm_mounts) {
             return Err(format!("TIMEMACHINE_PROTECTED\u{1f}{}", original.display()));
+        }
+        if is_network_path(&original, &mounts) {
+            return Err(format!("NETWORK_DELETE_DIRECT: {}", original.display()));
         }
         let needs_admin = (metadata.st_flags() & PROTECT_MASK) != 0
             || original
@@ -793,6 +794,29 @@ fn is_network_fstype(fstype: &str) -> bool {
     )
 }
 
+fn is_hidrive_webdav_path(path: &Path) -> bool {
+    #[cfg(feature = "hidrive")]
+    {
+        path.starts_with(Path::new("/Volumes").join(HIDRIVE_HOST))
+    }
+    #[cfg(not(feature = "hidrive"))]
+    {
+        let _ = path;
+        false
+    }
+}
+
+fn is_network_path(path: &Path, mounts: &std::collections::HashMap<String, String>) -> bool {
+    // Fallback für macOS WebDAV: In seltenen Fällen liefert die Mount-Tabelle
+    // während eines laufenden Finder-Zugriffs keinen passenden Präfix-Treffer.
+    // Der bekannte HiDrive-Mount darf dann trotzdem nie in den lokalen
+    // Papierkorb/Undo-Ordner verschoben werden.
+    is_hidrive_webdav_path(path)
+        || path_fstype(path, mounts)
+            .map(|fstype| is_network_fstype(&fstype))
+            .unwrap_or(false)
+}
+
 // Ermittelt den Dateisystemtyp eines Pfads über das am längsten passende
 // Mountpoint-Präfix (längster Treffer gewinnt, damit verschachtelte Mounts
 // korrekt erkannt werden).
@@ -815,9 +839,7 @@ fn path_fstype(full: &Path, mounts: &std::collections::HashMap<String, String>) 
 fn path_is_network(path: String) -> bool {
     let full = expand_tilde(&path);
     let mounts = mount_fs_types();
-    path_fstype(&full, &mounts)
-        .map(|f| is_network_fstype(&f))
-        .unwrap_or(false)
+    is_network_path(&full, &mounts)
 }
 
 // IONOS HiDrive WebDAV-Netzwerk-Bookmark (Host, Anzeigename, URL an einer Stelle).

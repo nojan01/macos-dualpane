@@ -34,6 +34,12 @@ import { rememberStagedDelete } from "./undo";
 
 const newJobId = () => `job-${Date.now()}-${Math.floor(Math.random() * 1e6)}`;
 
+// Sicherheitsnetz, falls macOS die WebDAV-Mount-Tabelle kurzzeitig nicht
+// liefert: HiDrive darf nie in den lokalen Papierkorb/Undo-Ordner wandern.
+const isHiDriveWebDavPath = (path: string) =>
+  path === "/Volumes/webdav.hidrive.ionos.com" ||
+  path.startsWith("/Volumes/webdav.hidrive.ionos.com/");
+
 export function selectedEntries(pane: PaneId) {
   const p = state[pane];
   const sel = p.entries.filter((e) => p.selected.has(e.path));
@@ -230,9 +236,9 @@ export async function deleteSelected(skipConfirm = false) {
   const pane = state.active;
   const sel = selectedEntries(pane);
   if (sel.length === 0) return;
-  let onNetwork = false;
+  let onNetwork = sel.some((entry) => isHiDriveWebDavPath(entry.path));
   try {
-    onNetwork = await pathIsNetwork(sel[0].path);
+    onNetwork = (await pathIsNetwork(sel[0].path)) || onNetwork;
   } catch {}
 
   if (!skipConfirm) {
@@ -268,6 +274,13 @@ export async function deleteSelected(skipConfirm = false) {
         title: t("jobs.trash.timeMachine.title"),
         message: t("jobs.trash.timeMachine.message"),
       });
+      await refreshPane(pane);
+      return;
+    }
+    // Auf Netzlaufwerken gibt es keinen sinnvollen Admin-Fallback. Der würde
+    // den Fehler nicht lösen und suggeriert fälschlich ein Rechteproblem.
+    if (onNetwork || raw.includes("NETWORK_DELETE_DIRECT")) {
+      await notifyError(t("common.error", { msg: raw }));
       await refreshPane(pane);
       return;
     }
