@@ -49,6 +49,28 @@ export const en: Record<string, string> = {
   "jobbar.copying": "Copying",
   "jobbar.moving": "Moving",
   "jobbar.deleting": "Deleting",
+  "jobbar.items": "{done} / {total} entries",
+  "jobbar.filesCopied": "{count} files copied",
+  "jobbar.rsync": "rsync (SSH)",
+
+  // Rsync
+  "rsync.title": "Synchronize with HiDrive via rsync",
+  "rsync.description":
+    "The source is synchronized directly with HiDrive over SSH. The password is used only for this transfer and is not stored.",
+  "rsync.localPath": "Local source folder",
+  "rsync.username": "HiDrive username",
+  "rsync.password": "Password",
+  "rsync.host": "rsync server",
+  "rsync.remotePath": "HiDrive destination path",
+  "rsync.deleteExtra": "Delete extra files at destination",
+  "rsync.savePassword": "Save password in macOS Keychain",
+  "rsync.loadPassword": "Load password from Keychain",
+  "rsync.required": "Local folder, username, and password are required.",
+  "rsync.usernameRequired": "Enter the HiDrive username first.",
+  "rsync.passwordMissing": "No password is stored in Keychain for this server and user.",
+  "rsync.start": "Synchronize",
+  "rsync.running": "Synchronizing…",
+  "err.rsyncCancelled": "rsync synchronization was cancelled.",
 
   // Pane
   "pane.filter.placeholder": "Filter (⌘F)",
@@ -223,6 +245,14 @@ export const en: Record<string, string> = {
   "sidebar.rename": "Rename",
   "sidebar.remove": "Remove",
   "sidebar.eject": "Eject",
+  "sidebar.unmount": "Unmount (keep bookmark)",
+  "sidebar.unmountConfirm":
+    "Unmount “{name}”? The bookmark remains visible and can be connected again with one click.",
+  "sidebar.removeNetwork": "Remove completely",
+  "sidebar.removeNetworkTitle": "Remove network drive completely",
+  "sidebar.removeNetworkConfirm":
+    "Unmount “{name}” and remove its saved DualBeam bookmark? Credentials in the macOS Keychain will be kept.",
+  "sidebar.saveNetworkFailed": "Could not save network drive",
   "sidebar.reconnect": "Reconnect",
   "sidebar.ejectTitle": "Eject volume",
   "sidebar.ejectConfirm": 'Eject "{name}"?',
@@ -327,9 +357,16 @@ export const en: Record<string, string> = {
   "sync.extrasPrompt":
     "{count} item(s) exist in the destination but not (any more) in the source. Delete them in the destination too (move to trash)?",
   "sync.start": "Synchronize",
+  "sync.preview": "Create preview",
+  "sync.previewHint":
+    "Settings are applied only when the preview is created.",
+  "sync.deleteExtraHint":
+    "Optional: delete files that exist only in the destination.",
   "sync.selectFolder": "Please select a single folder to synchronize.",
   "sync.preparing":
     "Preparing synchronization – this may take a while on network drives…",
+  "sync.preparingBackground":
+    "Synchronization preview is running in the background. You can keep working.",
   "sync.details": "Show details",
   "sync.actionNew": "New",
   "sync.actionChanged": "Changed",
@@ -340,6 +377,17 @@ export const en: Record<string, string> = {
   "sync.profileSaveLabel": "Profile name",
   "sync.profileDeleteTitle": "Delete sync profile",
   "sync.profileDeleteConfirm": "Delete profile “{name}”?",
+  "sync.transport": "Transfer method",
+  "sync.transportFilesystem": "Directly via mounted drive (WebDAV)",
+  "sync.transportRsync": "rsync over SSH (HiDrive)",
+  "sync.rsyncMountedNote":
+    "HiDrive remains visible over WebDAV. The actual transfer runs directly via rsync/SSH and avoids unreliable WebDAV transfers.",
+  "sync.rsyncDirect":
+    "rsync determines and performs the synchronization directly on HiDrive.",
+  "sync.rsyncDeleteNote":
+    "With the following option, rsync permanently deletes files that exist only on HiDrive.",
+  "sync.rsyncRequired":
+    "rsync requires a server, HiDrive username, destination path, and password. The password can be loaded from Keychain.",
   "sync.ignoreTitle": "Exclusion rules",
   "sync.ignoreHelp":
     "One rule per line. Names, paths, * and ? are supported. .dualbeamignore in the source folder is applied as well.",
@@ -361,7 +409,7 @@ export const en: Record<string, string> = {
   "network.connectServer": "Connect to server…",
   "network.connectTitle": "Connect to server",
   "network.connectLabel":
-    "Server address (SMB or HTTPS WebDAV; e.g. smb://server/share)",
+    "Server address (SMB, HTTPS WebDAV, or rsync://; e.g. rsync://rsync.hidrive.ionos.com/users/name/)",
   "network.connect": "Connect",
   "network.connectFailed": "Connection failed",
   "network.insecureTitle": "Insecure connection",

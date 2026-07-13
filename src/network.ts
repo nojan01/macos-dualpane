@@ -2,6 +2,7 @@ import { state, loadPane, bumpVolumes } from "./state";
 import { mountNetworkUrl } from "./ipc";
 import { askPrompt, askConfirm } from "./components/Dialogs";
 import { t, errMsg } from "./i18n";
+import { openRsyncDialog } from "./components/RsyncDialog";
 
 const SECURE_SCHEMES = new Set(["https:", "smb:"]);
 const INSECURE_SCHEMES = new Set([
@@ -13,6 +14,24 @@ const INSECURE_SCHEMES = new Set([
   "cifs:",
 ]);
 let connecting = false;
+
+/** Akzeptiert zusätzlich den vollständigen, von IONOS dokumentierten
+ * Terminal-Befehl. Damit kann z. B. `rsync -rltDv -e ssh .
+ * jano150@rsync.hidrive.ionos.com:/users/jano150/` direkt in ⌘K eingefügt
+ * werden; für DualBeam werden daraus Host, Benutzer und Zielpfad. */
+function parseIonosRsyncCommand(input: string): {
+  host: string;
+  username: string;
+  remotePath: string;
+} | null {
+  const match = input.trim().match(
+    /(?:^|\s)([A-Za-z0-9._-]+)@([A-Za-z0-9.-]+):(\/[^\s]*)\s*$/,
+  );
+  if (!match) return null;
+  const [, username, host, remotePath] = match;
+  if (!host.toLowerCase().endsWith(".hidrive.ionos.com")) return null;
+  return { username, host, remotePath };
+}
 
 /** Nur direkte lokale IP-Adressen sind für die ausdrücklich unsicheren
  * Protokolle zugelassen. Die finale, maßgebliche Prüfung erfolgt nochmals im
@@ -53,6 +72,16 @@ export async function connectToServer(): Promise<void> {
   const trimmed = input.trim();
   if (!trimmed) return;
 
+  const ionosCommand = parseIonosRsyncCommand(trimmed);
+  if (ionosCommand) {
+    openRsyncDialog(
+      ionosCommand.host,
+      ionosCommand.remotePath,
+      ionosCommand.username,
+    );
+    return;
+  }
+
   let parsed: URL;
   try {
     parsed = new URL(trimmed);
@@ -72,6 +101,19 @@ export async function connectToServer(): Promise<void> {
       okLabel: t("common.ok"),
       cancelLabel: t("common.close"),
     });
+    return;
+  }
+  if (parsed.protocol === "rsync:") {
+    if (!parsed.hostname) {
+      await askConfirm({
+        title: t("network.connectFailed"),
+        message: t("err.network.invalidUrl"),
+        okLabel: t("common.ok"),
+        cancelLabel: t("common.close"),
+      });
+      return;
+    }
+    openRsyncDialog(parsed.hostname, decodeURIComponent(parsed.pathname || "/"));
     return;
   }
   if (

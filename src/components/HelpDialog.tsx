@@ -72,7 +72,7 @@ const CONTENT: Record<"de" | "en", { title: string; sections: Section[] }> = {
           },
           {
             term: "Synchronisieren",
-            desc: "Inhalte beider Bereiche abgleichen (einseitig oder beidseitig).",
+            desc: "Einen Ordner mit einem Zielordner abgleichen – Details siehe „Verzeichnisse synchronisieren“.",
           },
           {
             term: "Mit Server verbinden (⌘K)",
@@ -84,7 +84,7 @@ const CONTENT: Record<"de" | "en", { title: string; sections: Section[] }> = {
           },
           {
             term: "Seitenleiste (⌘B)",
-            desc: "Seitenleiste mit Favoriten, Volumes und Netzwerk ein-/ausblenden.",
+            desc: "Seitenleiste mit Favoriten, Volumes, Netzwerk und Sync-Profilen ein-/ausblenden.",
           },
           {
             term: "Favoriten (⌥1–⌥9)",
@@ -93,6 +93,33 @@ const CONTENT: Record<"de" | "en", { title: string; sections: Section[] }> = {
           {
             term: "Im Terminal öffnen",
             desc: "Den aktuellen Ordner im Terminal öffnen.",
+          },
+        ],
+      },
+      {
+        title: "Verzeichnisse synchronisieren",
+        intro:
+          "Wähle einen Ordner und nutze im Kontextmenü „Synchronisieren → …“. DualBeam erstellt zuerst immer eine Vorschau; erst danach werden die passenden Dateien kopiert oder gelöscht. Bei langsamen Netzlaufwerken läuft die Vorschau im Hintergrund – die App bleibt dabei bedienbar.",
+        items: [
+          {
+            term: "Einweg-Synchronisation",
+            desc: "Die Quelle ist maßgeblich. Neue und geänderte Dateien werden ins Ziel kopiert. Überzählige Dateien im Ziel erscheinen in der Vorschau und werden nur gelöscht, wenn die Option ausdrücklich aktiviert wird.",
+          },
+          {
+            term: "Zwei-Wege-Synchronisation",
+            desc: "Erkennt Änderungen in beide Richtungen. Gleichzeitig oder nicht eindeutig geänderte Dateien erscheinen als Konflikt; wähle dafür die linke Version, die rechte Version oder „Überspringen“. Automatisches Löschen ist in diesem Modus ausgeschaltet.",
+          },
+          {
+            term: "Ausschlussregeln",
+            desc: "Unter „Ausschlussregeln“ gelten eine Regel pro Zeile für relative Pfade auf beiden Seiten. Namen, Pfade sowie * und ? werden unterstützt. Eine Datei .dualbeamignore im Quellordner wird zusätzlich berücksichtigt.",
+          },
+          {
+            term: "SHA-256-Inhaltsprüfung",
+            desc: "Prüft gleich große Dateien zusätzlich anhand ihres vollständigen Inhalts. Das ist sehr langsam, weil Quelle und Ziel komplett gelesen werden – besonders bei großen Ordnern oder Netzlaufwerken. Nur einschalten, wenn Größen- und Zeitstempelvergleich nicht genügt.",
+          },
+          {
+            term: "Sync-Profile",
+            desc: "Ein Profil speichert Quelle, Ziel und Optionen. Es kann im Synchronisationsdialog ausgewählt, aktualisiert oder gelöscht werden. In der Seitenleiste unter „Sync-Profile“ startet ein Klick das gespeicherte Profil unabhängig von den aktuell geöffneten Ordnern. Nicht auflösbare Zwei-Wege-Konflikte werden dabei sicher übersprungen.",
           },
         ],
       },
@@ -108,6 +135,14 @@ const CONTENT: Record<"de" | "en", { title: string; sections: Section[] }> = {
           {
             term: "https:// (WebDAV)",
             desc: "Verschlüsselte WebDAV-Freigaben (z. B. Nextcloud, HiDrive, ownCloud). Beispiel: https://server/webdav.",
+          },
+          {
+            term: "Netzwerk in der Seitenleiste",
+            desc: "Gespeicherte Server erscheinen im Bereich „Netzwerk“. Ein verbundenes Lesezeichen öffnet den Mountpunkt; ein getrenntes verbindet sich per Klick. ↻ verbindet neu. ⏏ ist Stufe 1: Es hängt nur aus und behält das Lesezeichen. × ist Stufe 2: Es hängt aus und entfernt das DualBeam-Lesezeichen dauerhaft. Nicht als Lesezeichen gespeicherte Netzwerk-Volumes erscheinen ebenfalls dort.",
+          },
+          {
+            term: "Löschen auf Netzlaufwerken",
+            desc: "Nicht jedes Netzlaufwerk stellt einen Papierkorb bereit. DualBeam weist darauf hin; das Löschen kann dann endgültig sein.",
           },
           {
             term: "Unsichere lokale Protokolle",
@@ -198,7 +233,7 @@ const CONTENT: Record<"de" | "en", { title: string; sections: Section[] }> = {
           },
           {
             term: "Synchronize",
-            desc: "Reconcile the contents of both panes (one-way or two-way).",
+            desc: "Reconcile a folder with its target folder — see “Folder synchronization” for details.",
           },
           {
             term: "Connect to server (⌘K)",
@@ -210,7 +245,7 @@ const CONTENT: Record<"de" | "en", { title: string; sections: Section[] }> = {
           },
           {
             term: "Sidebar (⌘B)",
-            desc: "Toggle the sidebar with favorites, volumes and network.",
+            desc: "Toggle the sidebar with favorites, volumes, network and sync profiles.",
           },
           {
             term: "Favorites (⌥1–⌥9)",
@@ -219,6 +254,33 @@ const CONTENT: Record<"de" | "en", { title: string; sections: Section[] }> = {
           {
             term: "Open in Terminal",
             desc: "Open the current folder in Terminal.",
+          },
+        ],
+      },
+      {
+        title: "Folder synchronization",
+        intro:
+          "Select a folder and use “Sync → …” in its context menu. DualBeam always builds a preview first; only then are the appropriate files copied or deleted. On slow network shares, the preview runs in the background so the app remains usable.",
+        items: [
+          {
+            term: "One-way synchronization",
+            desc: "The source is authoritative. New and changed files are copied to the target. Extra target files are listed in the preview and are deleted only when that option is explicitly enabled.",
+          },
+          {
+            term: "Two-way synchronization",
+            desc: "Detects changes in both directions. Files changed at the same time or without an unambiguous direction are shown as conflicts; choose the left version, right version, or “Skip”. Automatic deletion is disabled in this mode.",
+          },
+          {
+            term: "Exclusion rules",
+            desc: "Under “Exclusion rules”, enter one rule per line for relative paths on both sides. Names, paths, * and ? are supported. A .dualbeamignore file in the source folder is also applied.",
+          },
+          {
+            term: "SHA-256 content verification",
+            desc: "Also checks same-size files using their complete contents. This is very slow because both source and target are read in full — especially for large folders or network shares. Use it only when size and modification time are not sufficient.",
+          },
+          {
+            term: "Sync profiles",
+            desc: "A profile stores source, target and options. It can be selected, updated or deleted in the synchronization dialog. Clicking a profile in the sidebar’s “Sync profiles” section starts it regardless of the folders currently open in the panes. Unresolved two-way conflicts are skipped safely.",
           },
         ],
       },
@@ -234,6 +296,14 @@ const CONTENT: Record<"de" | "en", { title: string; sections: Section[] }> = {
           {
             term: "https:// (WebDAV)",
             desc: "Encrypted WebDAV shares (e.g. Nextcloud, HiDrive, ownCloud). Example: https://server/webdav.",
+          },
+          {
+            term: "Network in the sidebar",
+            desc: "Saved servers appear in the “Network” section. Clicking a connected bookmark opens its mount point; clicking a disconnected one connects it. ↻ reconnects. ⏏ is stage 1: it only unmounts and keeps the bookmark. × is stage 2: it unmounts and permanently removes the DualBeam bookmark. Network volumes that are not bookmarks appear there as well.",
+          },
+          {
+            term: "Deleting on network shares",
+            desc: "Not every network share provides a Trash. DualBeam warns you when deletion may be permanent.",
           },
           {
             term: "Insecure local protocols",

@@ -109,6 +109,14 @@ export async function listNetworkBookmarks(): Promise<NetworkBookmark[]> {
   return invoke<NetworkBookmark[]>("list_network_bookmarks");
 }
 
+export async function removeNetworkBookmark(url: string): Promise<void> {
+  return invoke<void>("remove_network_bookmark", { url });
+}
+
+export async function rememberNetworkVolume(path: string): Promise<void> {
+  return invoke<void>("remember_network_volume", { path });
+}
+
 export async function mountNetworkUrl(
   url: string,
   allowInsecureLocal = false,
@@ -159,6 +167,38 @@ export async function cancelJob(jobId: string): Promise<void> {
   return invoke<void>("cancel_job", { jobId });
 }
 
+export type RsyncRequest = {
+  jobId: string;
+  localPath: string;
+  host: string;
+  remotePath: string;
+  username: string;
+  password: string;
+  deleteExtra: boolean;
+  excludePatterns: string[];
+};
+
+/** Synchronisiert direkt mit einem rsync-over-SSH-Endpunkt. Das Passwort wird
+ * nur für den laufenden Prozess übergeben und nicht gespeichert. */
+export async function runRsync(request: RsyncRequest): Promise<void> {
+  return invoke<void>("run_rsync", { request });
+}
+
+export async function saveRsyncPassword(
+  host: string,
+  username: string,
+  password: string,
+): Promise<void> {
+  return invoke<void>("save_rsync_password", { host, username, password });
+}
+
+export async function loadRsyncPassword(
+  host: string,
+  username: string,
+): Promise<string | null> {
+  return invoke<string | null>("load_rsync_password", { host, username });
+}
+
 export type SyncAction =
   "copy" | "update" | "delete" | "left_to_right" | "right_to_left" | "conflict";
 export type SyncEntry = {
@@ -202,6 +242,7 @@ export type JobProgress = {
   jobId: string;
   done: number;
   total: number;
+  filesDone: number;
   current: string;
   finished: boolean;
   cancelled: boolean;

@@ -55,9 +55,10 @@ export type AppState = {
   editing: { pane: PaneId; idx: number } | null;
   job: {
     id: string;
-    kind: "copy" | "move" | "delete";
+    kind: "copy" | "move" | "delete" | "rsync";
     done: number;
     total: number;
+    filesDone: number;
     current: string;
   } | null;
 };

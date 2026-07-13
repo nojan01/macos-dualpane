@@ -144,7 +144,7 @@ export async function transferEntries(
   }
 
   const id = newJobId();
-  setState("job", { id, kind, done: 0, total: 0, current: "" });
+  setState("job", { id, kind, done: 0, total: 0, filesDone: 0, current: "" });
   try {
     await runJob(id, kind, items);
   } catch (e) {
@@ -214,7 +214,7 @@ export async function duplicateSelected() {
   }
 
   const id = newJobId();
-  setState("job", { id, kind: "copy", done: 0, total: 0, current: "" });
+  setState("job", { id, kind: "copy", done: 0, total: 0, filesDone: 0, current: "" });
   try {
     await runJob(id, "copy", items);
   } catch (err) {

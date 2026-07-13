@@ -1,6 +1,6 @@
 [package]
 name = "dualbeam"
-version = "0.1.0"
+version = "0.2.0"
 description = "DualBeam — Dual-Pane File Manager für macOS"
 authors = ["N.J."]
 license = "MIT"
@@ -35,6 +35,9 @@ zip = { version = "2", default-features = false, features = ["deflate"] }
 libc = "0.2"
 url = "2"
 sha2 = "0.10"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+security-framework = "3"
 
 [profile.release]
 codegen-units = 1

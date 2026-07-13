@@ -14,6 +14,8 @@ import {
   loadFavorites,
   saveFavorites,
   listNetworkBookmarks,
+  removeNetworkBookmark,
+  rememberNetworkVolume,
   mountNetworkUrl,
   type Volume,
   type Favorite,
@@ -82,9 +84,9 @@ export function Sidebar() {
   async function ejectBookmark(b: NetworkBookmark) {
     if (mounting()) return;
     const confirmed = await askConfirm({
-      title: t("sidebar.eject"),
-      message: t("sidebar.ejectConfirm", { name: b.name }),
-      okLabel: t("sidebar.eject"),
+      title: t("sidebar.unmount"),
+      message: t("sidebar.unmountConfirm", { name: b.name }),
+      okLabel: t("sidebar.unmount"),
       danger: true,
     });
     if (!confirmed) return;
@@ -92,6 +94,37 @@ export function Sidebar() {
     try {
       await ejectVolume(b.mountPath);
       await handleVolumeGone(b.mountPath);
+      await refreshVols();
+    } catch (err) {
+      await askConfirm({
+        title: t("sidebar.ejectFailed"),
+        message: errMsg(err),
+        okLabel: t("common.ok"),
+        cancelLabel: t("common.close"),
+      });
+    } finally {
+      setMounting(null);
+    }
+  }
+
+  async function removeBookmark(b: NetworkBookmark) {
+    if (mounting()) return;
+    const confirmed = await askConfirm({
+      title: t("sidebar.removeNetworkTitle"),
+      message: t("sidebar.removeNetworkConfirm", { name: b.name }),
+      okLabel: t("sidebar.removeNetwork"),
+      danger: true,
+    });
+    if (!confirmed) return;
+    setMounting(b.url);
+    try {
+      // Stufe 2 umfasst auch Stufe 1: Ein verbundenes Volume wird zuerst
+      // sauber ausgehängt, erst dann verschwindet das Lesezeichen.
+      if (b.connected) {
+        await ejectVolume(b.mountPath);
+        await handleVolumeGone(b.mountPath);
+      }
+      await removeNetworkBookmark(b.url);
       await refreshVols();
     } catch (err) {
       await askConfirm({
@@ -237,20 +270,30 @@ export function Sidebar() {
   }
 
   async function doEject(vol: Volume) {
+    const isNetwork = vol.kind === "network";
     const ok = await askConfirm({
-      title: t("sidebar.ejectTitle"),
-      message: t("sidebar.ejectConfirm", { name: vol.name }),
-      okLabel: t("sidebar.eject"),
+      title: isNetwork ? t("sidebar.unmount") : t("sidebar.ejectTitle"),
+      message: isNetwork
+        ? t("sidebar.unmountConfirm", { name: vol.name })
+        : t("sidebar.ejectConfirm", { name: vol.name }),
+      okLabel: isNetwork ? t("sidebar.unmount") : t("sidebar.eject"),
       danger: true,
     });
     if (!ok) return;
     try {
+      // Ein bislang nur flüchtig angezeigtes Netzlaufwerk wird vor dem
+      // Aushängen als Lesezeichen gespeichert. Dadurch bleibt es danach in
+      // der Sidebar sichtbar und lässt sich wieder verbinden.
+      if (isNetwork) await rememberNetworkVolume(vol.path);
       await ejectVolume(vol.path);
       await handleVolumeGone(vol.path);
       await refreshVols();
     } catch (err) {
       await askConfirm({
-        title: t("sidebar.ejectFailed"),
+        title:
+          isNetwork
+            ? t("sidebar.saveNetworkFailed")
+            : t("sidebar.ejectFailed"),
         message: errMsg(err),
         okLabel: t("common.ok"),
         cancelLabel: t("common.close"),
@@ -421,13 +464,25 @@ export function Sidebar() {
                 </button>
                 <button
                   class="sb-eject"
-                  title={t("sidebar.eject")}
+                  title={t("sidebar.unmount")}
                   onClick={(ev) => {
                     ev.stopPropagation();
                     void ejectBookmark(b);
                   }}
                 >
                   ⏏
+                </button>
+              </Show>
+              <Show when={mounting() !== b.url}>
+                <button
+                  class="sb-eject sb-remove"
+                  title={t("sidebar.removeNetwork")}
+                  onClick={(ev) => {
+                    ev.stopPropagation();
+                    void removeBookmark(b);
+                  }}
+                >
+                  ×
                 </button>
               </Show>
             </div>
@@ -449,9 +504,9 @@ export function Sidebar() {
             >
               <span class="sb-icon">🌐</span>
               <span class="sb-label">{v.name}</span>
-              <button
-                class="sb-eject"
-                title={t("sidebar.eject")}
+                <button
+                  class="sb-eject"
+                  title={t("sidebar.unmount")}
                 onClick={(ev) => {
                   ev.stopPropagation();
                   void doEject(v);

@@ -772,6 +772,13 @@ export function Pane(props: { id: PaneId }) {
                   </div>
                 </Show>
                 <div class="ctx-sep" />
+                <div class="ctx-item" onClick={() => void actNewFolder()}>
+                  {t("pane.ctx.newFolder")}
+                </div>
+                <div class="ctx-item" onClick={() => void actNewFile()}>
+                  {t("pane.ctx.newFile")}
+                </div>
+                <div class="ctx-sep" />
                 <div class="ctx-item" onClick={() => void actArchive()}>
                   {isZipSel() ? t("pane.ctx.extract") : t("pane.ctx.zip")}
                 </div>

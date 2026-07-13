@@ -32,6 +32,7 @@ import { SyncDialog } from "./components/SyncDialog";
 import { PropertiesDialog } from "./components/PropertiesDialog";
 import { JobBar } from "./components/JobBar";
 import { AboutDialog, openAbout } from "./components/AboutDialog";
+import { RsyncDialog } from "./components/RsyncDialog";
 import { HelpDialog, openHelp } from "./components/HelpDialog";
 import {
   loadPane,
@@ -251,8 +252,15 @@ export function App() {
     // Dock-Badge bei laufenden Jobs.
     createEffect(() => {
       const job = state.job;
-      const label =
-        job && job.total > 0 ? `${job.done}/${job.total}` : job ? "…" : null;
+      const label = job
+        ? job.kind === "rsync"
+          ? job.filesDone > 0
+            ? String(job.filesDone)
+            : "↻"
+          : job.total > 0
+            ? `${job.done}/${job.total}`
+            : "…"
+        : null;
       if (label === lastDockBadge) return;
       lastDockBadge = label;
       void setDockBadge(label).catch(() => {});
@@ -268,6 +276,7 @@ export function App() {
           ...state.job,
           done: p.done,
           total: p.total,
+          filesDone: p.filesDone,
           current: p.current,
         });
       }
@@ -811,6 +820,7 @@ export function App() {
       <RenameDialog />
       <SearchDialog />
       <SyncDialog />
+      <RsyncDialog />
       <Dialogs />
       <PropertiesDialog />
       <AboutDialog />

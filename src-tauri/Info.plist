@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>NSDesktopFolderUsageDescription</key>
+  <string>DualBeam benötigt Zugriff auf den Schreibtisch, um Dateien anzuzeigen und zu verwalten.</string>
+  <key>NSDocumentsFolderUsageDescription</key>
+  <string>DualBeam benötigt Zugriff auf Dokumente, um Dateien anzuzeigen und zu verwalten.</string>
+  <key>NSDownloadsFolderUsageDescription</key>
+  <string>DualBeam benötigt Zugriff auf Downloads, um Dateien anzuzeigen und zu verwalten.</string>
+  <key>NSRemovableVolumesUsageDescription</key>
+  <string>DualBeam benötigt Zugriff auf externe Laufwerke, um Dateien zu verwalten.</string>
+  <key>NSNetworkVolumesUsageDescription</key>
+  <string>DualBeam benötigt Zugriff auf Netzlaufwerke, um Dateien zu verwalten und zu synchronisieren.</string>
+</dict>
+</plist>

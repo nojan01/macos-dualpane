@@ -113,7 +113,7 @@ spctl -a -vvv -t install \
   src-tauri/target/release/bundle/macos/DualBeam.app
 
 xcrun stapler validate \
-  src-tauri/target/release/bundle/dmg/DualBeam_0.1.0_aarch64.dmg
+  src-tauri/target/release/bundle/dmg/DualBeam_0.2.0_aarch64.dmg
 ```
 
 ---
@@ -149,4 +149,3 @@ Es gibt zwei Build-Varianten, gesteuert über das Cargo-Feature `hidrive`:
 > Hinweis: Sollen beide Varianten parallel auf demselben Mac installierbar sein,
 > in `src-tauri/tauri.conf.json` für die öffentliche Version ggf. eigene
 > `identifier`/`productName` vergeben (sonst überschreiben sie sich gegenseitig).
-

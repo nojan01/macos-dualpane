@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::cell::Cell;
 use std::collections::HashMap;
-use std::io::{Read, Write};
+use std::io::{BufReader, Read, Write};
 use std::net::IpAddr;
 use std::process::{Command, Stdio};
 
@@ -10,7 +10,7 @@ mod promise_drag;
 use notify_debouncer_mini::notify::RecommendedWatcher;
 use notify_debouncer_mini::{new_debouncer, notify::RecursiveMode, Debouncer};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, UNIX_EPOCH};
 use tauri::{AppHandle, Emitter, Manager, State};
@@ -888,7 +888,47 @@ pub struct NetworkBookmark {
     pub connected: bool,
 }
 
-fn known_network_bookmarks() -> Vec<(String, String, String)> {
+#[derive(Deserialize, Serialize, Default)]
+#[serde(default)]
+struct NetworkBookmarkSettings {
+    removed_urls: Vec<String>,
+    bookmarks: Vec<StoredNetworkBookmark>,
+}
+
+#[derive(Deserialize, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct StoredNetworkBookmark {
+    name: String,
+    url: String,
+    mount_path: String,
+}
+
+fn network_bookmark_settings_path() -> Option<PathBuf> {
+    dirs::config_dir().map(|base| base.join("dualbeam").join("network-bookmarks.json"))
+}
+
+fn load_network_bookmark_settings() -> NetworkBookmarkSettings {
+    let Some(path) = network_bookmark_settings_path() else {
+        return NetworkBookmarkSettings::default();
+    };
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|text| serde_json::from_str(&text).ok())
+        .unwrap_or_default()
+}
+
+fn save_network_bookmark_settings(settings: &NetworkBookmarkSettings) -> Result<(), String> {
+    let path = network_bookmark_settings_path()
+        .ok_or_else(|| "Netzwerk-Lesezeichen können nicht gespeichert werden".to_string())?;
+    let dir = path
+        .parent()
+        .ok_or_else(|| "Ungültiger Einstellungsordner".to_string())?;
+    std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    let text = serde_json::to_string_pretty(settings).map_err(|e| e.to_string())?;
+    std::fs::write(path, text).map_err(|e| e.to_string())
+}
+
+fn builtin_network_bookmarks() -> Vec<(String, String, String)> {
     // (name, url, expected mount path)
     #[cfg(feature = "hidrive")]
     {
@@ -905,6 +945,109 @@ fn known_network_bookmarks() -> Vec<(String, String, String)> {
     }
 }
 
+fn known_network_bookmarks() -> Vec<(String, String, String)> {
+    let settings = load_network_bookmark_settings();
+    let mut bookmarks: Vec<(String, String, String)> = builtin_network_bookmarks()
+        .into_iter()
+        .filter(|(_, url, _)| !settings.removed_urls.contains(url))
+        .collect();
+    for bookmark in settings.bookmarks {
+        if !settings.removed_urls.contains(&bookmark.url)
+            && !bookmarks.iter().any(|(_, url, _)| url == &bookmark.url)
+        {
+            bookmarks.push((bookmark.name, bookmark.url, bookmark.mount_path));
+        }
+    }
+    bookmarks
+}
+
+/// Liest für jeden Mountpoint die Quelle und den Dateisystemtyp aus. Die
+/// Quelle enthält bei macOS-Netzmounts die erneute Verbindungs-URL bzw. den
+/// SMB-Pfad und wird nur für Lesezeichen verwendet.
+fn mount_source_and_fstype() -> HashMap<String, (String, String)> {
+    let mut map = HashMap::new();
+    if let Ok(out) = Command::new("/sbin/mount").output() {
+        if out.status.success() {
+            let text = String::from_utf8_lossy(&out.stdout);
+            for line in text.lines() {
+                let Some(on_idx) = line.find(" on ") else {
+                    continue;
+                };
+                let source = line[..on_idx].trim();
+                let rest = &line[on_idx + 4..];
+                let Some(paren_idx) = rest.rfind(" (") else {
+                    continue;
+                };
+                let mount_path = rest[..paren_idx].trim();
+                let fstype = rest[paren_idx + 2..]
+                    .split(',')
+                    .next()
+                    .unwrap_or("")
+                    .trim()
+                    .trim_end_matches(')');
+                map.insert(
+                    mount_path.to_string(),
+                    (source.to_string(), fstype.to_string()),
+                );
+            }
+        }
+    }
+    map
+}
+
+fn bookmark_url_from_mount_source(source: &str, fstype: &str) -> Option<String> {
+    let candidate = if source.starts_with("//") && fstype == "smbfs" {
+        format!("smb:{source}")
+    } else {
+        source.to_string()
+    };
+    let mut parsed = url::Url::parse(&candidate).ok()?;
+    if parsed.host_str().is_none() {
+        return None;
+    }
+    // Zugangsdaten gehören in den Schlüsselbund, niemals in das gespeicherte
+    // Lesezeichen. Sie würden sonst in der App-Konfiguration landen.
+    let _ = parsed.set_username("");
+    let _ = parsed.set_password(None);
+    Some(parsed.to_string())
+}
+
+fn remember_network_volume_inner(path: &Path) -> Result<(), String> {
+    let mount_path = std::fs::canonicalize(path).map_err(|e| e.to_string())?;
+    let mount_path_str = mount_path.to_string_lossy().into_owned();
+    let (source, fstype) = mount_source_and_fstype()
+        .remove(&mount_path_str)
+        .ok_or_else(|| "Netzlaufwerk ist nicht mehr eingebunden".to_string())?;
+    if !is_network_fstype(&fstype) {
+        return Err("Kein Netzlaufwerk".into());
+    }
+    let url = bookmark_url_from_mount_source(&source, &fstype).ok_or_else(|| {
+        "Verbindungsadresse des Netzlaufwerks konnte nicht ermittelt werden".to_string()
+    })?;
+    let name = mount_path
+        .file_name()
+        .map(|name| volume_display_name(&name.to_string_lossy()))
+        .unwrap_or_else(|| url.clone());
+    let mut settings = load_network_bookmark_settings();
+    settings.removed_urls.retain(|removed| removed != &url);
+    if !builtin_network_bookmarks()
+        .iter()
+        .any(|(_, known_url, _)| known_url == &url)
+    {
+        if let Some(bookmark) = settings.bookmarks.iter_mut().find(|item| item.url == url) {
+            bookmark.name = name;
+            bookmark.mount_path = mount_path_str;
+        } else {
+            settings.bookmarks.push(StoredNetworkBookmark {
+                name,
+                url,
+                mount_path: mount_path_str,
+            });
+        }
+    }
+    save_network_bookmark_settings(&settings)
+}
+
 #[tauri::command]
 fn list_network_bookmarks() -> Result<Vec<NetworkBookmark>, String> {
     let fs = mount_fs_types();
@@ -919,6 +1062,34 @@ fn list_network_bookmarks() -> Result<Vec<NetworkBookmark>, String> {
         });
     }
     Ok(out)
+}
+
+/// Entfernt ein von DualBeam bereitgestelltes Netzwerk-Lesezeichen dauerhaft
+/// aus der Seitenleiste. macOS-Anmeldedaten im Schlüsselbund bleiben bewusst
+/// unberührt; sie gehören dem Betriebssystem und können dort separat verwaltet
+/// werden.
+#[tauri::command]
+fn remove_network_bookmark(url: String) -> Result<(), String> {
+    let is_builtin = builtin_network_bookmarks()
+        .iter()
+        .any(|(_, known_url, _)| known_url == &url);
+    let mut settings = load_network_bookmark_settings();
+    let custom_count = settings.bookmarks.len();
+    settings.bookmarks.retain(|bookmark| bookmark.url != url);
+    if !is_builtin && settings.bookmarks.len() == custom_count {
+        return Err("Unbekanntes Netzwerk-Lesezeichen".into());
+    }
+    if is_builtin && !settings.removed_urls.contains(&url) {
+        settings.removed_urls.push(url);
+    }
+    save_network_bookmark_settings(&settings)
+}
+
+/// Macht ein bereits von macOS gemountetes Netzlaufwerk zu einem DualBeam-
+/// Lesezeichen, damit es nach dem Aushängen in der Seitenleiste bleibt.
+#[tauri::command]
+fn remember_network_volume(path: String) -> Result<(), String> {
+    remember_network_volume_inner(&expand_tilde(&path))
 }
 
 fn is_local_network_address(ip: IpAddr) -> bool {
@@ -1358,12 +1529,410 @@ struct JobItem {
     overwrite: bool,
 }
 
+/// Direkte rsync-over-SSH-Synchronisation. Die Zugangsdaten stammen aus dem
+/// Dialog und werden nicht persistent gespeichert.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RsyncRequest {
+    job_id: String,
+    local_path: String,
+    host: String,
+    remote_path: String,
+    username: String,
+    password: String,
+    delete_extra: bool,
+    exclude_patterns: Vec<String>,
+}
+
+fn valid_rsync_username(value: &str) -> bool {
+    !value.is_empty()
+        && value
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+}
+
+fn valid_rsync_host(value: &str) -> bool {
+    !value.is_empty()
+        && value
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '.'))
+}
+
+fn valid_rsync_path(value: &str) -> bool {
+    value.starts_with('/')
+        && value
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '/' | '-' | '_' | '.'))
+        && !value.split('/').any(|part| part == "..")
+}
+
+fn rsync_askpass_script() -> Result<PathBuf, String> {
+    static NEXT_ASKPASS_ID: AtomicU64 = AtomicU64::new(0);
+    let id = NEXT_ASKPASS_ID.fetch_add(1, Ordering::Relaxed);
+    let path = std::env::temp_dir().join(format!(
+        "dualbeam-rsync-askpass-{}-{id}.sh",
+        std::process::id()
+    ));
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path)
+        .map_err(|e| e.to_string())?;
+    // Das Kennwort selbst liegt nur in der Prozessumgebung des Kindprozesses.
+    // Das Skript enthält keine Zugangsdaten und wird direkt nach rsync entfernt.
+    file.write_all(b"#!/bin/sh\nprintf '%s\\n' \"$DUALBEAM_RSYNC_PASSWORD\"\n")
+        .map_err(|e| e.to_string())?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700))
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(path)
+}
+
+fn rsync_executable() -> PathBuf {
+    // Homebrew installiert die aktuelle rsync-Version auf Apple-Silicon-Macs
+    // unter /opt/homebrew. Sie wird bevorzugt, der mit macOS gelieferte Client
+    // bleibt als kompatibler Fallback erhalten.
+    [
+        "/opt/homebrew/bin/rsync",
+        "/usr/local/bin/rsync",
+        "/usr/bin/rsync",
+    ]
+    .iter()
+    .map(PathBuf::from)
+    .find(|path| path.is_file())
+    .unwrap_or_else(|| PathBuf::from("rsync"))
+}
+
+const RSYNC_KEYCHAIN_SERVICE: &str = "com.nojan.dualbeam.rsync";
+
+fn rsync_keychain_account(host: &str, username: &str) -> Result<String, String> {
+    if !valid_rsync_username(username) || !valid_rsync_host(host) {
+        return Err("Ungültiger rsync-Server oder Benutzername".into());
+    }
+    Ok(format!("{username}@{host}"))
+}
+
+#[tauri::command]
+fn save_rsync_password(host: String, username: String, password: String) -> Result<(), String> {
+    if password.is_empty() {
+        return Err("Leeres rsync-Passwort wird nicht gespeichert".into());
+    }
+    let account = rsync_keychain_account(&host, &username)?;
+    #[cfg(target_os = "macos")]
+    {
+        security_framework::passwords::set_generic_password(
+            RSYNC_KEYCHAIN_SERVICE,
+            &account,
+            password.as_bytes(),
+        )
+        .map_err(|e| e.to_string())
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = account;
+        Err("Der macOS-Schlüsselbund ist nur unter macOS verfügbar".into())
+    }
+}
+
+#[tauri::command]
+fn load_rsync_password(host: String, username: String) -> Result<Option<String>, String> {
+    let account = rsync_keychain_account(&host, &username)?;
+    #[cfg(target_os = "macos")]
+    {
+        match security_framework::passwords::get_generic_password(RSYNC_KEYCHAIN_SERVICE, &account)
+        {
+            Ok(password) => String::from_utf8(password)
+                .map(Some)
+                .map_err(|_| "Ungültiges Kennwort im macOS-Schlüsselbund".to_string()),
+            // Ein fehlender Schlüsselbund-Eintrag ist kein Fehler im Dialog.
+            Err(_) => Ok(None),
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = account;
+        Err("Der macOS-Schlüsselbund ist nur unter macOS verfügbar".into())
+    }
+}
+
+fn emit_rsync_status_line(
+    app: &AppHandle,
+    job_id: &str,
+    fallback_current: &str,
+    line: &[u8],
+    files_done: &mut u64,
+) {
+    let text = String::from_utf8_lossy(line);
+    if let Some(path) = text.trim().strip_prefix("DUALBEAM:") {
+        // Nur dieses eigene, zeilenbasierte rsync-Ereignis zählt eine Datei.
+        // `to-chk` enthält dagegen die gesamte zu prüfende Baumstruktur und
+        // würde fälschlich wie eine Kopiermenge aussehen.
+        *files_done += 1;
+        let _ = app.emit(
+            "job-progress",
+            JobProgress {
+                job_id: job_id.to_string(),
+                done: 0,
+                total: 0,
+                files_done: *files_done,
+                current: if path.is_empty() {
+                    fallback_current.to_string()
+                } else {
+                    path.to_string()
+                },
+                finished: false,
+                cancelled: false,
+                error: None,
+            },
+        );
+    }
+}
+
+#[cfg(unix)]
+fn terminate_rsync_process_group(pid: u32) {
+    // rsync startet ssh als Kindprozess. Ein Signal an die eigene Prozessgruppe
+    // beendet beides zuverlässig, statt eine offene SSH-Verbindung stehen zu
+    // lassen. Fehler sind hier unkritisch: der Prozess kann schon fertig sein.
+    unsafe {
+        let _ = libc::kill(-(pid as i32), libc::SIGTERM);
+    }
+}
+
+fn run_rsync_inner(
+    app: &AppHandle,
+    request: RsyncRequest,
+    cancel: &Arc<AtomicBool>,
+) -> Result<(), String> {
+    if !valid_rsync_username(&request.username) {
+        return Err("Ungültiger rsync-Benutzername".into());
+    }
+    if !valid_rsync_host(&request.host) {
+        return Err("Ungültiger rsync-Server".into());
+    }
+    if !valid_rsync_path(&request.remote_path) {
+        return Err(
+            "Der rsync-Zielpfad muss absolut sein und darf keine '..'-Segmente enthalten".into(),
+        );
+    }
+    if request.password.is_empty() {
+        return Err("Für die rsync-Anmeldung ist ein Passwort erforderlich".into());
+    }
+    let local = expand_tilde(&request.local_path);
+    if !local.is_dir() {
+        return Err(format!(
+            "Lokaler rsync-Quellordner existiert nicht: {}",
+            local.display()
+        ));
+    }
+    let askpass = rsync_askpass_script()?;
+    let remote = format!(
+        "{}@{}:{}",
+        request.username, request.host, request.remote_path
+    );
+    let local_arg = format!("{}/", local.to_string_lossy().trim_end_matches('/'));
+    let mut command = Command::new(rsync_executable());
+    command
+        // Entspricht der von IONOS dokumentierten HiDrive-Empfehlung:
+        // rekursiv, Links und Zeiten erhalten, Verzeichnisse übertragen,
+        // ausführliche Fehlerausgabe. `-a` wäre hier ungeeignet, weil es
+        // zusätzlich Eigentümer, Gruppen und Unix-Rechte setzen möchte.
+        .args(["-rltDv", "--partial", "--out-format=DUALBEAM:%n"])
+        .arg("-e")
+        // Akzeptiert den Hostschlüssel beim allerersten Zugriff und schützt
+        // danach weiterhin vor einem geänderten Schlüssel (MITM-Erkennung).
+        .arg("/usr/bin/ssh -o StrictHostKeyChecking=accept-new")
+        .env("SSH_ASKPASS", &askpass)
+        .env("SSH_ASKPASS_REQUIRE", "force")
+        .env("DISPLAY", "dualbeam:0")
+        .env("DUALBEAM_RSYNC_PASSWORD", request.password)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        // Eigene Prozessgruppe, damit cancel_job rsync und sein ssh-Kind
+        // gemeinsam beenden kann.
+        unsafe {
+            command.pre_exec(|| {
+                if libc::setpgid(0, 0) == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+    }
+    if request.delete_extra {
+        command.arg("--delete");
+    }
+    for pattern in request.exclude_patterns {
+        // Als separates Argument übergeben; rsync interpretiert die Regel,
+        // nicht eine Shell. Damit bleiben gespeicherte Ausschlussmuster wie
+        // `node_modules/` und `*.log` ohne Shell-Injection nutzbar.
+        command.arg("--exclude").arg(pattern);
+    }
+    command.arg(local_arg).arg(&remote);
+    let mut child = command.spawn().map_err(|e| {
+        if e.kind() == std::io::ErrorKind::NotFound {
+            "rsync ist auf diesem Mac nicht verfügbar".to_string()
+        } else {
+            e.to_string()
+        }
+    })?;
+    let pid = child.id();
+    {
+        let mgr: State<JobManager> = app.state();
+        lock_safe(&mgr.rsync_pids).insert(request.job_id.clone(), pid);
+    }
+    let progress_current = format!("rsync: {remote}");
+    let _ = app.emit(
+        "job-progress",
+        JobProgress {
+            job_id: request.job_id.clone(),
+            done: 0,
+            total: 0,
+            files_done: 0,
+            current: progress_current.clone(),
+            finished: false,
+            cancelled: false,
+            error: None,
+        },
+    );
+    if cancel.load(Ordering::SeqCst) {
+        #[cfg(unix)]
+        terminate_rsync_process_group(pid);
+    }
+
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| "rsync-Ausgabe konnte nicht gelesen werden".to_string())?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| "rsync-Fehlerausgabe konnte nicht gelesen werden".to_string())?;
+    let progress_app = app.clone();
+    let progress_job_id = request.job_id.clone();
+    let stdout_reader = std::thread::spawn(move || {
+        let mut reader = BufReader::new(stdout);
+        let mut line = Vec::new();
+        let mut collected = Vec::new();
+        let mut files_done = 0;
+        let mut byte = [0_u8; 1];
+        loop {
+            match reader.read(&mut byte) {
+                Ok(0) | Err(_) => break,
+                Ok(_) if byte[0] == b'\r' || byte[0] == b'\n' => {
+                    if !line.is_empty() {
+                        collected.extend_from_slice(&line);
+                        collected.push(byte[0]);
+                        emit_rsync_status_line(
+                            &progress_app,
+                            &progress_job_id,
+                            &progress_current,
+                            &line,
+                            &mut files_done,
+                        );
+                        line.clear();
+                    }
+                }
+                Ok(_) => line.push(byte[0]),
+            }
+        }
+        if !line.is_empty() {
+            collected.extend_from_slice(&line);
+            emit_rsync_status_line(
+                &progress_app,
+                &progress_job_id,
+                &progress_current,
+                &line,
+                &mut files_done,
+            );
+        }
+        collected
+    });
+    let stderr_reader = std::thread::spawn(move || {
+        let mut text = Vec::new();
+        let mut reader = BufReader::new(stderr);
+        let _ = reader.read_to_end(&mut text);
+        text
+    });
+    let status = child.wait().map_err(|e| e.to_string());
+    let stdout = stdout_reader.join().unwrap_or_default();
+    let stderr = stderr_reader.join().unwrap_or_default();
+    {
+        let mgr: State<JobManager> = app.state();
+        lock_safe(&mgr.rsync_pids).remove(&request.job_id);
+    }
+    let _ = std::fs::remove_file(&askpass);
+    if cancel.load(Ordering::SeqCst) {
+        return Err("err.rsyncCancelled".into());
+    }
+    let status = status?;
+    if status.success() {
+        Ok(())
+    } else {
+        let stderr = String::from_utf8_lossy(&stderr).trim().to_owned();
+        let stdout = String::from_utf8_lossy(&stdout).trim().to_owned();
+        Err(if !stderr.is_empty() {
+            stderr
+        } else if !stdout.is_empty() {
+            stdout
+        } else {
+            format!("rsync wurde mit Status {:?} beendet", status.code())
+        })
+    }
+}
+
+#[tauri::command]
+async fn run_rsync(app: AppHandle, request: RsyncRequest) -> Result<(), String> {
+    if request.job_id.is_empty() {
+        return Err("Ungültige rsync-Jobkennung".into());
+    }
+    let cancel = Arc::new(AtomicBool::new(false));
+    {
+        let mgr: State<JobManager> = app.state();
+        lock_safe(&mgr.cancels).insert(request.job_id.clone(), cancel.clone());
+    }
+    let job_id = request.job_id.clone();
+    let app_for_worker = app.clone();
+    let cancel_for_worker = cancel.clone();
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        run_rsync_inner(&app_for_worker, request, &cancel_for_worker)
+    })
+    .await
+    .map_err(|e| e.to_string())?;
+    {
+        let mgr: State<JobManager> = app.state();
+        lock_safe(&mgr.cancels).remove(&job_id);
+        lock_safe(&mgr.rsync_pids).remove(&job_id);
+    }
+    let _ = app.emit(
+        "job-progress",
+        JobProgress {
+            job_id,
+            done: 0,
+            total: 0,
+            files_done: 0,
+            current: String::new(),
+            finished: true,
+            cancelled: cancel.load(Ordering::SeqCst),
+            error: result.as_ref().err().cloned(),
+        },
+    );
+    result
+}
+
 #[derive(Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 struct JobProgress {
     job_id: String,
     done: u64,
     total: u64,
+    files_done: u64,
     current: String,
     finished: bool,
     cancelled: bool,
@@ -1373,6 +1942,7 @@ struct JobProgress {
 #[derive(Default)]
 pub struct JobManager {
     cancels: Mutex<HashMap<String, Arc<AtomicBool>>>,
+    rsync_pids: Mutex<HashMap<String, u32>>,
 }
 
 #[tauri::command]
@@ -1390,6 +1960,10 @@ struct JobCtx<'a> {
     cancel: &'a Arc<AtomicBool>,
     done: u64,
     total: u64,
+    /// Anzahl tatsächlich kopierter Dateien. Sie läuft auch innerhalb eines
+    /// einzelnen Sync-Ordners weiter, während `done` bewusst nur die
+    /// Vorschau-Einträge zählt.
+    files_done: u64,
     /// Verschachtelungstiefe beim Dereferenzieren von Symlinks (Schleifenschutz,
     /// falls das Ziel-Dateisystem keine Symlinks unterstützt).
     deref_depth: u32,
@@ -1423,6 +1997,7 @@ impl<'a> JobCtx<'a> {
                 job_id: self.job_id.to_string(),
                 done: self.done,
                 total,
+                files_done: self.files_done,
                 current: current.to_string(),
                 finished: false,
                 cancelled: false,
@@ -1559,21 +2134,24 @@ fn copy_file_with_metadata(src: &Path, dst: &Path) -> std::io::Result<()> {
         }
     };
 
-    // Manche Dateisysteme (z. B. WebDAV, FAT, SMB) unterstützen keine ACLs
-    // oder erweiterten Attribute und liefern dann ENOTSUP/EOPNOTSUPP
-    // (os error 45). In dem Fall degradieren wir schrittweise: erst ACL/xattr
-    // weglassen (nur Daten + Zeitstempel/Rechte), zuletzt reine Datenkopie.
-    // Andere Fehler (z. B. Zugriff verweigert) werden sofort weitergereicht.
-    let is_unsupported = |e: &std::io::Error| -> bool {
+    // Manche Ziele unterstützen ACLs oder erweiterte Attribute nicht. Zudem
+    // verweigert macOS für bestimmte, aus Downloads stammende Metadaten (etwa
+    // `com.apple.provenance`) das Setzen mit EPERM. In beiden Fällen bleiben
+    // die Nutzdaten kopierbar, nur die Metadaten müssen ausgelassen werden.
+    // Wir degradieren deshalb schrittweise: erst ACL/xattr weglassen (Daten +
+    // Zeitstempel/Rechte), zuletzt reine Datenkopie. Ein echter Lese- oder
+    // Schreibfehler wird dabei nicht verschluckt: `std::fs::copy` schlägt dann
+    // ebenfalls fehl und wird weitergereicht.
+    let is_metadata_unsupported = |e: &std::io::Error| -> bool {
         matches!(
             e.raw_os_error(),
-            Some(libc::ENOTSUP) | Some(libc::EOPNOTSUPP)
+            Some(libc::ENOTSUP) | Some(libc::EOPNOTSUPP) | Some(libc::EPERM)
         )
     };
 
     match call(COPYFILE_ALL) {
         Ok(()) => return Ok(()),
-        Err(e) if is_unsupported(&e) => {}
+        Err(e) if is_metadata_unsupported(&e) => {}
         Err(e) => return Err(e),
     }
 
@@ -1582,7 +2160,7 @@ fn copy_file_with_metadata(src: &Path, dst: &Path) -> std::io::Result<()> {
     let _ = std::fs::remove_file(dst);
     match call(COPYFILE_DATA | COPYFILE_STAT) {
         Ok(()) => return Ok(()),
-        Err(e) if is_unsupported(&e) => {}
+        Err(e) if is_metadata_unsupported(&e) => {}
         Err(e) => return Err(e),
     }
 
@@ -1671,6 +2249,57 @@ fn copy_file_retry(src: &Path, dst: &Path, cancel: &AtomicBool) -> std::io::Resu
     }
 }
 
+/// Ersetzt eine vorhandene Datei erst, nachdem die neue Version vollständig in
+/// eine temporäre Nachbardatei kopiert wurde. Insbesondere WebDAV-Mounts
+/// quittieren das vorzeitige Löschen einer offenen/gecachten Zieldatei
+/// gelegentlich mit EPERM, obwohl das Hochladen einer neuen Datei erlaubt ist.
+/// Ein Rename innerhalb desselben Verzeichnisses entspricht einem WebDAV MOVE
+/// und vermeidet diesen fehleranfälligen Zwischenzustand.
+fn replace_file_after_copy(src: &Path, dst: &Path, cancel: &AtomicBool) -> std::io::Result<()> {
+    static NEXT_TEMP_FILE_ID: AtomicU64 = AtomicU64::new(0);
+    let parent = dst.parent().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("ungültiger Zielpfad: {}", dst.display()),
+        )
+    })?;
+    let name = dst
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("ungültiger Zieldateiname: {}", dst.display()),
+            )
+        })?;
+    let id = NEXT_TEMP_FILE_ID.fetch_add(1, Ordering::Relaxed);
+    let temp = parent.join(format!(".{name}.dualbeam-{id}.inprogress"));
+
+    copy_file_retry(src, &temp, cancel)?;
+    match std::fs::rename(&temp, dst) {
+        Ok(()) => Ok(()),
+        Err(rename_error) => {
+            // Manche WebDAV-Server erlauben MOVE nur ohne vorhandenes Ziel.
+            // Erst nachdem der Upload erfolgreich war, ist das Entfernen des
+            // alten Ziels als Fallback sicher.
+            if let Err(remove_error) = remove_path(dst) {
+                let _ = std::fs::remove_file(&temp);
+                return Err(std::io::Error::new(
+                    remove_error.kind(),
+                    format!(
+                        "Ziel konnte nach dem Upload nicht ersetzt werden ({rename_error}; {remove_error})"
+                    ),
+                ));
+            }
+            if let Err(error) = std::fs::rename(&temp, dst) {
+                let _ = std::fs::remove_file(&temp);
+                return Err(error);
+            }
+            Ok(())
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum CopyOutcome {
     Copied,
@@ -1731,6 +2360,7 @@ fn copy_recursive(
         {
             match std::os::unix::fs::symlink(&target, dst) {
                 Ok(()) => {
+                    ctx.files_done += 1;
                     ctx.emit(&src.to_string_lossy());
                     Ok(CopyOutcome::Copied)
                 }
@@ -1771,6 +2401,7 @@ fn copy_recursive(
                             } else {
                                 // copyfile folgt dem Symlink und kopiert die Zieldaten.
                                 copy_file_retry(src, dst, ctx.cancel).map(|_| {
+                                    ctx.files_done += 1;
                                     ctx.emit(&src.to_string_lossy());
                                     CopyOutcome::Copied
                                 })
@@ -1811,23 +2442,27 @@ fn copy_recursive(
             let entry = entry?;
             let from = entry.path();
             let to = dst.join(entry.file_name());
-            if copy_recursive(&from, &to, overwrite, ctx)? == CopyOutcome::Skipped {
+            let child_outcome = copy_recursive(&from, &to, overwrite, ctx)
+                .map_err(|e| std::io::Error::new(e.kind(), format!("{}: {e}", from.display())))?;
+            if child_outcome == CopyOutcome::Skipped {
                 outcome = CopyOutcome::Skipped;
             }
         }
         Ok(outcome)
     } else {
-        if dst.exists() {
-            if overwrite {
-                remove_path(dst)?;
-            } else {
-                return Ok(CopyOutcome::Skipped);
-            }
+        let replacing = dst.exists();
+        if replacing && !overwrite {
+            return Ok(CopyOutcome::Skipped);
         }
         if let Some(parent) = dst.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        copy_file_retry(src, dst, ctx.cancel)?;
+        if replacing {
+            replace_file_after_copy(src, dst, ctx.cancel)?;
+        } else {
+            copy_file_retry(src, dst, ctx.cancel)?;
+        }
+        ctx.files_done += 1;
         ctx.emit(&src.to_string_lossy());
         Ok(CopyOutcome::Copied)
     }
@@ -1865,6 +2500,7 @@ async fn run_job(
             cancel: &cancel2,
             done: 0,
             total,
+            files_done: 0,
             deref_depth: 0,
             last_emit: Cell::new(Instant::now()),
             last_reported_done: Cell::new(u64::MAX),
@@ -1930,6 +2566,7 @@ async fn run_job(
             job_id: job_id.clone(),
             done: 0,
             total: 0,
+            files_done: 0,
             current: String::new(),
             finished: true,
             cancelled,
@@ -1943,8 +2580,13 @@ async fn run_job(
 fn cancel_job(app: AppHandle, job_id: String) {
     let mgr: State<JobManager> = app.state();
     let cancel = lock_safe(&mgr.cancels).get(&job_id).cloned();
+    let rsync_pid = lock_safe(&mgr.rsync_pids).get(&job_id).copied();
     if let Some(c) = cancel {
         c.store(true, Ordering::SeqCst);
+    }
+    #[cfg(unix)]
+    if let Some(pid) = rsync_pid {
+        terminate_rsync_process_group(pid);
     }
 }
 
@@ -3609,6 +4251,8 @@ pub fn run() {
             path_is_network,
             list_volumes,
             list_network_bookmarks,
+            remove_network_bookmark,
+            remember_network_volume,
             mount_network_url,
             app_version,
             set_menu_language,
@@ -3619,6 +4263,9 @@ pub fn run() {
             quick_look,
             check_conflicts,
             run_job,
+            run_rsync,
+            save_rsync_password,
+            load_rsync_password,
             cancel_job,
             sync_preview,
             sync_two_way_preview,
@@ -3663,16 +4310,16 @@ pub fn run() {
 #[cfg(all(test, target_os = "macos"))]
 mod copy_tests {
     use super::{
-        copy_file_with_metadata, destination_is_within_source, is_protected_admin_root,
-        is_untransferable_file, parse_mount_url, preview_walk_src, remove_source_after_move,
-        search_in_dir, sync_preview_inner, sync_two_way_preview_inner, zip_extract_inner,
-        CopyOutcome,
+        bookmark_url_from_mount_source, copy_file_with_metadata, destination_is_within_source,
+        is_protected_admin_root, is_untransferable_file, parse_mount_url, preview_walk_src,
+        remove_source_after_move, replace_file_after_copy, search_in_dir, sync_preview_inner,
+        sync_two_way_preview_inner, zip_extract_inner, CopyOutcome,
     };
     use std::ffi::CString;
     use std::os::unix::ffi::OsStrExt;
     use std::os::unix::net::UnixDatagram;
     use std::path::PathBuf;
-    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
     static TEST_PATH_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
@@ -3777,6 +4424,27 @@ mod copy_tests {
         copy_file_with_metadata(&src, &dst).expect("copy sollte bestehende Datei ersetzen");
         assert_eq!(std::fs::read(&dst).unwrap(), b"neuer Inhalt");
 
+        let _ = std::fs::remove_dir_all(src.parent().unwrap());
+    }
+
+    #[test]
+    fn replaces_existing_file_only_after_copy_succeeds() {
+        let src = tmp_path("replacement-source.txt");
+        let dst = src.parent().unwrap().join("replacement-destination.txt");
+        std::fs::write(&src, b"new version").unwrap();
+        std::fs::write(&dst, b"old version").unwrap();
+
+        replace_file_after_copy(&src, &dst, &AtomicBool::new(false))
+            .expect("bestehende Datei sollte ersetzt werden");
+
+        assert_eq!(std::fs::read(&dst).unwrap(), b"new version");
+        assert!(!src
+            .parent()
+            .unwrap()
+            .read_dir()
+            .unwrap()
+            .filter_map(Result::ok)
+            .any(|entry| entry.file_name().to_string_lossy().contains(".inprogress")));
         let _ = std::fs::remove_dir_all(src.parent().unwrap());
     }
 
@@ -4065,6 +4733,19 @@ mod copy_tests {
         assert_eq!(
             parse_mount_url("smb://alice:secret@nas.local/share", false).unwrap_err(),
             "err.network.credentials"
+        );
+    }
+
+    #[test]
+    fn derives_bookmark_urls_without_mount_credentials() {
+        assert_eq!(
+            bookmark_url_from_mount_source("https://alice@cloud.example/webdav", "webdav")
+                .as_deref(),
+            Some("https://cloud.example/webdav")
+        );
+        assert_eq!(
+            bookmark_url_from_mount_source("//guest@nas.local/share", "smbfs").as_deref(),
+            Some("smb://nas.local/share")
         );
     }
 

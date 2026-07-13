@@ -9,6 +9,14 @@ export type SyncProfile = {
   ignorePatterns: string;
   mode: "oneWay" | "twoWay";
   verifyChecksums: boolean;
+  /** Dateisystem nutzt das eingebundene Ziel direkt. rsync überträgt per SSH. */
+  transport: "filesystem" | "rsync";
+  /** Zugangsdaten ohne Passwort; dieses liegt ausschließlich im Schlüsselbund. */
+  rsync?: {
+    host: string;
+    username: string;
+    remotePath: string;
+  };
 };
 
 const KEY = "dualbeam:sync-profiles:v1";
@@ -35,6 +43,18 @@ function load(): SyncProfile[] {
             : "",
         mode: profile.mode === "twoWay" ? "twoWay" : "oneWay",
         verifyChecksums: !!profile.verifyChecksums,
+        transport: profile.transport === "rsync" ? "rsync" : "filesystem",
+        rsync:
+          profile.rsync &&
+          typeof profile.rsync.host === "string" &&
+          typeof profile.rsync.username === "string" &&
+          typeof profile.rsync.remotePath === "string"
+            ? {
+                host: profile.rsync.host,
+                username: profile.rsync.username,
+                remotePath: profile.rsync.remotePath,
+              }
+            : undefined,
       }));
   } catch {
     return [];
