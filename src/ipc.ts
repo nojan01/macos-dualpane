@@ -53,6 +53,13 @@ export async function moveToTrash(paths: string[]): Promise<void> {
   return invoke<void>("move_to_trash", { paths });
 }
 
+export async function runNetworkDelete(
+  jobId: string,
+  paths: string[],
+): Promise<void> {
+  return invoke<void>("run_network_delete", { jobId, paths });
+}
+
 export type UndoDeleteItem = { original: string; staged: string };
 export type UndoDeleteBatch = { token: string; items: UndoDeleteItem[] };
 

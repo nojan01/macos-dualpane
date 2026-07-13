@@ -10,6 +10,8 @@ import {
   loadRsyncPassword,
   saveRsyncPassword,
   moveToTrash,
+  pathIsNetwork,
+  runNetworkDelete,
   type SyncEntry,
 } from "./ipc";
 import type { PaneId } from "./types";
@@ -557,18 +559,27 @@ export async function confirmSync() {
       await runJob(id, "copy", items);
     }
     if (deletes.length > 0) {
-      // Löschen läuft als einzelner Batch-Aufruf ohne Fortschrittsereignisse –
-      // die Statusleiste soll trotzdem "Löschen" (nicht "Kopieren") anzeigen.
+      const deletePaths = deletes.map((e) => joinPath(s.dst, e.rel));
+      let targetIsNetwork =
+        s.dst === "/Volumes/webdav.hidrive.ionos.com" ||
+        s.dst.startsWith("/Volumes/webdav.hidrive.ionos.com/");
+      try {
+        targetIsNetwork = (await pathIsNetwork(s.dst)) || targetIsNetwork;
+      } catch {}
       setState("job", {
         id,
         kind: "delete",
         done: 0,
-        total: deletes.length,
+        total: targetIsNetwork ? 0 : deletes.length,
         filesDone: 0,
         current: "",
       });
-      await moveToTrash(deletes.map((e) => joinPath(s.dst, e.rel)));
-      setState("job", "done", deletes.length);
+      if (targetIsNetwork) {
+        await runNetworkDelete(id, deletePaths);
+      } else {
+        await moveToTrash(deletePaths);
+        setState("job", "done", deletes.length);
+      }
     }
   } catch (e) {
     await notifyError(t("common.error", { msg: errMsg(e) }));

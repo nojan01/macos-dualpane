@@ -16,7 +16,7 @@ import {
   createDir,
   createFile,
   renamePath,
-  moveToTrash,
+  runNetworkDelete,
   stageDeleteForUndo,
   forceDeleteAdmin,
   pathExists,
@@ -262,7 +262,16 @@ export async function deleteSelected(skipConfirm = false) {
   }
   try {
     if (onNetwork) {
-      await moveToTrash(sel.map((e) => e.path));
+      const id = newJobId();
+      setState("job", {
+        id,
+        kind: "delete",
+        done: 0,
+        total: 0,
+        filesDone: 0,
+        current: "",
+      });
+      await runNetworkDelete(id, sel.map((e) => e.path));
     } else {
       const batch = await stageDeleteForUndo(sel.map((e) => e.path));
       if (batch.items.length > 0) rememberStagedDelete(batch.items);
@@ -304,6 +313,7 @@ export async function deleteSelected(skipConfirm = false) {
       }
     }
   }
+  setState("job", null);
   await refreshPane(pane);
 }
 

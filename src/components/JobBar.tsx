@@ -17,7 +17,11 @@ export function JobBar() {
             <div class="bar">
               <div
                 class="bar-fill jobbar-fill"
-                classList={{ indeterminate: j().kind === "rsync" }}
+                classList={{
+                  indeterminate:
+                    j().kind === "rsync" ||
+                    (j().kind === "delete" && j().total === 0),
+                }}
                 ref={(el) =>
                   createEffect(() =>
                     el.style.setProperty("--pct", `${pct()}%`),

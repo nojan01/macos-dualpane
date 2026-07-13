@@ -2086,6 +2086,177 @@ fn remove_path(p: &Path) -> std::io::Result<()> {
     }
 }
 
+/// Kontext für einen rekursiven Löschvorgang auf einem Netzlaufwerk. WebDAV
+/// kann einen einzelnen DELETE-Aufruf nicht unterbrechen, aber zwischen zwei
+/// Einträgen wird der Abbruch zuverlässig geprüft. Damit bleibt nach
+/// „Abbrechen" nur der bereits entfernte Teilbaum gelöscht.
+struct DeleteCtx<'a> {
+    app: &'a AppHandle,
+    job_id: &'a str,
+    cancel: &'a Arc<AtomicBool>,
+    done: u64,
+    last_emit: Cell<Instant>,
+}
+
+impl<'a> DeleteCtx<'a> {
+    fn check_cancelled(&self) -> std::io::Result<()> {
+        if self.cancel.load(Ordering::SeqCst) {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::Interrupted,
+                "Löschen abgebrochen",
+            ))
+        } else {
+            Ok(())
+        }
+    }
+
+    fn removed(&mut self, path: &Path) {
+        self.done += 1;
+        // Bei sehr großen node_modules-Bäumen nicht für jede Datei ein
+        // Webview-Update senden. Der erste und der letzte Eintrag bleiben
+        // trotzdem unmittelbar sichtbar.
+        if self.done == 1 || self.last_emit.get().elapsed() >= Duration::from_millis(125) {
+            self.last_emit.set(Instant::now());
+            let _ = self.app.emit(
+                "job-progress",
+                JobProgress {
+                    job_id: self.job_id.to_string(),
+                    done: self.done,
+                    total: 0,
+                    files_done: self.done,
+                    current: path.to_string_lossy().into_owned(),
+                    finished: false,
+                    cancelled: false,
+                    error: None,
+                },
+            );
+        }
+    }
+}
+
+fn remove_path_cancellable(p: &Path, ctx: &mut DeleteCtx<'_>) -> std::io::Result<()> {
+    ctx.check_cancelled()?;
+    let meta = match std::fs::symlink_metadata(p) {
+        Ok(meta) => meta,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(err) => return Err(err),
+    };
+
+    if meta.is_dir() && !meta.file_type().is_symlink() {
+        let entries = std::fs::read_dir(p)?;
+        for entry in entries {
+            ctx.check_cancelled()?;
+            let entry = match entry {
+                Ok(entry) => entry,
+                // WebDAV-Listings können gerade gelöschte Einträge noch
+                // enthalten. Der Eintrag ist bereits weg und wird übersprungen.
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(err) => return Err(err),
+            };
+            match remove_path_cancellable(&entry.path(), ctx) {
+                Ok(()) => {}
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+                Err(err) => return Err(err),
+            }
+        }
+        match std::fs::remove_dir(p) {
+            Ok(()) => {}
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(err) => return Err(err),
+        }
+    } else {
+        match std::fs::remove_file(p) {
+            Ok(()) => {}
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(err) => return Err(err),
+        }
+    }
+    ctx.removed(p);
+    Ok(())
+}
+
+/// Löscht dauerhaft auf Netzlaufwerken mit einem abbrechbaren Job. Lokale
+/// Löschungen verwenden weiterhin den Papierkorb und laufen nicht hierdurch.
+#[tauri::command]
+async fn run_network_delete(
+    app: AppHandle,
+    job_id: String,
+    paths: Vec<String>,
+) -> Result<(), String> {
+    if job_id.is_empty() || paths.is_empty() {
+        return Err("Ungültiger Löschauftrag".into());
+    }
+    let cancel = Arc::new(AtomicBool::new(false));
+    {
+        let mgr: State<JobManager> = app.state();
+        lock_safe(&mgr.cancels).insert(job_id.clone(), cancel.clone());
+    }
+    let app_for_worker = app.clone();
+    let job_id_for_worker = job_id.clone();
+    let cancel_for_worker = cancel.clone();
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        let mut ctx = DeleteCtx {
+            app: &app_for_worker,
+            job_id: &job_id_for_worker,
+            cancel: &cancel_for_worker,
+            done: 0,
+            last_emit: Cell::new(Instant::now()),
+        };
+        // Den Job unmittelbar sichtbar machen, auch wenn das erste WebDAV-
+        // Listing mehrere Sekunden benötigt.
+        let _ = ctx.app.emit(
+            "job-progress",
+            JobProgress {
+                job_id: ctx.job_id.to_string(),
+                done: 0,
+                total: 0,
+                files_done: 0,
+                current: String::new(),
+                finished: false,
+                cancelled: false,
+                error: None,
+            },
+        );
+        for raw in paths {
+            if cancel_for_worker.load(Ordering::SeqCst) {
+                break;
+            }
+            let path = expand_tilde(&raw);
+            if let Err(err) = remove_path_cancellable(&path, &mut ctx) {
+                if cancel_for_worker.load(Ordering::SeqCst)
+                    && err.kind() == std::io::ErrorKind::Interrupted
+                {
+                    break;
+                }
+                return Err(format!("{}: {}", path.display(), err));
+            }
+        }
+        Ok(())
+    })
+    .await
+    .map_err(|err| err.to_string())?;
+    {
+        let mgr: State<JobManager> = app.state();
+        lock_safe(&mgr.cancels).remove(&job_id);
+    }
+    let cancelled = cancel.load(Ordering::SeqCst);
+    let error = result.as_ref().err().cloned();
+    let _ = app.emit(
+        "job-progress",
+        JobProgress {
+            job_id: job_id.clone(),
+            done: 0,
+            total: 0,
+            files_done: 0,
+            current: String::new(),
+            finished: true,
+            cancelled,
+            error,
+        },
+    );
+    result
+}
+
 /// Sockets, FIFOs und Geräte sind keine kopierbaren Dateien. Dazu zählt etwa
 /// Gits lokaler File-Monitor-Socket `.git/fsmonitor--daemon.ipc`: `copyfile`
 /// kann ihn nicht lesen und bricht mit EOPNOTSUPP ab. Symlinks bleiben bewusst
@@ -4342,6 +4513,7 @@ pub fn run() {
             create_finder_alias,
             rename_path,
             move_to_trash,
+            run_network_delete,
             stage_delete_for_undo,
             undo_staged_delete,
             finalize_staged_delete,
