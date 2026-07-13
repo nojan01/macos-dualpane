@@ -6,6 +6,7 @@ import {
   syncTwoWayPreview,
   runJob,
   runRsync,
+  cancelJob,
   loadRsyncPassword,
   saveRsyncPassword,
   moveToTrash,
@@ -57,6 +58,7 @@ const [activeSyncProfileId, setActiveSyncProfileId] = createSignal<
 // Eine abgebrochene oder durch eine neue Vorschau ersetzte IPC-Antwort darf
 // den Dialog nicht wieder öffnen oder dessen Ergebnisse überschreiben.
 let previewGeneration = 0;
+let activePreviewId: string | null = null;
 
 export {
   syncDialog,
@@ -113,6 +115,8 @@ async function reloadPreview() {
   const s = syncDialog();
   if (!s) return;
   const generation = ++previewGeneration;
+  const previewId = `preview-${newJobId()}`;
+  activePreviewId = previewId;
   setSyncPreviewReady(false);
   // Bei rsync ist ein WebDAV-Vergleich nicht verlässlich und für den Ablauf
   // auch nicht nötig: rsync ermittelt seine Differenzen direkt am Server.
@@ -132,12 +136,14 @@ async function reloadPreview() {
     const preview =
       syncMode() === "twoWay"
         ? await syncTwoWayPreview(
+            previewId,
             s.src,
             s.dst,
             ignorePatternList(),
             syncVerifyChecksums(),
           )
         : await syncPreview(
+            previewId,
             s.src,
             s.dst,
             true,
@@ -169,6 +175,7 @@ async function reloadPreview() {
     await notifyError(t("common.error", { msg: errMsg(e) }));
     cancelSync();
   } finally {
+    if (activePreviewId === previewId) activePreviewId = null;
     if (generation === previewGeneration) setSyncLoading(false);
   }
 }
@@ -394,6 +401,10 @@ export async function deleteCurrentSyncProfile() {
 
 export function cancelSync() {
   previewGeneration += 1;
+  if (activePreviewId) {
+    void cancelJob(activePreviewId);
+    activePreviewId = null;
+  }
   setSyncDialog(null);
   setSyncEntries([]);
   setSyncPreviewReady(false);

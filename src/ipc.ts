@@ -209,6 +209,7 @@ export type SyncEntry = {
 };
 
 export async function syncPreview(
+  previewId: string,
   src: string,
   dst: string,
   deleteExtra: boolean,
@@ -216,6 +217,7 @@ export async function syncPreview(
   verifyChecksums = false,
 ): Promise<SyncEntry[]> {
   return invoke<SyncEntry[]>("sync_preview", {
+    previewId,
     src,
     dst,
     deleteExtra,
@@ -225,12 +227,14 @@ export async function syncPreview(
 }
 
 export async function syncTwoWayPreview(
+  previewId: string,
   left: string,
   right: string,
   ignorePatterns: string[] = [],
   verifyChecksums = false,
 ): Promise<SyncEntry[]> {
   return invoke<SyncEntry[]>("sync_two_way_preview", {
+    previewId,
     left,
     right,
     ignorePatterns,

@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::io::{BufReader, Read, Write};
 use std::net::IpAddr;
@@ -15,6 +15,38 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, UNIX_EPOCH};
 use tauri::{AppHandle, Emitter, Manager, State};
 use walkdir::WalkDir;
+
+// Eine Sync-Vorschau läuft auf einem Blocking-Thread. Der Dialog kann jedoch
+// schon geschlossen werden, während WebDAV noch ein sehr großes Verzeichnis
+// einliest. Der Thread-lokale Abbruchschalter sorgt dafür, dass dieser Scan
+// zeitnah endet und seine offenen Verzeichnis-Handles freigibt.
+thread_local! {
+    static SYNC_PREVIEW_CANCEL: RefCell<Option<Arc<AtomicBool>>> = const { RefCell::new(None) };
+}
+
+fn check_sync_preview_cancelled() -> Result<(), String> {
+    let cancelled = SYNC_PREVIEW_CANCEL.with(|slot| {
+        slot.borrow()
+            .as_ref()
+            .map(|cancel| cancel.load(Ordering::SeqCst))
+            .unwrap_or(false)
+    });
+    if cancelled {
+        Err("Synchronisationsvorschau abgebrochen".into())
+    } else {
+        Ok(())
+    }
+}
+
+fn run_cancellable_preview<T>(
+    cancel: Arc<AtomicBool>,
+    work: impl FnOnce() -> Result<T, String>,
+) -> Result<T, String> {
+    SYNC_PREVIEW_CANCEL.with(|slot| *slot.borrow_mut() = Some(cancel));
+    let result = work();
+    SYNC_PREVIEW_CANCEL.with(|slot| *slot.borrow_mut() = None);
+    result
+}
 
 /// Sperrt einen Mutex und übernimmt im Poison-Fall den inneren Guard,
 /// statt zu panicen. Verhindert Folgeabstürze, falls ein Thread beim
@@ -2787,6 +2819,12 @@ fn symlink_metadata_retry(path: &Path) -> std::io::Result<std::fs::Metadata> {
 fn read_dir_retry(path: &Path) -> std::io::Result<Vec<std::fs::DirEntry>> {
     let mut attempt: u32 = 0;
     loop {
+        if check_sync_preview_cancelled().is_err() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Interrupted,
+                "Synchronisationsvorschau abgebrochen",
+            ));
+        }
         let res = std::fs::read_dir(path)
             .and_then(|rd| rd.collect::<std::io::Result<Vec<std::fs::DirEntry>>>());
         match res {
@@ -2814,6 +2852,7 @@ fn preview_compare_file(
     verify_checksums: bool,
     out: &mut Vec<SyncEntry>,
 ) -> Result<(), String> {
+    check_sync_preview_cancelled()?;
     // Effektive Quell-Metadaten bestimmen: Symlinks folgen, um mit einem ggf.
     // dereferenzierten Ziel (Netzlaufwerk ohne Symlink-Support) zu vergleichen.
     let is_symlink = link_meta.file_type().is_symlink();
@@ -2913,8 +2952,10 @@ fn preview_walk_src(
     verify_checksums: bool,
     out: &mut Vec<SyncEntry>,
 ) -> Result<(), String> {
+    check_sync_preview_cancelled()?;
     let entries = read_dir_retry(cur).map_err(|e| format!("Quelle lesen fehlgeschlagen: {e}"))?;
     for entry in entries {
+        check_sync_preview_cancelled()?;
         let p = entry.path();
         let rel = match p.strip_prefix(src_root) {
             Ok(r) => r,
@@ -3006,8 +3047,10 @@ fn preview_walk_dst(
     ignore_patterns: &[String],
     out: &mut Vec<SyncEntry>,
 ) -> Result<(), String> {
+    check_sync_preview_cancelled()?;
     let entries = read_dir_retry(cur).map_err(|e| format!("Ziel lesen fehlgeschlagen: {e}"))?;
     for entry in entries {
+        check_sync_preview_cancelled()?;
         let p = entry.path();
         let rel = match p.strip_prefix(dst_root) {
             Ok(r) => r,
@@ -3073,23 +3116,39 @@ fn preview_walk_dst(
 /// führen im Ernstfall zum Abbruch statt zu falschen Zahlen.
 #[tauri::command]
 async fn sync_preview(
+    app: AppHandle,
+    preview_id: String,
     src: String,
     dst: String,
     delete_extra: bool,
     ignore_patterns: Vec<String>,
     verify_checksums: bool,
 ) -> Result<Vec<SyncEntry>, String> {
+    if preview_id.is_empty() {
+        return Err("Ungültige Vorschaukennung".into());
+    }
+    let cancel = Arc::new(AtomicBool::new(false));
+    {
+        let mgr: State<JobManager> = app.state();
+        lock_safe(&mgr.cancels).insert(preview_id.clone(), cancel.clone());
+    }
     // Der Verzeichnis-Abgleich kann auf langsamen Netzlaufwerken (WebDAV/HiDrive,
     // SMB) sehr lange dauern. Als synchroner Befehl liefe er auf dem Haupt-Thread
     // und würde die gesamte Oberfläche einfrieren (macOS-Beachball) – der
     // Vorbereitungs-Hinweis im Dialog könnte gar nicht erst gezeichnet werden.
     // Deshalb wird die eigentliche Arbeit auf einem Blocking-Thread ausgeführt,
     // sodass die UI weiterhin reagiert und den Hinweis anzeigt.
-    tauri::async_runtime::spawn_blocking(move || {
-        sync_preview_inner(&src, &dst, delete_extra, ignore_patterns, verify_checksums)
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        run_cancellable_preview(cancel, || {
+            sync_preview_inner(&src, &dst, delete_extra, ignore_patterns, verify_checksums)
+        })
     })
-    .await
-    .map_err(|e| e.to_string())?
+    .await;
+    {
+        let mgr: State<JobManager> = app.state();
+        lock_safe(&mgr.cancels).remove(&preview_id);
+    }
+    result.map_err(|e| e.to_string())?
 }
 
 fn sync_preview_inner(
@@ -3099,6 +3158,7 @@ fn sync_preview_inner(
     extra_ignore_patterns: Vec<String>,
     verify_checksums: bool,
 ) -> Result<Vec<SyncEntry>, String> {
+    check_sync_preview_cancelled()?;
     let src_root = expand_tilde(src);
     let dst_root = expand_tilde(dst);
     if !src_root.is_dir() {
@@ -3146,16 +3206,32 @@ fn sync_preview_inner(
 /// Eintrag ein expliziter Konflikt für die Benutzerentscheidung.
 #[tauri::command]
 async fn sync_two_way_preview(
+    app: AppHandle,
+    preview_id: String,
     left: String,
     right: String,
     ignore_patterns: Vec<String>,
     verify_checksums: bool,
 ) -> Result<Vec<SyncEntry>, String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        sync_two_way_preview_inner(&left, &right, ignore_patterns, verify_checksums)
+    if preview_id.is_empty() {
+        return Err("Ungültige Vorschaukennung".into());
+    }
+    let cancel = Arc::new(AtomicBool::new(false));
+    {
+        let mgr: State<JobManager> = app.state();
+        lock_safe(&mgr.cancels).insert(preview_id.clone(), cancel.clone());
+    }
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        run_cancellable_preview(cancel, || {
+            sync_two_way_preview_inner(&left, &right, ignore_patterns, verify_checksums)
+        })
     })
-    .await
-    .map_err(|e| e.to_string())?
+    .await;
+    {
+        let mgr: State<JobManager> = app.state();
+        lock_safe(&mgr.cancels).remove(&preview_id);
+    }
+    result.map_err(|e| e.to_string())?
 }
 
 fn newer_sync_side(left_root: &Path, right_root: &Path, rel: &str) -> Option<&'static str> {
@@ -3181,6 +3257,7 @@ fn sync_two_way_preview_inner(
     ignore_patterns: Vec<String>,
     verify_checksums: bool,
 ) -> Result<Vec<SyncEntry>, String> {
+    check_sync_preview_cancelled()?;
     let left_root = expand_tilde(left);
     let right_root = expand_tilde(right);
     let left_to_right = sync_preview_inner(
@@ -3191,6 +3268,7 @@ fn sync_two_way_preview_inner(
         verify_checksums,
     )?;
     let right_to_left = sync_preview_inner(right, left, false, ignore_patterns, verify_checksums)?;
+    check_sync_preview_cancelled()?;
     let mut combined: HashMap<String, (Option<SyncEntry>, Option<SyncEntry>)> = HashMap::new();
     for entry in left_to_right {
         let rel = entry.rel.clone();
