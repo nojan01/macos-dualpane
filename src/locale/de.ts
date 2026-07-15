@@ -23,6 +23,7 @@ export const de: Record<string, string> = {
   "toolbar.terminal": "Terminal hier öffnen",
   "toolbar.columns": "Erweiterte Ansicht (Spalten)",
   "toolbar.compare": "Vergleichs-Modus (links/rechts)",
+  "toolbar.follow": "Folgemodus: Ordnerklick öffnet ihn im anderen Pane",
   "toolbar.dragCopy": "Maus-Drag: Kopieren (Alt = Verschieben)",
   "toolbar.dragMove": "Maus-Drag: Verschieben (Alt = Kopieren)",
   "toolbar.themeTitle":

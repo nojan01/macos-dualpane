@@ -42,6 +42,7 @@ import {
   refreshPane,
   forceRefreshAll,
   toggleCompareMode,
+  toggleFollowMode,
   toggleHidden,
 } from "./state";
 import {
@@ -620,6 +621,49 @@ export function App() {
               stroke="#cfeefc"
               stroke-width="1.4"
               stroke-linecap="round"
+            />
+          </svg>
+        </button>
+        <button
+          class="tb-glyph"
+          classList={{ active: state.followMode }}
+          onClick={() => toggleFollowMode()}
+          title={t("toolbar.follow")}
+        >
+          <svg viewBox="0 0 24 24" width="21" height="21" aria-hidden="true">
+            <rect
+              x="1"
+              y="4"
+              width="8"
+              height="16"
+              rx="1.6"
+              fill="#f5c86a"
+              stroke="#b8862a"
+              stroke-width="1.1"
+            />
+            <rect
+              x="15"
+              y="4"
+              width="8"
+              height="16"
+              rx="1.6"
+              fill="#ffe9b0"
+              stroke="#b8862a"
+              stroke-width="1.1"
+            />
+            <path
+              d="M9.5 12 h4"
+              stroke="#8a5a10"
+              stroke-width="1.6"
+              stroke-linecap="round"
+            />
+            <path
+              d="M12 9.5 L14.5 12 L12 14.5"
+              fill="none"
+              stroke="#8a5a10"
+              stroke-width="1.6"
+              stroke-linecap="round"
+              stroke-linejoin="round"
             />
           </svg>
         </button>

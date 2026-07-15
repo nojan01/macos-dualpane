@@ -48,6 +48,7 @@ export type AppState = {
   helpVisible: boolean;
   extendedView: boolean;
   compareMode: boolean;
+  followMode: boolean;
   syncMode: "nav" | "merge";
   sidebarWidth: number;
   previewWidth: number;
@@ -100,6 +101,7 @@ export const [state, setState] = createStore<AppState>({
   helpVisible: false,
   extendedView: false,
   compareMode: false,
+  followMode: false,
   syncMode: "nav",
   sidebarWidth: 200,
   previewWidth: 280,
@@ -322,6 +324,7 @@ export function selectOnly(pane: PaneId, idx: number) {
   const sel = new Set<string>([e.path]);
   setState(pane, { selected: sel, cursor: idx, anchor: idx });
   bumpSel();
+  followFrom(pane);
 }
 
 export function toggleSelect(pane: PaneId, idx: number) {
@@ -403,6 +406,38 @@ export function toggleHelp() {
 
 export function toggleCompareMode() {
   setState("compareMode", (v) => !v);
+}
+
+let followTimer: ReturnType<typeof setTimeout> | undefined;
+
+// Folgemodus ("Follow"): Wird im aktiven Pane ein Ordner ausgewählt (per Klick
+// oder Cursor-Taste), öffnet der jeweils andere Pane genau diesen Ordner und
+// zeigt dessen Inhalt. So lässt sich ein Verzeichnisbaum bequem zweispaltig
+// durchblättern, ohne den aktiven Pane zu verlassen.
+export function followFrom(pane: PaneId) {
+  if (!state.followMode) return;
+  const p = state[pane];
+  const e = p.entries[p.cursor];
+  if (!e || !e.isDir) return;
+  // .app-Bundles sind technisch Ordner, sollen aber wie Programme behandelt
+  // und nicht "betreten" werden.
+  if (e.name.toLowerCase().endsWith(".app")) return;
+  const other: PaneId = pane === "left" ? "right" : "left";
+  if (state[other].cwd === e.path) return; // schon dort – kein Reload nötig
+  const target = e.path;
+  // Kleiner Debounce: schnelles Durchscrollen mit den Pfeiltasten soll nicht
+  // für jeden Zwischenschritt ein (evtl. langsames Netz-)listDir auslösen.
+  if (followTimer) clearTimeout(followTimer);
+  followTimer = setTimeout(() => {
+    void loadPane(other, target, { recordHistory: false });
+  }, 60);
+}
+
+export function toggleFollowMode() {
+  const next = !state.followMode;
+  setState("followMode", next);
+  // Beim Einschalten sofort den aktuell markierten Ordner spiegeln.
+  if (next) followFrom(state.active);
 }
 
 export function compareStatus(
