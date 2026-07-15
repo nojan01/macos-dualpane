@@ -2175,6 +2175,270 @@ fn remove_path_cancellable(p: &Path, ctx: &mut DeleteCtx<'_>) -> std::io::Result
     Ok(())
 }
 
+/// Gemountete WebDAV-Volumes als (Server-URL, Mountpunkt). Anders als
+/// `mount_fs_types` behält diese Variante die Quell-URL, damit ein lokaler
+/// `/Volumes/...`-Pfad in seine entfernte WebDAV-Adresse übersetzt werden kann.
+fn webdav_mounts() -> Vec<(String, PathBuf)> {
+    let mut mounts = Vec::new();
+    if let Ok(out) = Command::new("/sbin/mount").output() {
+        if out.status.success() {
+            let s = String::from_utf8_lossy(&out.stdout);
+            // Format: "<src> on <mountpoint> (<fstype>, ...)"
+            for line in s.lines() {
+                let Some(on_idx) = line.find(" on ") else {
+                    continue;
+                };
+                let src = line[..on_idx].trim();
+                let rest = &line[on_idx + 4..];
+                let Some(paren) = rest.rfind(" (") else {
+                    continue;
+                };
+                let mp = &rest[..paren];
+                let fstype = rest[paren + 2..]
+                    .split(',')
+                    .next()
+                    .unwrap_or("")
+                    .trim()
+                    .trim_end_matches(')');
+                if fstype == "webdav" && (src.starts_with("https://") || src.starts_with("http://"))
+                {
+                    mounts.push((src.to_string(), PathBuf::from(mp)));
+                }
+            }
+        }
+    }
+    mounts
+}
+
+/// Wählt das WebDAV-Volume mit dem längsten passenden Mountpunkt-Präfix.
+fn best_webdav_mount(mounts: &[(String, PathBuf)], path: &Path) -> Option<(String, PathBuf)> {
+    let mut best: Option<(usize, &String, &PathBuf)> = None;
+    for (src, mp) in mounts {
+        if path.starts_with(mp) {
+            let len = mp.as_os_str().len();
+            if best.as_ref().map(|(l, _, _)| len > *l).unwrap_or(true) {
+                best = Some((len, src, mp));
+            }
+        }
+    }
+    best.map(|(_, src, mp)| (src.clone(), mp.clone()))
+}
+
+/// Kodiert ein einzelnes Pfadsegment für eine URL. Nur die von RFC 3986 als
+/// „unreserved" definierten Zeichen bleiben unverändert; alles andere (inkl.
+/// Leerzeichen und Umlaute in UTF-8) wird prozentkodiert.
+fn percent_encode_segment(segment: &str) -> String {
+    let mut out = String::with_capacity(segment.len());
+    for byte in segment.bytes() {
+        let keep = byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~');
+        if keep {
+            out.push(byte as char);
+        } else {
+            out.push('%');
+            out.push_str(&format!("{byte:02X}"));
+        }
+    }
+    out
+}
+
+/// Übersetzt einen lokalen WebDAV-Mountpfad in seine entfernte URL. Für Ordner
+/// wird ein abschließender Schrägstrich gesetzt, sodass der Server das Element
+/// als Collection (rekursiv) löscht.
+fn webdav_remote_url(
+    source_url: &str,
+    mountpoint: &Path,
+    path: &Path,
+    is_dir: bool,
+) -> Option<String> {
+    let rel = path.strip_prefix(mountpoint).ok()?;
+    let mut url = source_url.trim_end_matches('/').to_string();
+    for component in rel.components() {
+        let part = component.as_os_str().to_str()?;
+        if part.is_empty() || part == "/" {
+            continue;
+        }
+        url.push('/');
+        url.push_str(&percent_encode_segment(part));
+    }
+    // Ohne relatives Segment zeigt die URL auf die Mount-Wurzel selbst – das
+    // wäre ein versehentliches Löschen des gesamten Laufwerks. Das lehnen wir ab.
+    if url.len() <= source_url.trim_end_matches('/').len() {
+        return None;
+    }
+    if is_dir {
+        url.push('/');
+    }
+    Some(url)
+}
+
+/// Extrahiert den Hostnamen aus einer `https://host/...`-URL.
+fn webdav_host_from_url(url: &str) -> Option<String> {
+    let after = url.split("://").nth(1)?;
+    let host = after.split('/').next()?;
+    // Möglichen `user@`-Präfix und Port entfernen.
+    let host = host.rsplit('@').next().unwrap_or(host);
+    let host = host.split(':').next().unwrap_or(host);
+    if host.is_empty() {
+        None
+    } else {
+        Some(host.to_string())
+    }
+}
+
+/// Escaped einen Wert für die curl-Konfigurationsdatei (doppelt gequotet).
+fn escape_curl_value(value: &str) -> String {
+    value.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
+/// Liest Benutzernamen und Kennwort des WebDAV-Mounts aus dem macOS-Schlüssel-
+/// bund. Das Kennwort wird über einen separaten Aufruf geholt und nie geloggt.
+#[cfg(target_os = "macos")]
+fn webdav_credentials(host: &str) -> Option<(String, String)> {
+    let attrs = Command::new("/usr/bin/security")
+        .args(["find-internet-password", "-s", host])
+        .output()
+        .ok()?;
+    if !attrs.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&attrs.stdout);
+    let account = text.lines().find_map(|line| {
+        let trimmed = line.trim();
+        let rest = trimmed.strip_prefix("\"acct\"<blob>=\"")?;
+        rest.strip_suffix('"').map(|s| s.to_string())
+    })?;
+    if account.is_empty() {
+        return None;
+    }
+    let pw = Command::new("/usr/bin/security")
+        .args(["find-internet-password", "-s", host, "-a", &account, "-w"])
+        .output()
+        .ok()?;
+    if !pw.status.success() {
+        return None;
+    }
+    let password = String::from_utf8_lossy(&pw.stdout)
+        .strip_suffix('\n')
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| String::from_utf8_lossy(&pw.stdout).to_string());
+    if password.is_empty() {
+        return None;
+    }
+    Some((account, password))
+}
+
+/// Löscht einen Ordner auf einem WebDAV-Laufwerk mit einer einzigen
+/// `DELETE`-Anfrage auf die Collection. Der Server entfernt den gesamten
+/// Unterbaum in einem Schritt (RFC 4918), statt tausende Einzel-Requests über
+/// das gemountete Dateisystem zu senden. Gibt `true` zurück, wenn der Ordner
+/// dadurch vollständig entfernt wurde; andernfalls `false`, damit der Aufrufer
+/// auf das rekursive Einzel-Löschen zurückfällt.
+#[cfg(target_os = "macos")]
+fn webdav_collection_delete(
+    path: &Path,
+    creds_cache: &mut HashMap<String, Option<(String, String)>>,
+    cancel: &Arc<AtomicBool>,
+) -> bool {
+    let Some((source_url, mountpoint)) = best_webdav_mount(&webdav_mounts(), path) else {
+        return false;
+    };
+    let Some(host) = webdav_host_from_url(&source_url) else {
+        return false;
+    };
+    let Some(url) = webdav_remote_url(&source_url, &mountpoint, path, true) else {
+        return false;
+    };
+    let creds = creds_cache
+        .entry(host.clone())
+        .or_insert_with(|| webdav_credentials(&host))
+        .clone();
+    let Some((user, password)) = creds else {
+        return false;
+    };
+    if cancel.load(Ordering::SeqCst) {
+        return false;
+    }
+    // curl liest Ziel und Zugangsdaten aus der Konfiguration auf stdin, damit
+    // das Kennwort weder in der Prozessliste (argv) noch auf der Platte landet.
+    let config = format!(
+        "silent\nshow-error\nrequest = \"DELETE\"\nconnect-timeout = \"30\"\nmax-time = \"900\"\noutput = \"/dev/null\"\nwrite-out = \"%{{http_code}}\"\nurl = \"{}\"\nuser = \"{}:{}\"\n",
+        escape_curl_value(&url),
+        escape_curl_value(&user),
+        escape_curl_value(&password),
+    );
+    let mut command = Command::new("/usr/bin/curl");
+    command
+        .arg("--config")
+        .arg("-")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        unsafe {
+            command.pre_exec(|| {
+                if libc::setpgid(0, 0) == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+    }
+    let mut child = match command.spawn() {
+        Ok(child) => child,
+        Err(_) => return false,
+    };
+    if let Some(mut stdin) = child.stdin.take() {
+        if stdin.write_all(config.as_bytes()).is_err() {
+            let _ = child.kill();
+            let _ = child.wait();
+            return false;
+        }
+    }
+    let pid = child.id();
+    // Warten, aber weiterhin auf Abbruch reagieren: curl (und damit die offene
+    // Verbindung) wird bei Abbruch samt Prozessgruppe beendet.
+    loop {
+        match child.try_wait() {
+            Ok(Some(_status)) => break,
+            Ok(None) => {
+                if cancel.load(Ordering::SeqCst) {
+                    #[cfg(unix)]
+                    terminate_rsync_process_group(pid);
+                    let _ = child.wait();
+                    return false;
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            Err(_) => return false,
+        }
+    }
+    let output = match child.wait_with_output() {
+        Ok(output) => output,
+        Err(_) => return false,
+    };
+    if !output.status.success() {
+        return false;
+    }
+    let code: u16 = String::from_utf8_lossy(&output.stdout)
+        .trim()
+        .parse()
+        .unwrap_or(0);
+    // 2xx = erfolgreich gelöscht, 404 = war bereits weg (idempotent). Alles
+    // andere führt zum sicheren Fallback auf das rekursive Einzel-Löschen.
+    matches!(code, 200 | 201 | 202 | 204 | 207 | 404)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn webdav_collection_delete(
+    _path: &Path,
+    _creds_cache: &mut HashMap<String, Option<(String, String)>>,
+    _cancel: &Arc<AtomicBool>,
+) -> bool {
+    false
+}
+
 /// Löscht dauerhaft auf Netzlaufwerken mit einem abbrechbaren Job. Lokale
 /// Löschungen verwenden weiterhin den Papierkorb und laufen nicht hierdurch.
 #[tauri::command]
@@ -2217,11 +2481,27 @@ async fn run_network_delete(
                 error: None,
             },
         );
+        let mut webdav_creds: HashMap<String, Option<(String, String)>> = HashMap::new();
         for raw in paths {
             if cancel_for_worker.load(Ordering::SeqCst) {
                 break;
             }
             let path = expand_tilde(&raw);
+            // Schnellpfad: Ordner auf einem WebDAV-Laufwerk werden mit einer
+            // einzigen Collection-DELETE-Anfrage serverseitig rekursiv gelöscht.
+            // Das ersetzt zehntausende Einzel-Requests über den Mount. Schlägt
+            // der Versuch fehl (kein WebDAV-Mount, keine Zugangsdaten, Server-
+            // fehler), greift der bewährte rekursive Weg darunter.
+            let is_dir = std::fs::symlink_metadata(&path)
+                .map(|m| m.is_dir() && !m.file_type().is_symlink())
+                .unwrap_or(false);
+            if is_dir && webdav_collection_delete(&path, &mut webdav_creds, &cancel_for_worker) {
+                ctx.removed(&path);
+                continue;
+            }
+            if cancel_for_worker.load(Ordering::SeqCst) {
+                break;
+            }
             if let Err(err) = remove_path_cancellable(&path, &mut ctx) {
                 if cancel_for_worker.load(Ordering::SeqCst)
                     && err.kind() == std::io::ErrorKind::Interrupted
@@ -4583,9 +4863,10 @@ pub fn run() {
 mod copy_tests {
     use super::{
         bookmark_url_from_mount_source, copy_file_with_metadata, destination_is_within_source,
-        is_protected_admin_root, is_untransferable_file, parse_mount_url, preview_walk_src,
-        remove_source_after_move, replace_file_after_copy, search_in_dir, sync_preview_inner,
-        sync_two_way_preview_inner, zip_extract_inner, CopyOutcome,
+        is_protected_admin_root, is_untransferable_file, parse_mount_url, percent_encode_segment,
+        preview_walk_src, remove_source_after_move, replace_file_after_copy, search_in_dir,
+        sync_preview_inner, sync_two_way_preview_inner, webdav_host_from_url, webdav_remote_url,
+        zip_extract_inner, CopyOutcome,
     };
     use std::ffi::CString;
     use std::os::unix::ffi::OsStrExt;
@@ -4629,6 +4910,65 @@ mod copy_tests {
         std::fs::create_dir_all(&p).unwrap();
         p.push(name);
         p
+    }
+
+    #[test]
+    fn percent_encode_keeps_unreserved_and_escapes_rest() {
+        assert_eq!(percent_encode_segment("abcXYZ-._~"), "abcXYZ-._~");
+        assert_eq!(percent_encode_segment("a b"), "a%20b");
+        assert_eq!(percent_encode_segment("f/o"), "f%2Fo");
+        assert_eq!(percent_encode_segment("Ä"), "%C3%84");
+        assert_eq!(percent_encode_segment("100%"), "100%25");
+    }
+
+    #[test]
+    fn webdav_url_translates_directory_with_trailing_slash() {
+        let url = webdav_remote_url(
+            "https://webdav.example.com/",
+            std::path::Path::new("/Volumes/webdav.example.com"),
+            std::path::Path::new("/Volumes/webdav.example.com/Fotos/Neuer Ordner"),
+            true,
+        )
+        .unwrap();
+        assert_eq!(url, "https://webdav.example.com/Fotos/Neuer%20Ordner/");
+    }
+
+    #[test]
+    fn webdav_url_translates_file_without_trailing_slash() {
+        let url = webdav_remote_url(
+            "https://webdav.example.com",
+            std::path::Path::new("/Volumes/dav"),
+            std::path::Path::new("/Volumes/dav/a/b.txt"),
+            false,
+        )
+        .unwrap();
+        assert_eq!(url, "https://webdav.example.com/a/b.txt");
+    }
+
+    #[test]
+    fn webdav_url_rejects_mount_root() {
+        // Ohne relatives Segment darf keine URL entstehen (Schutz vor dem
+        // versehentlichen Löschen des gesamten Laufwerks).
+        assert!(webdav_remote_url(
+            "https://webdav.example.com/",
+            std::path::Path::new("/Volumes/dav"),
+            std::path::Path::new("/Volumes/dav"),
+            true,
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn webdav_host_is_extracted() {
+        assert_eq!(
+            webdav_host_from_url("https://webdav.hidrive.ionos.com/remote.php").as_deref(),
+            Some("webdav.hidrive.ionos.com")
+        );
+        assert_eq!(
+            webdav_host_from_url("https://user@host.example:8443/x").as_deref(),
+            Some("host.example")
+        );
+        assert_eq!(webdav_host_from_url("not-a-url").as_deref(), None);
     }
 
     #[test]
