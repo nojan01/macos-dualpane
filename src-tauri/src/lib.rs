@@ -2095,6 +2095,7 @@ struct DeleteCtx<'a> {
     job_id: &'a str,
     cancel: &'a Arc<AtomicBool>,
     done: u64,
+    total: u64,
     last_emit: Cell<Instant>,
 }
 
@@ -2122,7 +2123,7 @@ impl<'a> DeleteCtx<'a> {
                 JobProgress {
                     job_id: self.job_id.to_string(),
                     done: self.done,
-                    total: 0,
+                    total: self.total,
                     files_done: self.done,
                     current: path.to_string_lossy().into_owned(),
                     finished: false,
@@ -2132,6 +2133,67 @@ impl<'a> DeleteCtx<'a> {
             );
         }
     }
+
+    /// Meldet den Wegfall eines ganzen Teilbaums auf einen Schlag – etwa nach
+    /// einem WebDAV-Collection-DELETE, bei dem der Server den kompletten Ordner
+    /// in einer Anfrage entfernt. `count` ist die vorab gezählte Zahl der
+    /// Einträge dieses Ordners, damit der Fortschritt zur Gesamtzahl passt.
+    fn removed_bulk(&mut self, path: &Path, count: u64) {
+        self.done += count.max(1);
+        self.last_emit.set(Instant::now());
+        let _ = self.app.emit(
+            "job-progress",
+            JobProgress {
+                job_id: self.job_id.to_string(),
+                done: self.done,
+                total: self.total,
+                files_done: self.done,
+                current: path.to_string_lossy().into_owned(),
+                finished: false,
+                cancelled: false,
+                error: None,
+            },
+        );
+    }
+}
+
+/// Zählt vorab alle zu löschenden Einträge (Dateien, Ordner, Symlinks) eines
+/// Pfades – analog zur Vorschau beim Kopieren. So kennt die Statusleiste eine
+/// echte Gesamtzahl statt „?". Symlinks werden nicht verfolgt (sie zählen wie
+/// eine Datei). Reines Auflisten; weit günstiger als das eigentliche Löschen.
+fn count_delete_entries(p: &Path, cancel: &Arc<AtomicBool>) -> std::io::Result<u64> {
+    if cancel.load(Ordering::SeqCst) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::Interrupted,
+            "Zählen abgebrochen",
+        ));
+    }
+    let meta = match std::fs::symlink_metadata(p) {
+        Ok(meta) => meta,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+        Err(err) => return Err(err),
+    };
+    let mut count = 1; // der Knoten selbst
+    if meta.is_dir() && !meta.file_type().is_symlink() {
+        let entries = match std::fs::read_dir(p) {
+            Ok(entries) => entries,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(count),
+            Err(err) => return Err(err),
+        };
+        for entry in entries {
+            let entry = match entry {
+                Ok(entry) => entry,
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(err) => return Err(err),
+            };
+            match count_delete_entries(&entry.path(), cancel) {
+                Ok(n) => count += n,
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+                Err(err) => return Err(err),
+            }
+        }
+    }
+    Ok(count)
 }
 
 fn remove_path_cancellable(p: &Path, ctx: &mut DeleteCtx<'_>) -> std::io::Result<()> {
@@ -2464,6 +2526,7 @@ async fn run_network_delete(
             job_id: &job_id_for_worker,
             cancel: &cancel_for_worker,
             done: 0,
+            total: 0,
             last_emit: Cell::new(Instant::now()),
         };
         // Den Job unmittelbar sichtbar machen, auch wenn das erste WebDAV-
@@ -2481,12 +2544,54 @@ async fn run_network_delete(
                 error: None,
             },
         );
-        let mut webdav_creds: HashMap<String, Option<(String, String)>> = HashMap::new();
-        for raw in paths {
+        // Vorab die Gesamtzahl der Einträge ermitteln – wie die Vorschau beim
+        // Kopieren. Damit zeigen Statusleiste, Fortschrittsbalken und Dock-
+        // Badge einen echten Wert statt „?". Die je Pfad gezählte Menge dient
+        // zugleich dazu, den Fortschritt beim WebDAV-Collection-DELETE (löscht
+        // einen ganzen Ordner in einer Anfrage) korrekt hochzuzählen.
+        let mut planned: Vec<(PathBuf, u64)> = Vec::with_capacity(paths.len());
+        let mut count_ok = true;
+        for raw in &paths {
             if cancel_for_worker.load(Ordering::SeqCst) {
                 break;
             }
-            let path = expand_tilde(&raw);
+            let path = expand_tilde(raw);
+            match count_delete_entries(&path, &cancel_for_worker) {
+                Ok(n) => planned.push((path, n)),
+                // Lässt sich ein Pfad nicht zählen, bleibt die Gesamtzahl offen
+                // (unbestimmter Balken) statt eine falsche Zahl anzuzeigen.
+                Err(_) => {
+                    count_ok = false;
+                    planned.push((path, 0));
+                }
+            }
+        }
+        ctx.total = if count_ok {
+            planned.iter().map(|(_, n)| *n).sum()
+        } else {
+            0
+        };
+        // Gesamtzahl sofort sichtbar machen (done bleibt 0).
+        if ctx.total > 0 {
+            let _ = ctx.app.emit(
+                "job-progress",
+                JobProgress {
+                    job_id: ctx.job_id.to_string(),
+                    done: 0,
+                    total: ctx.total,
+                    files_done: 0,
+                    current: String::new(),
+                    finished: false,
+                    cancelled: false,
+                    error: None,
+                },
+            );
+        }
+        let mut webdav_creds: HashMap<String, Option<(String, String)>> = HashMap::new();
+        for (path, count) in planned {
+            if cancel_for_worker.load(Ordering::SeqCst) {
+                break;
+            }
             // Schnellpfad: Ordner auf einem WebDAV-Laufwerk werden mit einer
             // einzigen Collection-DELETE-Anfrage serverseitig rekursiv gelöscht.
             // Das ersetzt zehntausende Einzel-Requests über den Mount. Schlägt
@@ -2496,7 +2601,7 @@ async fn run_network_delete(
                 .map(|m| m.is_dir() && !m.file_type().is_symlink())
                 .unwrap_or(false);
             if is_dir && webdav_collection_delete(&path, &mut webdav_creds, &cancel_for_worker) {
-                ctx.removed(&path);
+                ctx.removed_bulk(&path, count);
                 continue;
             }
             if cancel_for_worker.load(Ordering::SeqCst) {
@@ -4862,11 +4967,11 @@ pub fn run() {
 #[cfg(all(test, target_os = "macos"))]
 mod copy_tests {
     use super::{
-        bookmark_url_from_mount_source, copy_file_with_metadata, destination_is_within_source,
-        is_protected_admin_root, is_untransferable_file, parse_mount_url, percent_encode_segment,
-        preview_walk_src, remove_source_after_move, replace_file_after_copy, search_in_dir,
-        sync_preview_inner, sync_two_way_preview_inner, webdav_host_from_url, webdav_remote_url,
-        zip_extract_inner, CopyOutcome,
+        bookmark_url_from_mount_source, copy_file_with_metadata, count_delete_entries,
+        destination_is_within_source, is_protected_admin_root, is_untransferable_file,
+        parse_mount_url, percent_encode_segment, preview_walk_src, remove_source_after_move,
+        replace_file_after_copy, search_in_dir, sync_preview_inner, sync_two_way_preview_inner,
+        webdav_host_from_url, webdav_remote_url, zip_extract_inner, CopyOutcome,
     };
     use std::ffi::CString;
     use std::os::unix::ffi::OsStrExt;
@@ -4969,6 +5074,27 @@ mod copy_tests {
             Some("host.example")
         );
         assert_eq!(webdav_host_from_url("not-a-url").as_deref(), None);
+    }
+
+    #[test]
+    fn count_delete_entries_counts_every_node() {
+        let cancel = std::sync::Arc::new(AtomicBool::new(false));
+        // Einzelne Datei => 1
+        let file = tmp_path("solo.txt");
+        std::fs::write(&file, b"x").unwrap();
+        assert_eq!(count_delete_entries(&file, &cancel).unwrap(), 1);
+
+        // Ordnerbaum: root + a + a/b + a/b/f.txt + c.txt = 5 Knoten
+        let root = tmp_path("tree");
+        std::fs::create_dir_all(root.join("a/b")).unwrap();
+        std::fs::write(root.join("a/b/f.txt"), b"1").unwrap();
+        std::fs::write(root.join("c.txt"), b"2").unwrap();
+        assert_eq!(count_delete_entries(&root, &cancel).unwrap(), 5);
+
+        // Nicht existierender Pfad => 0
+        let gone = tmp_path("nope");
+        std::fs::remove_dir_all(gone.parent().unwrap()).ok();
+        assert_eq!(count_delete_entries(&gone, &cancel).unwrap(), 0);
     }
 
     #[test]
