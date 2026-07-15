@@ -23,6 +23,7 @@ export const en: Record<string, string> = {
   "toolbar.terminal": "Open Terminal here",
   "toolbar.columns": "Column view",
   "toolbar.compare": "Compare mode (left/right)",
+  "toolbar.follow": "Follow mode: clicking a folder opens it in the other pane",
   "toolbar.dragCopy": "Mouse drag: copy (Alt = move)",
   "toolbar.dragMove": "Mouse drag: move (Alt = copy)",
   "toolbar.themeTitle": "Theme: {label} — click to switch (Auto/Light/Dark)",
