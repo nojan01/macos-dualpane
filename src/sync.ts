@@ -420,7 +420,6 @@ export async function confirmSync() {
   const mode = syncMode();
   const conflictChoices = syncConflictChoices();
   if (syncTransport() === "filesystem" && !syncPreviewReady()) return;
-  setSyncDialog(null);
 
   if (syncTransport() === "rsync") {
     const host = syncRsyncHost().trim();
@@ -428,9 +427,12 @@ export async function confirmSync() {
     const remotePath = syncRsyncRemotePath().trim();
     const password = syncRsyncPassword();
     if (!host || !username || !remotePath || !password) {
+      // Dialog offen lassen: Die Meldung soll fehlende Pflichtfelder anmahnen,
+      // ohne die bereits gemachten Eingaben zu verwerfen.
       await notifyError(t("sync.rsyncRequired"));
       return;
     }
+    setSyncDialog(null);
     const id = newJobId();
     try {
       if (syncRsyncSavePassword()) {
@@ -468,6 +470,8 @@ export async function confirmSync() {
     }
     return;
   }
+
+  setSyncDialog(null);
 
   if (mode === "twoWay") {
     const leftToRight = entries.filter(

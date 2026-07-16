@@ -584,6 +584,7 @@ export function Pane(props: { id: PaneId }) {
               const cmp = () => compareStatus(id, e);
               return (
                 <div
+                  data-index={idx()}
                   class={`row ${isCursor() ? "cursor" : ""} ${isSel() ? "selected" : ""} ${
                     hoverTarget()?.pane === id &&
                     hoverTarget()?.folderIdx === idx()
