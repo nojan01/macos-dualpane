@@ -84,10 +84,11 @@ function findDropTarget(
   const pane: PaneId = paneIdx === 0 ? "left" : "right";
   const rowEl = (el as HTMLElement).closest(".row") as HTMLElement | null;
   let folderIdx: number | null = null;
-  if (rowEl && rowEl.parentElement) {
-    const rows = Array.from(rowEl.parentElement.querySelectorAll(".row"));
-    const i = rows.indexOf(rowEl);
-    const entry = state[pane].entries[i];
+  if (rowEl) {
+    // data-index trägt den echten Eintrags-Index – bei aktiver Virtualisierung
+    // entspricht die DOM-Position nicht dem Index in state.entries.
+    const i = Number(rowEl.dataset.index);
+    const entry = Number.isInteger(i) ? state[pane].entries[i] : undefined;
     if (entry && entry.isDir) folderIdx = i;
   }
   return { pane, folderIdx };
@@ -250,6 +251,27 @@ export function App() {
     const onResize = () => updateSyncCenter();
     window.addEventListener("resize", onResize);
     onCleanup(() => window.removeEventListener("resize", onResize));
+    // Sammelbecken für Event-Abmeldungen: onCleanup muss synchron (vor dem
+    // ersten await) registriert werden, sonst greift es in Solid nicht.
+    // Kommt eine Abmeldung erst nach dem Dispose an, wird sie sofort ausgeführt.
+    let disposed = false;
+    const unlisteners: Array<() => void> = [];
+    const addUnlisten = (fn: () => void) => {
+      if (disposed) fn();
+      else unlisteners.push(fn);
+    };
+    const refreshTimers = new Map<string, number>();
+    const onWindowDragOver = (ev: DragEvent) => ev.preventDefault();
+    const onWindowDrop = (ev: DragEvent) => ev.preventDefault();
+    onCleanup(() => {
+      disposed = true;
+      for (const fn of unlisteners) fn();
+      unlisteners.length = 0;
+      window.removeEventListener("dragover", onWindowDragOver);
+      window.removeEventListener("drop", onWindowDrop);
+      for (const handle of refreshTimers.values()) window.clearTimeout(handle);
+      refreshTimers.clear();
+    });
     // Dock-Badge bei laufenden Jobs.
     createEffect(() => {
       const job = state.job;
@@ -266,89 +288,102 @@ export function App() {
       lastDockBadge = label;
       void setDockBadge(label).catch(() => {});
     });
-    await listen<JobProgress>("job-progress", (ev) => {
-      const p = ev.payload;
-      if (p.finished) {
-        setState("job", null);
-        return;
-      }
-      if (state.job && state.job.id === p.jobId) {
-        setState("job", {
-          ...state.job,
-          done: p.done,
-          total: p.total,
-          filesDone: p.filesDone,
-          current: p.current,
-        });
-      }
-    });
+    addUnlisten(
+      await listen<JobProgress>("job-progress", (ev) => {
+        const p = ev.payload;
+        if (p.finished) {
+          // Nur den eigenen Job beenden – ein verspätetes "finished" eines
+          // alten Jobs darf die Anzeige eines neuen nicht löschen.
+          if (state.job && state.job.id === p.jobId) setState("job", null);
+          return;
+        }
+        if (state.job && state.job.id === p.jobId) {
+          setState("job", {
+            ...state.job,
+            done: p.done,
+            total: p.total,
+            filesDone: p.filesDone,
+            current: p.current,
+          });
+        }
+      }),
+    );
 
-    const refreshTimers = new Map<string, number>();
-    await listen<PaneChanged>("pane-changed", (ev) => {
-      const { paneId, path } = ev.payload;
-      const pane = paneId as "left" | "right";
-      if (state[pane].cwd !== path) return; // stale
-      const prev = refreshTimers.get(paneId);
-      if (prev) clearTimeout(prev);
-      const handle = window.setTimeout(() => {
-        refreshTimers.delete(paneId);
-        if (state[pane].cwd === path) refreshPane(pane);
-      }, 150);
-      refreshTimers.set(paneId, handle);
-    });
+    addUnlisten(
+      await listen<PaneChanged>("pane-changed", (ev) => {
+        const { paneId, path } = ev.payload;
+        const pane = paneId as "left" | "right";
+        if (state[pane].cwd !== path) return; // stale
+        const prev = refreshTimers.get(paneId);
+        if (prev) clearTimeout(prev);
+        const handle = window.setTimeout(() => {
+          refreshTimers.delete(paneId);
+          if (state[pane].cwd === path) refreshPane(pane);
+        }, 150);
+        refreshTimers.set(paneId, handle);
+      }),
+    );
 
     // Native OS-Datei-Drops (Finder etc.) via Tauri-Events.
     // Verhindert, dass das WebView bei einem nicht abgefangenen Drop
     // zur Datei-URL navigiert (weisser Screen).
-    window.addEventListener("dragover", (ev) => ev.preventDefault());
-    window.addEventListener("drop", (ev) => ev.preventDefault());
+    window.addEventListener("dragover", onWindowDragOver);
+    window.addEventListener("drop", onWindowDrop);
     const cssPos = (p: TauriDragPos) => {
       const dpr = window.devicePixelRatio || 1;
       return { x: p.x / dpr, y: p.y / dpr };
     };
-    await listen<TauriDragPayload>("tauri://drag-enter", (ev) => {
-      const { x, y } = cssPos(ev.payload.position);
-      const t = findDropTarget(x, y);
-      setDragEffect("copy");
-      setHoverTarget(t ? { pane: t.pane, folderIdx: t.folderIdx } : null);
-    });
-    await listen<TauriDragPayload>("tauri://drag-over", (ev) => {
-      const { x, y } = cssPos(ev.payload.position);
-      const t = findDropTarget(x, y);
-      setDragEffect("copy");
-      setHoverTarget(t ? { pane: t.pane, folderIdx: t.folderIdx } : null);
-    });
-    await listen("tauri://drag-leave", () => {
-      setHoverTarget(null);
-      setDragEffect(null);
-    });
-    await listen<TauriDragPayload>("tauri://drag-drop", async (ev) => {
-      const { x, y } = cssPos(ev.payload.position);
-      const t = findDropTarget(x, y);
-      setHoverTarget(null);
-      setDragEffect(null);
-      if (!t) return;
-      let dstCwd = state[t.pane].cwd;
-      if (t.folderIdx !== null) {
-        const folder = state[t.pane].entries[t.folderIdx];
-        if (folder && folder.isDir) dstCwd = folder.path;
-      }
-      if (!dstCwd) return;
-      const entries: Entry[] = ev.payload.paths.map((p) => {
-        const name = p.split("/").pop() || p;
-        return {
-          path: p,
-          name,
-          isDir: false,
-          isSymlink: false,
-          size: 0,
-          mtime: 0,
-          ext: "",
-          hidden: false,
-        } as Entry;
-      });
-      await transferEntries("copy", entries, dstCwd, [t.pane]);
-    });
+    addUnlisten(
+      await listen<TauriDragPayload>("tauri://drag-enter", (ev) => {
+        const { x, y } = cssPos(ev.payload.position);
+        const t = findDropTarget(x, y);
+        setDragEffect("copy");
+        setHoverTarget(t ? { pane: t.pane, folderIdx: t.folderIdx } : null);
+      }),
+    );
+    addUnlisten(
+      await listen<TauriDragPayload>("tauri://drag-over", (ev) => {
+        const { x, y } = cssPos(ev.payload.position);
+        const t = findDropTarget(x, y);
+        setDragEffect("copy");
+        setHoverTarget(t ? { pane: t.pane, folderIdx: t.folderIdx } : null);
+      }),
+    );
+    addUnlisten(
+      await listen("tauri://drag-leave", () => {
+        setHoverTarget(null);
+        setDragEffect(null);
+      }),
+    );
+    addUnlisten(
+      await listen<TauriDragPayload>("tauri://drag-drop", async (ev) => {
+        const { x, y } = cssPos(ev.payload.position);
+        const t = findDropTarget(x, y);
+        setHoverTarget(null);
+        setDragEffect(null);
+        if (!t) return;
+        let dstCwd = state[t.pane].cwd;
+        if (t.folderIdx !== null) {
+          const folder = state[t.pane].entries[t.folderIdx];
+          if (folder && folder.isDir) dstCwd = folder.path;
+        }
+        if (!dstCwd) return;
+        const entries: Entry[] = ev.payload.paths.map((p) => {
+          const name = p.split("/").pop() || p;
+          return {
+            path: p,
+            name,
+            isDir: false,
+            isSymlink: false,
+            size: 0,
+            mtime: 0,
+            ext: "",
+            hidden: false,
+          } as Entry;
+        });
+        await transferEntries("copy", entries, dstCwd, [t.pane]);
+      }),
+    );
 
     const home = await homeDir();
     const persisted = loadPersisted();
@@ -372,19 +407,25 @@ export function App() {
     attachPersist();
 
     // Theme-Wechsel via macOS-Menü
-    await listen<string>("dualbeam://theme", (ev) => {
-      const m = ev.payload as ThemeMode;
-      if (m === "auto" || m === "light" || m === "dark") setThemeMode(m);
-    });
+    addUnlisten(
+      await listen<string>("dualbeam://theme", (ev) => {
+        const m = ev.payload as ThemeMode;
+        if (m === "auto" || m === "light" || m === "dark") setThemeMode(m);
+      }),
+    );
     // Sprach-Wechsel via macOS-Menü
-    await listen<string>("dualbeam://lang", (ev) => {
-      const m = ev.payload as LangMode;
-      if (m === "auto" || m === "de" || m === "en") setLangMode(m);
-    });
+    addUnlisten(
+      await listen<string>("dualbeam://lang", (ev) => {
+        const m = ev.payload as LangMode;
+        if (m === "auto" || m === "de" || m === "en") setLangMode(m);
+      }),
+    );
     // Hilfe via macOS-Menü öffnen
-    await listen("dualbeam://help", () => {
-      void openHelp();
-    });
+    addUnlisten(
+      await listen("dualbeam://help", () => {
+        void openHelp();
+      }),
+    );
     // Natives Menü initial auf die aktuelle Sprache setzen.
     void setMenuLanguage(getResolvedLang()).catch(() => {});
   });

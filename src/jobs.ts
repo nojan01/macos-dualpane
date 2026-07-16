@@ -312,8 +312,11 @@ export async function deleteSelected(skipConfirm = false) {
         await notifyError(t("common.error", { msg: errMsg(e2) }));
       }
     }
+  } finally {
+    // Job-Anzeige in jedem Fall zurücksetzen – auch bei den frühen Returns im
+    // Fehlerpfad. Ein hängender Job-State würde alle weiteren Aktionen blockieren.
+    setState("job", null);
   }
-  setState("job", null);
   await refreshPane(pane);
 }
 

@@ -71,10 +71,11 @@ function findInternalTarget(x: number, y: number, drag: DragPayload): HoverTarge
   const pane: PaneId = paneIdx === 0 ? "left" : "right";
   const rowEl = (el as HTMLElement).closest(".row") as HTMLElement | null;
   let folderIdx: number | null = null;
-  if (rowEl && rowEl.parentElement) {
-    const rows = Array.from(rowEl.parentElement.querySelectorAll(".row"));
-    const i = rows.indexOf(rowEl);
-    const entry = state[pane].entries[i];
+  if (rowEl) {
+    // data-index trägt den echten Eintrags-Index – bei aktiver Virtualisierung
+    // entspricht die DOM-Position nicht dem Index in state.entries.
+    const i = Number(rowEl.dataset.index);
+    const entry = Number.isInteger(i) ? state[pane].entries[i] : undefined;
     if (entry && entry.isDir && !drag.items.some((it) => it.path === entry.path)) {
       folderIdx = i;
     }

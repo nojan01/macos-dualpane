@@ -311,24 +311,32 @@ export function Sidebar() {
     if (favorite) go(favorite.path);
   };
 
-  onMount(async () => {
-    try {
-      setFavs(await loadFavorites());
-    } catch {
-      const home = await homeDir();
-      setFavs([{ name: "Home", icon: "🏠", path: home }]);
-    }
-    await refreshVols();
-    const t = setInterval(refreshVols, 5000);
-    window.addEventListener("click", onGlobalClick);
-    window.addEventListener("keydown", onGlobalKey);
-    window.addEventListener("dualbeam:open-favorite", onOpenFavorite);
+  onMount(() => {
+    // onCleanup synchron registrieren – nach einem await würde Solid die
+    // Registrierung nicht mehr dem Komponenten-Owner zuordnen und Listener
+    // sowie Intervall würden beim Unmount weiterlaufen.
+    let disposed = false;
+    let volTimer: number | undefined;
     onCleanup(() => {
-      clearInterval(t);
+      disposed = true;
+      if (volTimer !== undefined) window.clearInterval(volTimer);
       window.removeEventListener("click", onGlobalClick);
       window.removeEventListener("keydown", onGlobalKey);
       window.removeEventListener("dualbeam:open-favorite", onOpenFavorite);
     });
+    window.addEventListener("click", onGlobalClick);
+    window.addEventListener("keydown", onGlobalKey);
+    window.addEventListener("dualbeam:open-favorite", onOpenFavorite);
+    void (async () => {
+      try {
+        setFavs(await loadFavorites());
+      } catch {
+        const home = await homeDir();
+        if (!disposed) setFavs([{ name: "Home", icon: "🏠", path: home }]);
+      }
+      await refreshVols();
+      if (!disposed) volTimer = window.setInterval(refreshVols, 5000);
+    })();
   });
 
   createEffect(() => {

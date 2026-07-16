@@ -325,7 +325,7 @@ fn open_privacy_settings() -> Result<(), String> {
 #[tauri::command]
 fn create_dir(path: String) -> Result<(), String> {
     let p = expand_tilde(&path);
-    if p.exists() {
+    if path_occupied_no_follow(&p) {
         return Err(format!("err.exists\u{1f}{}", p.display()));
     }
     std::fs::create_dir(&p).map_err(|e| format!("{}: {}", p.display(), e))
@@ -334,7 +334,7 @@ fn create_dir(path: String) -> Result<(), String> {
 #[tauri::command]
 fn create_file(path: String) -> Result<(), String> {
     let p = expand_tilde(&path);
-    if p.exists() {
+    if path_occupied_no_follow(&p) {
         return Err(format!("err.exists\u{1f}{}", p.display()));
     }
     std::fs::OpenOptions::new()
@@ -405,7 +405,7 @@ fn rename_path(old_path: String, new_path: String) -> Result<(), String> {
     if a == b {
         return Ok(());
     }
-    if b.exists() {
+    if path_occupied_no_follow(&b) {
         return Err(format!("err.exists\u{1f}{}", b.display()));
     }
     std::fs::rename(&a, &b).map_err(|e| e.to_string())
@@ -1056,9 +1056,7 @@ fn bookmark_url_from_mount_source(source: &str, fstype: &str) -> Option<String> 
         source.to_string()
     };
     let mut parsed = url::Url::parse(&candidate).ok()?;
-    if parsed.host_str().is_none() {
-        return None;
-    }
+    parsed.host_str()?;
     // Zugangsdaten gehören in den Schlüsselbund, niemals in das gespeicherte
     // Lesezeichen. Sie würden sonst in der App-Konfiguration landen.
     let _ = parsed.set_username("");
@@ -1782,6 +1780,15 @@ fn run_rsync_inner(
         ));
     }
     let askpass = rsync_askpass_script()?;
+    // Drop-Guard: löscht das Askpass-Skript auch bei frühen Fehler-Returns
+    // (Spawn-Fehler, fehlende Pipes), nicht nur am glücklichen Ende.
+    struct AskpassGuard(PathBuf);
+    impl Drop for AskpassGuard {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.0);
+        }
+    }
+    let _askpass_guard = AskpassGuard(askpass.clone());
     let remote = format!(
         "{}@{}:{}",
         request.username, request.host, request.remote_path
@@ -1921,7 +1928,7 @@ fn run_rsync_inner(
         let mgr: State<JobManager> = app.state();
         lock_safe(&mgr.rsync_pids).remove(&request.job_id);
     }
-    let _ = std::fs::remove_file(&askpass);
+    // Askpass-Skript wird vom Drop-Guard entfernt.
     if cancel.load(Ordering::SeqCst) {
         return Err("err.rsyncCancelled".into());
     }
@@ -2003,7 +2010,7 @@ pub struct JobManager {
 fn check_conflicts(items: Vec<JobItem>) -> Vec<String> {
     items
         .iter()
-        .filter(|i| expand_tilde(&i.dst).exists())
+        .filter(|i| path_occupied_no_follow(&expand_tilde(&i.dst)))
         .map(|i| i.dst.clone())
         .collect()
 }
@@ -2349,7 +2356,25 @@ fn webdav_host_from_url(url: &str) -> Option<String> {
 
 /// Escaped einen Wert für die curl-Konfigurationsdatei (doppelt gequotet).
 fn escape_curl_value(value: &str) -> String {
-    value.replace('\\', "\\\\").replace('"', "\\\"")
+    // curl-Config-Strings in Anführungszeichen kennen \\, \", \t, \n, \r, \v.
+    // Rohe Zeilenumbrüche würden die Direktive beenden und erlauben es,
+    // weitere Config-Zeilen einzuschleusen – daher alle escapen.
+    let mut out = String::with_capacity(value.len());
+    for ch in value.chars() {
+        match ch {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            '\u{0b}' => out.push_str("\\v"),
+            // Übrige Steuerzeichen sind in Zugangsdaten/URLs nicht legitim
+            // und in der Config nicht sicher darstellbar → entfernen.
+            c if c.is_control() => {}
+            c => out.push(c),
+        }
+    }
+    out
 }
 
 /// Liest Benutzernamen und Kennwort des WebDAV-Mounts aus dem macOS-Schlüssel-
@@ -2487,9 +2512,11 @@ fn webdav_collection_delete(
         .trim()
         .parse()
         .unwrap_or(0);
-    // 2xx = erfolgreich gelöscht, 404 = war bereits weg (idempotent). Alles
-    // andere führt zum sicheren Fallback auf das rekursive Einzel-Löschen.
-    matches!(code, 200 | 201 | 202 | 204 | 207 | 404)
+    // 2xx = erfolgreich gelöscht, 404 = war bereits weg (idempotent). 207
+    // (Multi-Status) kann Teilfehler im Body verstecken und zählt daher NICHT
+    // als Erfolg. Alles außer den Codes unten führt zum sicheren Fallback auf
+    // das rekursive Einzel-Löschen (das löscht dann auch bei 207 die Reste).
+    matches!(code, 200 | 201 | 202 | 204 | 404)
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -2650,6 +2677,14 @@ async fn run_network_delete(
 fn is_untransferable_file(meta: &std::fs::Metadata) -> bool {
     let ty = meta.file_type();
     !ty.is_file() && !ty.is_dir() && !ty.is_symlink()
+}
+
+/// Prüft ohne Symlink-Auflösung, ob an `path` irgendein Eintrag existiert.
+/// `Path::exists()` folgt Symlinks und meldet für hängende (dangling) Symlinks
+/// fälschlich "nicht vorhanden" – für Lösch-/Konflikt-Entscheidungen zählt aber
+/// der Verzeichniseintrag selbst.
+fn path_occupied_no_follow(path: &Path) -> bool {
+    std::fs::symlink_metadata(path).is_ok()
 }
 
 /// Löst auch noch nicht existierende Zielpfade soweit wie möglich auf. Damit
@@ -2882,8 +2917,25 @@ fn replace_file_after_copy(src: &Path, dst: &Path, cancel: &AtomicBool) -> std::
                 format!("ungültiger Zieldateiname: {}", dst.display()),
             )
         })?;
-    let id = NEXT_TEMP_FILE_ID.fetch_add(1, Ordering::Relaxed);
-    let temp = parent.join(format!(".{name}.dualbeam-{id}.inprogress"));
+    let pid = std::process::id();
+    // Eindeutigen, noch unbelegten Tempnamen wählen: PID + laufende Nummer
+    // verhindern Kollisionen mit anderen Instanzen und mit Altlasten früherer
+    // Läufe – copy_file_retry würde eine vorhandene Datei sonst überschreiben.
+    let mut temp = None;
+    for _ in 0..1000 {
+        let id = NEXT_TEMP_FILE_ID.fetch_add(1, Ordering::Relaxed);
+        let candidate = parent.join(format!(".{name}.dualbeam-{pid}-{id}.inprogress"));
+        if !path_occupied_no_follow(&candidate) {
+            temp = Some(candidate);
+            break;
+        }
+    }
+    let temp = temp.ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::AlreadyExists,
+            "keine freie temporäre Zieldatei gefunden",
+        )
+    })?;
 
     copy_file_retry(src, &temp, cancel)?;
     match std::fs::rename(&temp, dst) {
@@ -2958,7 +3010,7 @@ fn copy_recursive(
         return Ok(CopyOutcome::Skipped);
     }
     if meta.file_type().is_symlink() {
-        if dst.exists() {
+        if path_occupied_no_follow(dst) {
             if overwrite {
                 remove_path(dst)?;
             } else {
@@ -3037,7 +3089,7 @@ fn copy_recursive(
             Ok(CopyOutcome::Copied)
         }
     } else if meta.is_dir() {
-        if !dst.exists() {
+        if !path_occupied_no_follow(dst) {
             std::fs::create_dir_all(dst)?;
         } else if !dst.is_dir() {
             if overwrite {
@@ -3060,7 +3112,7 @@ fn copy_recursive(
         }
         Ok(outcome)
     } else {
-        let replacing = dst.exists();
+        let replacing = path_occupied_no_follow(dst);
         if replacing && !overwrite {
             return Ok(CopyOutcome::Skipped);
         }
@@ -3133,7 +3185,7 @@ async fn run_job(
             }
             let is_move = kind == "move";
             let mut handled = false;
-            if is_move && !dst.exists() {
+            if is_move && !path_occupied_no_follow(&dst) {
                 if let Some(parent) = dst.parent() {
                     let _ = std::fs::create_dir_all(parent);
                 }
@@ -3647,11 +3699,13 @@ fn preview_walk_dst(
             continue;
         }
         let is_dir = dmeta.is_dir() && !dmeta.file_type().is_symlink();
-        // `exists()` folgt Symlinks – so werden dereferenzierte Ziel-Inhalte
-        // korrekt der Quelle zugeordnet und nicht fälschlich zum Löschen markiert.
-        if !src_root.join(rel).exists() && is_dir && is_trunk_root(rel) {
+        // Präsenz in der Quelle OHNE Symlink-Auflösung prüfen: ein hängender
+        // Symlink in der Quelle ist trotzdem ein Eintrag – sein Ziel-Gegenstück
+        // darf nicht fälschlich zum Löschen vorgeschlagen werden.
+        let src_present = path_occupied_no_follow(&src_root.join(rel));
+        if !src_present && is_dir && is_trunk_root(rel) {
             preview_walk_dst(src_root, dst_root, &p, ignore_patterns, out)?;
-        } else if !src_root.join(rel).exists() {
+        } else if !src_present {
             out.push(SyncEntry {
                 rel: rel.to_string_lossy().into_owned(),
                 action: "delete".into(),

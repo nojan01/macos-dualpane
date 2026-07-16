@@ -429,6 +429,14 @@ export function followFrom(pane: PaneId) {
   // für jeden Zwischenschritt ein (evtl. langsames Netz-)listDir auslösen.
   if (followTimer) clearTimeout(followTimer);
   followTimer = setTimeout(() => {
+    followTimer = undefined;
+    // Zustand erneut prüfen: Der Modus kann inzwischen ausgeschaltet oder die
+    // Auswahl weitergewandert sein – dann nichts mehr laden.
+    if (!state.followMode) return;
+    const cur = state[pane];
+    const nowSelected = cur.entries[cur.cursor];
+    if (!nowSelected || nowSelected.path !== target) return;
+    if (state[other].cwd === target) return;
     void loadPane(other, target, { recordHistory: false });
   }, 60);
 }
@@ -436,8 +444,14 @@ export function followFrom(pane: PaneId) {
 export function toggleFollowMode() {
   const next = !state.followMode;
   setState("followMode", next);
-  // Beim Einschalten sofort den aktuell markierten Ordner spiegeln.
-  if (next) followFrom(state.active);
+  if (next) {
+    // Beim Einschalten sofort den aktuell markierten Ordner spiegeln.
+    followFrom(state.active);
+  } else if (followTimer) {
+    // Beim Ausschalten einen noch ausstehenden Folge-Ladevorgang verwerfen.
+    clearTimeout(followTimer);
+    followTimer = undefined;
+  }
 }
 
 export function compareStatus(
