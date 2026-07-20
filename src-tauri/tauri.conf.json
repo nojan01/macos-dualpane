@@ -44,7 +44,10 @@
     "licenseFile": "../LICENSE",
     "macOS": {
       "minimumSystemVersion": "12.0",
-      "infoPlist": "Info.plist"
+      "infoPlist": "Info.plist",
+      "signingIdentity": "Developer ID Application: Norbert Jander (TXF2V79Z6N)",
+      "hardenedRuntime": true,
+      "entitlements": "entitlements.plist"
     }
   }
 }
