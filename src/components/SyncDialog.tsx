@@ -10,6 +10,7 @@ import {
   syncMode,
   syncVerifyChecksums,
   syncTransport,
+  syncRsyncAvailable,
   syncRsyncHost,
   syncRsyncUsername,
   syncRsyncRemotePath,
@@ -141,22 +142,24 @@ export function SyncDialog() {
                       </button>
                     </Show>
                   </div>
-                  <label class="sync-transport">
-                    {t("sync.transport")}
-                    <select
-                      value={syncTransport()}
-                      onChange={(event) =>
-                        void setSyncTransportAndRefresh(
-                          event.currentTarget.value as "filesystem" | "rsync",
-                        )
-                      }
-                    >
-                      <option value="filesystem">
-                        {t("sync.transportFilesystem")}
-                      </option>
-                      <option value="rsync">{t("sync.transportRsync")}</option>
-                    </select>
-                  </label>
+                  <Show when={syncRsyncAvailable()}>
+                    <label class="sync-transport">
+                      {t("sync.transport")}
+                      <select
+                        value={syncTransport()}
+                        onChange={(event) =>
+                          void setSyncTransportAndRefresh(
+                            event.currentTarget.value as "filesystem" | "rsync",
+                          )
+                        }
+                      >
+                        <option value="filesystem">
+                          {t("sync.transportFilesystem")}
+                        </option>
+                        <option value="rsync">{t("sync.transportRsync")}</option>
+                      </select>
+                    </label>
+                  </Show>
                   <Show when={syncTransport() === "rsync"}>
                     <div class="sync-rsync">
                       <p>{t("sync.rsyncMountedNote")}</p>

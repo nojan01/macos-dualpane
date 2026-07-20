@@ -95,10 +95,23 @@ function basename(path: string): string {
   return trimmed.slice(trimmed.lastIndexOf("/") + 1) || path;
 }
 
+const HIDRIVE_WEBDAV_MOUNT = "/Volumes/webdav.hidrive.ionos.com";
+
+const isHiDriveWebDavPath = (path: string) =>
+  path === HIDRIVE_WEBDAV_MOUNT || path.startsWith(`${HIDRIVE_WEBDAV_MOUNT}/`);
+
+/** rsync (über SSH zu HiDrive) ist nur sinnvoll, wenn das Sync-Ziel auf dem
+ * HiDrive-WebDAV-Mount liegt. Bei lokalen Zielen wird der Transport-Selektor
+ * ausgeblendet und immer das Dateisystem verwendet. */
+export function syncRsyncAvailable(): boolean {
+  const s = syncDialog();
+  return !!s && isHiDriveWebDavPath(s.dst);
+}
+
 function rsyncDefaultsFromWebDavPath(dst: string) {
   // Der sichtbare WebDAV-Pfad dient nur zur Orientierung. rsync benötigt
   // denselben HiDrive-Pfad ohne den lokalen /Volumes-Mountpoint.
-  const mount = "/Volumes/webdav.hidrive.ionos.com";
+  const mount = HIDRIVE_WEBDAV_MOUNT;
   const remotePath = dst === mount || dst.startsWith(`${mount}/`)
     ? dst.slice(mount.length) || "/"
     : "/";
@@ -296,8 +309,14 @@ export async function applySyncProfile(id: string, preview = false) {
   setSyncIgnorePatterns(profile.ignorePatterns);
   setSyncMode(profile.mode);
   setSyncVerifyChecksums(profile.verifyChecksums);
-  setSyncTransport(profile.transport);
-  if (profile.transport === "rsync") {
+  // Sicherheitsnetz: rsync gilt nur für HiDrive-Ziele. Ein (altes) Profil mit
+  // lokalem Ziel fällt auf den Dateisystem-Transport zurück.
+  const transport =
+    profile.transport === "rsync" && !isHiDriveWebDavPath(profile.dst)
+      ? "filesystem"
+      : profile.transport;
+  setSyncTransport(transport);
+  if (transport === "rsync") {
     const defaults = rsyncDefaultsFromWebDavPath(profile.dst);
     setSyncRsyncHost(profile.rsync?.host || defaults.host);
     setSyncRsyncUsername(profile.rsync?.username || defaults.username);
@@ -326,7 +345,7 @@ export async function applySyncProfile(id: string, preview = false) {
   setSyncEntries([]);
   setSyncConflictChoices({});
   setSyncPreviewReady(false);
-  if (preview && profile.transport === "filesystem") await reloadPreview();
+  if (preview && transport === "filesystem") await reloadPreview();
 }
 
 /** Führt ein gespeichertes Profil unabhängig von den aktuell geöffneten Panes
@@ -564,9 +583,7 @@ export async function confirmSync() {
     }
     if (deletes.length > 0) {
       const deletePaths = deletes.map((e) => joinPath(s.dst, e.rel));
-      let targetIsNetwork =
-        s.dst === "/Volumes/webdav.hidrive.ionos.com" ||
-        s.dst.startsWith("/Volumes/webdav.hidrive.ionos.com/");
+      let targetIsNetwork = isHiDriveWebDavPath(s.dst);
       try {
         targetIsNetwork = (await pathIsNetwork(s.dst)) || targetIsNetwork;
       } catch {}
