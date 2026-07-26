@@ -123,7 +123,11 @@ export function startPointerDrag(initial: DragPayload, origin: { x: number; y: n
       if (folder && folder.isDir) dstCwd = folder.path;
     }
     if (!dstCwd) return;
-    await transferEntries(eff, items, dstCwd, ["left", "right"]);
+    try {
+      await transferEntries(eff, items, dstCwd, ["left", "right"]);
+    } catch {
+      /* transferEntries meldet Fehler bereits selbst. */
+    }
   };
 
   const onKey = (ev: KeyboardEvent) => {

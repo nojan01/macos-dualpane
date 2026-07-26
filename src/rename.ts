@@ -201,9 +201,10 @@ function applyOp(base: string, ext: string, op: Op, index: number): { base: stri
       }
     }
     if (op.kind === "add") {
-      const pre = applyNumberToken(op.prefix, index, op.numberPad);
-      const suf = applyNumberToken(op.suffix, index, op.numberPad);
-      const numStr = padNum(op.numberStart + index - 1, op.numberPad);
+      const num = op.numberStart + index - 1;
+      const pre = applyNumberToken(op.prefix, num, op.numberPad);
+      const suf = applyNumberToken(op.suffix, num, op.numberPad);
+      const numStr = padNum(num, op.numberPad);
       let out = target;
       if (op.numberPos === "before") out = numStr + out;
       out = pre + out + suf;
@@ -289,21 +290,50 @@ export async function applyRename(): Promise<{ ok: boolean; message?: string }> 
   const needsTwoPhase = targets.some((p) => srcSet.has(joinPath(sess.dir, p.newName)));
   const stamp = Date.now();
 
+  // Bei einem Fehler mitten im Vorgang alles auf die Ursprungsnamen zurückdrehen.
+  // Die Originalnamen sind dabei immer frei, weil nur von ihnen weg umbenannt wurde.
+  const rollback = async (moves: { from: string; to: string }[]) => {
+    for (const m of moves.reverse()) {
+      try {
+        await renamePath(m.from, m.to);
+      } catch {
+        /* Best effort – der Nutzer sieht den Zustand nach dem Neuladen. */
+      }
+    }
+  };
+
   try {
     if (needsTwoPhase) {
-      const tempPaths: { tmp: string; finalName: string }[] = [];
-      for (let i = 0; i < targets.length; i++) {
-        const p = targets[i];
-        const tmp = joinPath(sess.dir, `.__rn_${stamp}_${i}__`);
-        await renamePath(p.src.path, tmp);
-        tempPaths.push({ tmp, finalName: p.newName });
-      }
-      for (const t of tempPaths) {
-        await renamePath(t.tmp, joinPath(sess.dir, t.finalName));
+      const tempPaths: { tmp: string; finalName: string; orig: string }[] = [];
+      const undo: { from: string; to: string }[] = [];
+      try {
+        for (let i = 0; i < targets.length; i++) {
+          const p = targets[i];
+          const tmp = joinPath(sess.dir, `.__rn_${stamp}_${i}__`);
+          await renamePath(p.src.path, tmp);
+          undo.push({ from: tmp, to: p.src.path });
+          tempPaths.push({ tmp, finalName: p.newName, orig: p.src.path });
+        }
+        for (const t of tempPaths) {
+          const dst = joinPath(sess.dir, t.finalName);
+          await renamePath(t.tmp, dst);
+          undo[undo.findIndex((u) => u.from === t.tmp)] = { from: dst, to: t.orig };
+        }
+      } catch (err) {
+        await rollback(undo);
+        throw err;
       }
     } else {
-      for (const p of targets) {
-        await renamePath(p.src.path, joinPath(sess.dir, p.newName));
+      const undo: { from: string; to: string }[] = [];
+      try {
+        for (const p of targets) {
+          const dst = joinPath(sess.dir, p.newName);
+          await renamePath(p.src.path, dst);
+          undo.push({ from: dst, to: p.src.path });
+        }
+      } catch (err) {
+        await rollback(undo);
+        throw err;
       }
     }
   } catch (err) {

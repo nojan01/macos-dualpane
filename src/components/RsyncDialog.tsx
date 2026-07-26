@@ -102,6 +102,15 @@ export function RsyncDialog() {
             aria-modal="true"
             aria-label={t("rsync.title")}
             onMouseDown={(event) => event.stopPropagation()}
+            tabIndex={-1}
+            ref={(el) => queueMicrotask(() => el?.focus())}
+            onKeyDown={(event) => {
+              event.stopPropagation();
+              if (event.key === "Escape" && !current().running) {
+                event.preventDefault();
+                setDialog(null);
+              }
+            }}
           >
             <h2>{t("rsync.title")}</h2>
             <p>{t("rsync.description")}</p>

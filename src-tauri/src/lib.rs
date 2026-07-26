@@ -92,6 +92,65 @@ fn mode_to_rwx(mode: u32) -> String {
     s
 }
 
+/// Benutzernamen thread-sicher ermitteln.
+///
+/// `getpwuid` liefert einen Zeiger auf einen prozessweit geteilten Puffer und
+/// ist damit nicht thread-sicher – ein paralleler Aufruf kann den Puffer
+/// überschreiben, während wir ihn noch lesen. Deshalb die `_r`-Variante mit
+/// eigenem Puffer.
+fn lookup_pw_name(uid: u32) -> Option<String> {
+    let mut buf = vec![0 as libc::c_char; 1024];
+    loop {
+        let mut pwd: libc::passwd = unsafe { std::mem::zeroed() };
+        let mut result: *mut libc::passwd = std::ptr::null_mut();
+        let rc = unsafe {
+            libc::getpwuid_r(
+                uid as libc::uid_t,
+                &mut pwd,
+                buf.as_mut_ptr(),
+                buf.len(),
+                &mut result,
+            )
+        };
+        if rc == libc::ERANGE && buf.len() < 65536 {
+            buf.resize(buf.len() * 2, 0);
+            continue;
+        }
+        if rc != 0 || result.is_null() {
+            return None;
+        }
+        let cstr = unsafe { std::ffi::CStr::from_ptr(pwd.pw_name) };
+        return Some(cstr.to_string_lossy().into_owned());
+    }
+}
+
+/// Gruppennamen thread-sicher ermitteln (siehe [`lookup_pw_name`]).
+fn lookup_gr_name(gid: u32) -> Option<String> {
+    let mut buf = vec![0 as libc::c_char; 1024];
+    loop {
+        let mut grp: libc::group = unsafe { std::mem::zeroed() };
+        let mut result: *mut libc::group = std::ptr::null_mut();
+        let rc = unsafe {
+            libc::getgrgid_r(
+                gid as libc::gid_t,
+                &mut grp,
+                buf.as_mut_ptr(),
+                buf.len(),
+                &mut result,
+            )
+        };
+        if rc == libc::ERANGE && buf.len() < 65536 {
+            buf.resize(buf.len() * 2, 0);
+            continue;
+        }
+        if rc != 0 || result.is_null() {
+            return None;
+        }
+        let cstr = unsafe { std::ffi::CStr::from_ptr(grp.gr_name) };
+        return Some(cstr.to_string_lossy().into_owned());
+    }
+}
+
 fn uid_to_name(uid: u32) -> String {
     use std::sync::OnceLock;
     static CACHE: OnceLock<Mutex<HashMap<u32, String>>> = OnceLock::new();
@@ -99,19 +158,8 @@ fn uid_to_name(uid: u32) -> String {
     if let Some(v) = lock_safe(cache).get(&uid) {
         return v.clone();
     }
-    let name = unsafe {
-        let pw = libc::getpwuid(uid as libc::uid_t);
-        if pw.is_null() {
-            uid.to_string()
-        } else {
-            let cstr = std::ffi::CStr::from_ptr((*pw).pw_name);
-            cstr.to_string_lossy().into_owned()
-        }
-    };
-    cache
-        .lock()
-        .unwrap_or_else(|p| p.into_inner())
-        .insert(uid, name.clone());
+    let name = lookup_pw_name(uid).unwrap_or_else(|| uid.to_string());
+    lock_safe(cache).insert(uid, name.clone());
     name
 }
 
@@ -122,19 +170,8 @@ fn gid_to_name(gid: u32) -> String {
     if let Some(v) = lock_safe(cache).get(&gid) {
         return v.clone();
     }
-    let name = unsafe {
-        let gr = libc::getgrgid(gid as libc::gid_t);
-        if gr.is_null() {
-            gid.to_string()
-        } else {
-            let cstr = std::ffi::CStr::from_ptr((*gr).gr_name);
-            cstr.to_string_lossy().into_owned()
-        }
-    };
-    cache
-        .lock()
-        .unwrap_or_else(|p| p.into_inner())
-        .insert(gid, name.clone());
+    let name = lookup_gr_name(gid).unwrap_or_else(|| gid.to_string());
+    lock_safe(cache).insert(gid, name.clone());
     name
 }
 
@@ -202,8 +239,18 @@ fn home_dir() -> Result<String, String> {
         .ok_or_else(|| "Home-Verzeichnis nicht gefunden".into())
 }
 
+/// Verzeichnis einlesen. Läuft in einem Worker-Thread: Bei hängenden
+/// Netzlaufwerken (WebDAV/SMB) blockieren `read_dir` und die Metadaten-Abfragen
+/// je Eintrag bis zum Mount-Timeout und würden sonst die gesamte Oberfläche
+/// einfrieren.
 #[tauri::command]
-fn list_dir(path: String, show_hidden: bool) -> Result<Vec<Entry>, String> {
+async fn list_dir(path: String, show_hidden: bool) -> Result<Vec<Entry>, String> {
+    tauri::async_runtime::spawn_blocking(move || list_dir_blocking(path, show_hidden))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+fn list_dir_blocking(path: String, show_hidden: bool) -> Result<Vec<Entry>, String> {
     let p = expand_tilde(&path);
     let read = std::fs::read_dir(&p).map_err(|e| format!("{}: {}", p.display(), e))?;
 
@@ -398,6 +445,41 @@ fn create_finder_alias(target: String, link_path: String) -> Result<(), String> 
     Ok(())
 }
 
+/// Umbenennen, das ein bestehendes Ziel niemals überschreibt.
+///
+/// `renamex_np(RENAME_EXCL)` prüft und benennt in einem einzigen Systemaufruf um.
+/// Ein vorheriges `exists()` gefolgt von `rename()` hätte eine Lücke, in der ein
+/// anderer Prozess die Zieldatei anlegen kann – sie würde dann kommentarlos
+/// überschrieben.
+fn rename_no_clobber(a: &Path, b: &Path) -> std::io::Result<()> {
+    use std::os::unix::ffi::OsStrExt;
+    let to_c = |p: &Path| {
+        std::ffi::CString::new(p.as_os_str().as_bytes())
+            .map_err(|_| std::io::Error::other("Pfad enthält ein Nullbyte"))
+    };
+    let ca = to_c(a)?;
+    let cb = to_c(b)?;
+    let rc = unsafe { libc::renamex_np(ca.as_ptr(), cb.as_ptr(), libc::RENAME_EXCL) };
+    if rc == 0 {
+        return Ok(());
+    }
+    let err = std::io::Error::last_os_error();
+    match err.raw_os_error() {
+        // Nicht jedes Dateisystem (SMB, WebDAV, FAT …) kennt renamex_np.
+        // Dort bleibt nur die Prüfung vorab.
+        Some(libc::ENOTSUP) | Some(libc::EINVAL) | Some(libc::ENOSYS) => {
+            if path_occupied_no_follow(b) {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::AlreadyExists,
+                    "Ziel existiert bereits",
+                ));
+            }
+            std::fs::rename(a, b)
+        }
+        _ => Err(err),
+    }
+}
+
 #[tauri::command]
 fn rename_path(old_path: String, new_path: String) -> Result<(), String> {
     let a = expand_tilde(&old_path);
@@ -405,10 +487,13 @@ fn rename_path(old_path: String, new_path: String) -> Result<(), String> {
     if a == b {
         return Ok(());
     }
-    if path_occupied_no_follow(&b) {
-        return Err(format!("err.exists\u{1f}{}", b.display()));
+    match rename_no_clobber(&a, &b) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            Err(format!("err.exists\u{1f}{}", b.display()))
+        }
+        Err(e) => Err(e.to_string()),
     }
-    std::fs::rename(&a, &b).map_err(|e| e.to_string())
 }
 
 /// Mountpoints registrierter Time-Machine-Ziele (canonicalize'd) für schnelle
@@ -451,14 +536,20 @@ fn is_time_machine_path(full: &Path, tm_mounts: &[std::path::PathBuf]) -> bool {
         }
     }
     // 3) Ein übergeordnetes Verzeichnis ist eine TM-Backup-Wurzel (greift auch
-    //    bei ehemaligen, nicht mehr registrierten Backup-Volumes).
+    //    bei ehemaligen, nicht mehr registrierten Backup-Volumes). Die
+    //    MachineID-Datei markiert Netzwerk-Backups in einem `.sparsebundle`;
+    //    dessen Endung allein reicht nicht, da sie auch für gewöhnliche
+    //    Image-Dateien verwendet wird.
     let mut cur: Option<&Path> = Some(full);
     let mut depth = 0u32;
     while let Some(p) = cur {
         if depth > 64 {
             break;
         }
-        if p.join("backup_manifest.plist").is_file() || p.join("Backups.backupdb").is_dir() {
+        if p.join("backup_manifest.plist").is_file()
+            || p.join("Backups.backupdb").is_dir()
+            || p.join("com.apple.TimeMachine.MachineID.plist").is_file()
+        {
             return true;
         }
         cur = p.parent();
@@ -467,8 +558,17 @@ fn is_time_machine_path(full: &Path, tm_mounts: &[std::path::PathBuf]) -> bool {
     false
 }
 
+/// Objekte in den Papierkorb verschieben. Im Worker-Thread, weil `mount` und
+/// `tmutil destinationinfo` aufgerufen werden und das Verschieben selbst auf
+/// Netzlaufwerken lange dauern kann.
 #[tauri::command]
-fn move_to_trash(paths: Vec<String>) -> Result<(), String> {
+async fn move_to_trash(paths: Vec<String>) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || move_to_trash_blocking(paths))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+fn move_to_trash_blocking(paths: Vec<String>) -> Result<(), String> {
     use std::os::macos::fs::MetadataExt;
     use trash::macos::{DeleteMethod, TrashContextExtMacos};
     const PROTECT_MASK: u32 = 0x0002 | 0x0004 | 0x00020000 | 0x00040000 | 0x00080000 | 0x00100000;
@@ -554,8 +654,61 @@ fn undo_staging_dir(token: &str) -> Result<PathBuf, String> {
     Ok(base.join("DualBeam").join("Undo").join(token))
 }
 
+/// Geräte-ID (Volume) eines Pfads. `None`, wenn der Pfad nicht lesbar ist.
+fn device_of(path: &Path) -> Option<u64> {
+    use std::os::unix::fs::MetadataExt;
+    std::fs::metadata(path).ok().map(|m| m.dev())
+}
+
+/// Volume-Wurzel eines Pfads: nach oben laufen, solange die Geräte-ID gleich
+/// bleibt. Für `/Volumes/Extern/Foo/bar` also `/Volumes/Extern`.
+fn volume_root_of(path: &Path) -> PathBuf {
+    let dev = match device_of(path) {
+        Some(dev) => dev,
+        None => return PathBuf::from("/"),
+    };
+    let mut cur = path.to_path_buf();
+    loop {
+        let parent = match cur.parent() {
+            Some(parent) => parent.to_path_buf(),
+            None => return cur,
+        };
+        match device_of(&parent) {
+            Some(d) if d == dev => cur = parent,
+            _ => return cur,
+        }
+    }
+}
+
+/// Verzeichnis, in das ein zu löschendes Objekt zwischengelagert wird.
+///
+/// `std::fs::rename` scheitert über Volume-Grenzen hinweg immer mit `EXDEV`.
+/// Der Puffer muss deshalb auf demselben Volume wie das Original liegen: für
+/// Objekte auf dem Boot-Volume im App-Datenordner, sonst in einem versteckten
+/// Ordner auf der Wurzel des jeweiligen Volumes.
+fn undo_staging_dir_for(original: &Path, token: &str) -> Result<PathBuf, String> {
+    let default = undo_staging_dir(token)?;
+    let parent = original.parent().unwrap_or_else(|| Path::new("/"));
+    let app_base = dirs::data_local_dir().ok_or_else(|| "Undo-Ordner nicht verfügbar".to_string())?;
+    match (device_of(parent), device_of(&app_base)) {
+        (Some(a), Some(b)) if a == b => Ok(default),
+        (Some(_), _) => Ok(volume_root_of(parent).join(".DualBeamUndo").join(token)),
+        // Volume nicht ermittelbar: der App-Ordner ist die sicherere Annahme,
+        // ein etwaiger EXDEV-Fehler wird sauber als UNDO_UNAVAILABLE gemeldet.
+        _ => Ok(default),
+    }
+}
+
+/// Löschauswahl in den Rückgängig-Puffer verschieben. Im Worker-Thread wegen
+/// `mount`/`tmutil` und der Verschiebeoperationen selbst.
 #[tauri::command]
-fn stage_delete_for_undo(paths: Vec<String>) -> Result<UndoDeleteBatch, String> {
+async fn stage_delete_for_undo(paths: Vec<String>) -> Result<UndoDeleteBatch, String> {
+    tauri::async_runtime::spawn_blocking(move || stage_delete_for_undo_blocking(paths))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+fn stage_delete_for_undo_blocking(paths: Vec<String>) -> Result<UndoDeleteBatch, String> {
     use std::os::macos::fs::MetadataExt;
 
     const PROTECT_MASK: u32 = 0x0002 | 0x0004 | 0x00020000 | 0x00040000 | 0x00080000 | 0x00100000;
@@ -567,8 +720,7 @@ fn stage_delete_for_undo(paths: Vec<String>) -> Result<UndoDeleteBatch, String> 
             .map(|d| d.as_nanos())
             .unwrap_or_default()
     );
-    let dir = undo_staging_dir(&token)?;
-    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let dir_default = undo_staging_dir(&token)?;
     let tm_mounts = tm_mountpoints_canon();
     let mounts = mount_fs_types();
     let mut originals = Vec::new();
@@ -598,15 +750,34 @@ fn stage_delete_for_undo(paths: Vec<String>) -> Result<UndoDeleteBatch, String> 
     }
 
     let mut items: Vec<UndoDeleteItem> = Vec::new();
+    let mut prepared: Vec<PathBuf> = Vec::new();
     for (index, original) in originals.into_iter().enumerate() {
         let name = original
             .file_name()
             .ok_or_else(|| "Ungültiger Löschpfad".to_string())?;
+        // Der Puffer muss auf demselben Volume liegen wie das Original, sonst
+        // scheitert `rename` mit EXDEV (externe Platten, gemountete Images).
+        let dir = undo_staging_dir_for(&original, &token).unwrap_or_else(|_| dir_default.clone());
+        if !prepared.contains(&dir) {
+            if let Err(e) = std::fs::create_dir_all(&dir) {
+                // Kein beschreibbarer Puffer auf diesem Volume (z. B. schreib-
+                // geschützt): ohne Rückgängig-Funktion weiterlöschen statt einen
+                // Fehler zu melden, den das Frontend als Rechteproblem deutet.
+                for item in items.iter().rev() {
+                    let _ = std::fs::rename(&item.staged, &item.original);
+                }
+                return Err(format!("UNDO_UNAVAILABLE\u{1f}{e}"));
+            }
+            prepared.push(dir.clone());
+        }
         let staged = dir.join(format!("{index}-{}", name.to_string_lossy()));
         if let Err(e) = std::fs::rename(&original, &staged) {
             // Eine teilweise verschobene Auswahl darf nie zurückbleiben.
             for item in items.iter().rev() {
                 let _ = std::fs::rename(&item.staged, &item.original);
+            }
+            if e.raw_os_error() == Some(libc::EXDEV) {
+                return Err(format!("UNDO_UNAVAILABLE\u{1f}{e}"));
             }
             return Err(format!("{}: {}", original.display(), e));
         }
@@ -620,9 +791,16 @@ fn stage_delete_for_undo(paths: Vec<String>) -> Result<UndoDeleteBatch, String> 
 
 #[tauri::command]
 fn undo_staged_delete(items: Vec<UndoDeleteItem>) -> Result<(), String> {
+    let mut staging_dirs: Vec<PathBuf> = Vec::new();
     for item in &items {
         let original = PathBuf::from(&item.original);
         let staged = PathBuf::from(&item.staged);
+        if let Some(parent) = staged.parent() {
+            let parent = parent.to_path_buf();
+            if !staging_dirs.contains(&parent) {
+                staging_dirs.push(parent);
+            }
+        }
         if original.exists() {
             return Err(format!("{} existiert bereits", original.display()));
         }
@@ -632,32 +810,77 @@ fn undo_staged_delete(items: Vec<UndoDeleteItem>) -> Result<(), String> {
         std::fs::rename(&staged, &original)
             .map_err(|e| format!("{}: {}", original.display(), e))?;
     }
+    remove_empty_staging_dirs(&staging_dirs);
     Ok(())
 }
 
+/// Räumt leer gewordene Puffer-Verzeichnisse auf. Fehler sind unerheblich: der
+/// periodische `cleanup_expired_undo` fängt Reste später ohnehin ab.
+fn remove_empty_staging_dirs(dirs: &[PathBuf]) {
+    for dir in dirs {
+        let _ = std::fs::remove_dir(dir);
+        // Auf fremden Volumes ist `.DualBeamUndo` der gemeinsame Elternordner.
+        if let Some(parent) = dir.parent() {
+            if parent.file_name().and_then(|n| n.to_str()) == Some(".DualBeamUndo") {
+                let _ = std::fs::remove_dir(parent);
+            }
+        }
+    }
+}
+
 #[tauri::command]
-fn finalize_staged_delete(items: Vec<UndoDeleteItem>) -> Result<(), String> {
+async fn finalize_staged_delete(items: Vec<UndoDeleteItem>) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || finalize_staged_delete_blocking(items))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+fn finalize_staged_delete_blocking(items: Vec<UndoDeleteItem>) -> Result<(), String> {
+    let mut staging_dirs: Vec<PathBuf> = Vec::new();
+    for item in &items {
+        if let Some(parent) = Path::new(&item.staged).parent() {
+            let parent = parent.to_path_buf();
+            if !staging_dirs.contains(&parent) {
+                staging_dirs.push(parent);
+            }
+        }
+    }
     let staged: Vec<String> = items.into_iter().map(|item| item.staged).collect();
-    move_to_trash(staged)
+    let result = move_to_trash_blocking(staged);
+    remove_empty_staging_dirs(&staging_dirs);
+    result
 }
 
 /// Entfernt abgelaufene Rückgängig-Puffer aus früheren Sitzungen. Der Puffer
-/// liegt ausschließlich im App-Datenordner und wird erst nach zehn Minuten
-/// lautlos in den Papierkorb verschoben.
+/// liegt im App-Datenordner bzw. – für Objekte auf anderen Volumes – in einem
+/// versteckten Ordner auf der jeweiligen Volume-Wurzel. Er wird erst nach zehn
+/// Minuten lautlos in den Papierkorb verschoben.
 #[tauri::command]
-fn cleanup_expired_undo() -> Result<(), String> {
-    let base = dirs::data_local_dir()
-        .ok_or_else(|| "Undo-Ordner nicht verfügbar".to_string())?
-        .join("DualBeam")
-        .join("Undo");
-    let expired = match std::fs::read_dir(&base) {
-        Ok(entries) => entries,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(e) => return Err(e.to_string()),
-    };
-    let paths: Vec<String> = expired
-        .filter_map(Result::ok)
-        .filter_map(|entry| {
+async fn cleanup_expired_undo() -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(cleanup_expired_undo_blocking)
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+fn cleanup_expired_undo_blocking() -> Result<(), String> {
+    let mut bases: Vec<PathBuf> = Vec::new();
+    if let Some(local) = dirs::data_local_dir() {
+        bases.push(local.join("DualBeam").join("Undo"));
+    }
+    // Puffer auf externen Volumes einsammeln.
+    bases.push(PathBuf::from("/.DualBeamUndo"));
+    if let Ok(volumes) = std::fs::read_dir("/Volumes") {
+        for entry in volumes.filter_map(Result::ok) {
+            bases.push(entry.path().join(".DualBeamUndo"));
+        }
+    }
+    let mut paths: Vec<String> = Vec::new();
+    for base in &bases {
+        let entries = match std::fs::read_dir(base) {
+            Ok(entries) => entries,
+            Err(_) => continue,
+        };
+        paths.extend(entries.filter_map(Result::ok).filter_map(|entry| {
             let meta = entry.metadata().ok()?;
             if !meta.is_dir() {
                 return None;
@@ -665,12 +888,12 @@ fn cleanup_expired_undo() -> Result<(), String> {
             let age = meta.modified().ok()?.elapsed().ok()?;
             (age >= Duration::from_secs(10 * 60))
                 .then(|| entry.path().to_string_lossy().into_owned())
-        })
-        .collect();
+        }));
+    }
     if paths.is_empty() {
         return Ok(());
     }
-    move_to_trash(paths)
+    move_to_trash_blocking(paths)
 }
 
 /// Ein privilegierter Löschvorgang darf nie auf einen System- oder
@@ -693,16 +916,34 @@ fn is_protected_admin_root(path: &Path) -> bool {
     ROOTS.iter().any(|root| normalized == Path::new(root))
 }
 
+/// Privilegiertes Löschen. Zwingend im Worker-Thread: `osascript` zeigt einen
+/// modalen Passwortdialog und kehrt erst nach der Eingabe zurück.
 #[tauri::command]
-fn force_delete_admin(paths: Vec<String>) -> Result<(), String> {
+async fn force_delete_admin(paths: Vec<String>) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || force_delete_admin_blocking(paths))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+fn force_delete_admin_blocking(paths: Vec<String>) -> Result<(), String> {
     use std::io::Write;
     // Diagnose-Log nur in Debug-Builds; im Release wird nichts auf die Platte geschrieben.
+    // Bewusst im nutzereigenen Ordner statt in /tmp: dort könnte ein anderer
+    // Nutzer den Namen vorbelegen und per Symlink auf eine fremde Datei zeigen.
     #[cfg(debug_assertions)]
-    let mut log = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open("/tmp/dualbeam-delete.log")
-        .ok();
+    let mut log = {
+        use std::os::unix::fs::OpenOptionsExt;
+        dirs::data_local_dir().and_then(|dir| {
+            let dir = dir.join("DualBeam");
+            std::fs::create_dir_all(&dir).ok()?;
+            std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .custom_flags(libc::O_NOFOLLOW)
+                .open(dir.join("delete.log"))
+                .ok()
+        })
+    };
     #[cfg(not(debug_assertions))]
     let mut log: Option<std::fs::File> = None;
     let logln = |log: &mut Option<std::fs::File>, s: &str| {
@@ -868,10 +1109,14 @@ fn path_fstype(full: &Path, mounts: &std::collections::HashMap<String, String>) 
 // Prüft für das Frontend, ob ein Pfad auf einem Netzlaufwerk liegt (dann wird
 // beim Löschen direkt dauerhaft entfernt statt in den Papierkorb verschoben).
 #[tauri::command]
-fn path_is_network(path: String) -> bool {
-    let full = expand_tilde(&path);
-    let mounts = mount_fs_types();
-    is_network_path(&full, &mounts)
+async fn path_is_network(path: String) -> bool {
+    tauri::async_runtime::spawn_blocking(move || {
+        let full = expand_tilde(&path);
+        let mounts = mount_fs_types();
+        is_network_path(&full, &mounts)
+    })
+    .await
+    .unwrap_or(false)
 }
 
 // IONOS HiDrive WebDAV-Netzwerk-Bookmark (Host, Anzeigename, URL an einer Stelle).
@@ -900,7 +1145,13 @@ fn volume_display_name(name: &str) -> String {
 }
 
 #[tauri::command]
-fn list_volumes() -> Result<Vec<Volume>, String> {
+async fn list_volumes() -> Result<Vec<Volume>, String> {
+    tauri::async_runtime::spawn_blocking(list_volumes_blocking)
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+fn list_volumes_blocking() -> Result<Vec<Volume>, String> {
     let mut out: Vec<Volume> = Vec::new();
     let fs = mount_fs_types();
     if let Ok(rd) = std::fs::read_dir("/Volumes") {
@@ -1220,20 +1471,29 @@ fn run_osascript_with_timeout(script: &str) -> Result<std::process::Output, Stri
         .spawn()
         .map_err(|_| "err.mount.failed".to_string())?;
     if let Some(mut stdin) = child.stdin.take() {
-        stdin
-            .write_all(script.as_bytes())
-            .map_err(|_| "err.mount.failed".to_string())?;
+        if let Err(e) = stdin.write_all(script.as_bytes()) {
+            // Sonst bliebe osascript als Waise hängen und würde ewig auf
+            // Eingaben warten.
+            let _ = child.kill();
+            let _ = child.wait();
+            let _ = e;
+            return Err("err.mount.failed".to_string());
+        }
     }
     let deadline = Instant::now() + Duration::from_secs(120);
     loop {
-        if child
-            .try_wait()
-            .map_err(|_| "err.mount.failed".to_string())?
-            .is_some()
-        {
-            return child
-                .wait_with_output()
-                .map_err(|_| "err.mount.failed".to_string());
+        match child.try_wait() {
+            Ok(Some(_)) => {
+                return child
+                    .wait_with_output()
+                    .map_err(|_| "err.mount.failed".to_string());
+            }
+            Ok(None) => {}
+            Err(_) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err("err.mount.failed".to_string());
+            }
         }
         if Instant::now() >= deadline {
             let _ = child.kill();
@@ -2539,6 +2799,22 @@ async fn run_network_delete(
     if job_id.is_empty() || paths.is_empty() {
         return Err("Ungültiger Löschauftrag".into());
     }
+    // Time-Machine-Backups liegen häufig auf per SMB/AFP eingebundenen NAS-
+    // Freigaben und laufen dann über diesen Pfad. Ohne die Prüfung ließe sich
+    // ein komplettes Backup hier endgültig und rekursiv löschen.
+    let guard_paths = paths.clone();
+    let protected = tauri::async_runtime::spawn_blocking(move || {
+        let tm_mounts = tm_mountpoints_canon();
+        guard_paths
+            .iter()
+            .map(|raw| expand_tilde(raw))
+            .find(|path| is_time_machine_path(path, &tm_mounts))
+    })
+    .await
+    .map_err(|e| e.to_string())?;
+    if let Some(path) = protected {
+        return Err(format!("TIMEMACHINE_PROTECTED\u{1f}{}", path.display()));
+    }
     let cancel = Arc::new(AtomicBool::new(false));
     {
         let mgr: State<JobManager> = app.state();
@@ -2984,6 +3260,34 @@ fn remove_source_after_move(src: &Path, outcome: CopyOutcome) -> Result<(), Stri
     })
 }
 
+/// Stellt sicher, dass `dst` ein echtes Verzeichnis ist – ohne Symlinks zu folgen.
+///
+/// Zeigt am Zielpfad ein Symlink auf ein Verzeichnis, würden `create_dir_all`
+/// und `read_dir` durch den Link hindurch arbeiten und Daten an einer ganz
+/// anderen Stelle im Dateisystem ablegen. Deshalb wird hier ausschließlich mit
+/// `symlink_metadata` geprüft.
+///
+/// Rückgabe `false` bedeutet: Ziel ist belegt und darf nicht ersetzt werden →
+/// überspringen.
+fn ensure_dir_no_follow(dst: &Path, overwrite: bool) -> std::io::Result<bool> {
+    match std::fs::symlink_metadata(dst) {
+        Ok(meta) if meta.is_dir() => Ok(true),
+        Ok(_) => {
+            if !overwrite {
+                return Ok(false);
+            }
+            remove_path(dst)?;
+            std::fs::create_dir_all(dst)?;
+            Ok(true)
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            std::fs::create_dir_all(dst)?;
+            Ok(true)
+        }
+        Err(e) => Err(e),
+    }
+}
+
 fn copy_recursive(
     src: &Path,
     dst: &Path,
@@ -3043,10 +3347,10 @@ fn copy_recursive(
                             let res: std::io::Result<CopyOutcome> = if tmeta.is_dir() {
                                 // read_dir folgt dem Symlink und liest das Zielverzeichnis.
                                 // Fortschritt zählen die Kind-Kopien selbst.
-                                if !dst.exists() {
-                                    std::fs::create_dir_all(dst)?;
-                                }
                                 (|| {
+                                    if !ensure_dir_no_follow(dst, overwrite)? {
+                                        return Ok(CopyOutcome::Skipped);
+                                    }
                                     let mut outcome = CopyOutcome::Copied;
                                     for entry in std::fs::read_dir(src)? {
                                         let entry = entry?;
@@ -3089,15 +3393,8 @@ fn copy_recursive(
             Ok(CopyOutcome::Copied)
         }
     } else if meta.is_dir() {
-        if !path_occupied_no_follow(dst) {
-            std::fs::create_dir_all(dst)?;
-        } else if !dst.is_dir() {
-            if overwrite {
-                std::fs::remove_file(dst)?;
-                std::fs::create_dir_all(dst)?;
-            } else {
-                return Ok(CopyOutcome::Skipped);
-            }
+        if !ensure_dir_no_follow(dst, overwrite)? {
+            return Ok(CopyOutcome::Skipped);
         }
         let mut outcome = CopyOutcome::Copied;
         for entry in std::fs::read_dir(src)? {
@@ -3189,7 +3486,7 @@ async fn run_job(
                 if let Some(parent) = dst.parent() {
                     let _ = std::fs::create_dir_all(parent);
                 }
-                if std::fs::rename(&src, &dst).is_ok() {
+                if rename_no_clobber(&src, &dst).is_ok() {
                     ctx.done += 1;
                     ctx.emit(&it.src);
                     handled = true;
@@ -3929,8 +4226,16 @@ struct PaneChanged {
     path: String,
 }
 
+/// Ordnerüberwachung einrichten. Im Worker-Thread, weil sowohl die Prüfung auf
+/// ein Verzeichnis als auch `watch()` auf hängenden Netzlaufwerken blockieren.
 #[tauri::command]
-fn watch_path(app: AppHandle, pane_id: String, path: String) -> Result<(), String> {
+async fn watch_path(app: AppHandle, pane_id: String, path: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || watch_path_blocking(app, pane_id, path))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+fn watch_path_blocking(app: AppHandle, pane_id: String, path: String) -> Result<(), String> {
     let mgr: State<WatcherManager> = app.state();
     let p = expand_tilde(&path);
     if !p.is_dir() {
@@ -3976,7 +4281,6 @@ fn unwatch_pane(app: AppHandle, pane_id: String) {
     lock_safe(&mgr.inner).remove(&pane_id);
 }
 
-#[tauri::command]
 /// Glob-Matching für `*` (beliebig viele Zeichen) und `?` (genau ein Zeichen).
 fn glob_match(pat: &[char], txt: &[char]) -> bool {
     let (mut pi, mut ti) = (0usize, 0usize);
@@ -4003,8 +4307,23 @@ fn glob_match(pat: &[char], txt: &[char]) -> bool {
     pi == pat.len()
 }
 
+/// Rekursive Suche. Läuft im Worker-Thread, damit die Oberfläche während der
+/// Baumdurchquerung bedienbar bleibt.
 #[tauri::command]
-fn search_in_dir(
+async fn search_in_dir(
+    root: String,
+    query: String,
+    show_hidden: bool,
+    max_results: usize,
+) -> Result<Vec<Entry>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        search_in_dir_blocking(root, query, show_hidden, max_results)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+fn search_in_dir_blocking(
     root: String,
     query: String,
     show_hidden: bool,
@@ -4365,7 +4684,13 @@ fn classify(ext: &str, is_dir: bool) -> &'static str {
 }
 
 #[tauri::command]
-fn preview_info(path: String) -> Result<PreviewInfo, String> {
+async fn preview_info(path: String) -> Result<PreviewInfo, String> {
+    tauri::async_runtime::spawn_blocking(move || preview_info_blocking(path))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+fn preview_info_blocking(path: String) -> Result<PreviewInfo, String> {
     let p = expand_tilde(&path);
     let meta = std::fs::metadata(&p).map_err(|e| e.to_string())?;
     let is_dir = meta.is_dir();
@@ -4411,8 +4736,16 @@ fn read_text_preview(path: String, max_bytes: usize) -> Result<String, String> {
     Ok(String::from_utf8_lossy(&buf).into_owned())
 }
 
+/// Vorschaubild erzeugen. Im Worker-Thread, weil `qlmanage` als eigener Prozess
+/// gestartet wird und synchron auf dessen Ende gewartet wird.
 #[tauri::command]
-fn read_image_thumb(path: String, size: u32) -> Result<String, String> {
+async fn read_image_thumb(path: String, size: u32) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || read_image_thumb_blocking(path, size))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+fn read_image_thumb_blocking(path: String, size: u32) -> Result<String, String> {
     use std::process::Command;
     let p = expand_tilde(&path);
     let tmp_dir = std::env::temp_dir().join("dualbeam-thumbs");
@@ -5024,7 +5357,7 @@ mod copy_tests {
         bookmark_url_from_mount_source, copy_file_with_metadata, count_delete_entries,
         destination_is_within_source, is_protected_admin_root, is_untransferable_file,
         parse_mount_url, percent_encode_segment, preview_walk_src, remove_source_after_move,
-        replace_file_after_copy, search_in_dir, sync_preview_inner, sync_two_way_preview_inner,
+        replace_file_after_copy, search_in_dir_blocking, sync_preview_inner, sync_two_way_preview_inner,
         webdav_host_from_url, webdav_remote_url, zip_extract_inner, CopyOutcome,
     };
     use std::ffi::CString;
@@ -5567,7 +5900,7 @@ mod copy_tests {
         let needle = nested.join("Needle.txt");
         std::fs::write(&needle, b"found recursively").unwrap();
 
-        let results = search_in_dir(
+        let results = search_in_dir_blocking(
             root.to_string_lossy().into_owned(),
             "needle".into(),
             false,

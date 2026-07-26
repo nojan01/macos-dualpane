@@ -77,9 +77,23 @@ export function PropertiesDialog() {
       <div
         class="modal-backdrop"
         onMouseDown={(ev) => { if (ev.target === ev.currentTarget) close(); }}
-        onKeyDown={(ev) => { if (ev.key === "Escape") close(); }}
       >
-        <div class="modal modal-props" onMouseDown={(ev) => ev.stopPropagation()}>
+        <div
+          class="modal modal-props"
+          role="dialog"
+          aria-modal="true"
+          aria-label={t("props.title")}
+          onMouseDown={(ev) => ev.stopPropagation()}
+          tabIndex={-1}
+          ref={(el) => queueMicrotask(() => el?.focus())}
+          onKeyDown={(ev) => {
+            ev.stopPropagation();
+            if (ev.key === "Escape") {
+              ev.preventDefault();
+              close();
+            }
+          }}
+        >
           <Show
             when={props()}
             fallback={<div class="props-loading">{t("common.loading")}</div>}

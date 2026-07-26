@@ -42,7 +42,9 @@ export function JobBar() {
               </Show>
             </span>
             <span class="cur">{j().current.split("/").pop() ?? ""}</span>
-            <button onClick={() => cancelJob(j().id)}>{t("common.cancel")}</button>
+            <button onClick={() => void cancelJob(j().id).catch(() => {})}>
+              {t("common.cancel")}
+            </button>
           </div>
         );
       }}

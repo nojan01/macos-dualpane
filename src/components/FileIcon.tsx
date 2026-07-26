@@ -1,7 +1,29 @@
 import { createEffect, createSignal, onCleanup, Show } from "solid-js";
 import { readFileIcon } from "../ipc";
 
+// Icons sind Data-URLs und damit vergleichsweise gross. Ohne Obergrenze
+// wuechse der Cache beim Durchblaettern grosser Ordner unbegrenzt.
+const ICON_CACHE_MAX = 2000;
 const cache = new Map<string, string>();
+
+/** Zuletzt genutzten Eintrag ans Ende schieben und den aeltesten verwerfen. */
+function cacheGet(path: string): string | undefined {
+  const hit = cache.get(path);
+  if (hit === undefined) return undefined;
+  cache.delete(path);
+  cache.set(path, hit);
+  return hit;
+}
+
+function cacheSet(path: string, url: string) {
+  cache.set(path, url);
+  while (cache.size > ICON_CACHE_MAX) {
+    const oldest = cache.keys().next();
+    if (oldest.done) break;
+    cache.delete(oldest.value);
+  }
+}
+
 const inflight = new Map<string, Promise<string>>();
 const queue: Array<() => void> = [];
 let active = 0;
@@ -30,13 +52,13 @@ function schedule<T>(fn: () => Promise<T>): Promise<T> {
 }
 
 function getIcon(path: string): Promise<string> {
-  const c = cache.get(path);
+  const c = cacheGet(path);
   if (c) return Promise.resolve(c);
   const f = inflight.get(path);
   if (f) return f;
   const p = schedule(() => readFileIcon(path, 32))
     .then((url) => {
-      cache.set(path, url);
+      cacheSet(path, url);
       inflight.delete(path);
       return url;
     })
@@ -49,10 +71,10 @@ function getIcon(path: string): Promise<string> {
 }
 
 export function FileIcon(props: { path: string; fallback: string }) {
-  const [url, setUrl] = createSignal<string | null>(cache.get(props.path) ?? null);
+  const [url, setUrl] = createSignal<string | null>(cacheGet(props.path) ?? null);
   createEffect(() => {
     const path = props.path;
-    const cached = cache.get(path);
+    const cached = cacheGet(path);
     if (cached) {
       setUrl(cached);
       return;

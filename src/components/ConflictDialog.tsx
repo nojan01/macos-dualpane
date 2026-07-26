@@ -7,7 +7,21 @@ export function ConflictDialog() {
     <Show when={conflictPrompt()}>
       {(p) => (
         <div class="modal-backdrop" onClick={() => resolveConflict("cancel")}>
-          <div class="modal" onClick={(e) => e.stopPropagation()}>
+          <div
+            class="modal"
+            role="dialog"
+            aria-modal="true"
+            onClick={(e) => e.stopPropagation()}
+            tabIndex={-1}
+            ref={(el) => queueMicrotask(() => el?.focus())}
+            onKeyDown={(ev) => {
+              ev.stopPropagation();
+              if (ev.key === "Escape") {
+                ev.preventDefault();
+                resolveConflict("cancel");
+              }
+            }}
+          >
             <h2>{t("conflict.title")}</h2>
             <p>
               {p().count === 1
