@@ -104,7 +104,22 @@ export function SyncDialog() {
         {(s) => (
           <Show when={!syncLoading()}>
         <div class="modal-backdrop" onClick={cancelSync}>
-          <div class="modal" onClick={(e) => e.stopPropagation()}>
+          <div
+            class="modal"
+            role="dialog"
+            aria-modal="true"
+            aria-label={t("sync.title")}
+            onClick={(e) => e.stopPropagation()}
+            tabIndex={-1}
+            ref={(el) => queueMicrotask(() => el?.focus())}
+            onKeyDown={(ev) => {
+              ev.stopPropagation();
+              if (ev.key === "Escape") {
+                ev.preventDefault();
+                cancelSync();
+              }
+            }}
+          >
             <h2>{t("sync.title")}</h2>
             <p>{t("sync.summary", { name: s().srcName })}</p>
             <Show

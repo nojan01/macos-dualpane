@@ -12,6 +12,7 @@ import {
   newTab,
   closeActiveTab,
   switchTab,
+  requestFocusFilter,
 } from "./state";
 import { openDefault, quickLook, clipboardWriteFiles } from "./ipc";
 import { openProperties } from "./components/PropertiesDialog";
@@ -327,6 +328,13 @@ export function attachKeymap() {
         switchTab(pane, parseInt(ev.key, 10) - 1);
         return;
       }
+    }
+
+    // Schrägstrich fokussiert das Filterfeld der aktiven Spalte.
+    if (!ev.metaKey && !ev.ctrlKey && !ev.altKey && ev.key === "/") {
+      ev.preventDefault();
+      requestFocusFilter(pane);
+      return;
     }
 
     // Type-ahead: einzelnes druckbares Zeichen ohne Modifier -> zum Eintrag springen.

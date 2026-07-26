@@ -73,7 +73,7 @@ export function Statusbar() {
 
 const SHORTCUTS: { key: string; descKey: string }[] = [
   { key: "F1", descKey: "hb.help" },
-  { key: "F2", descKey: "hb.rename" },
+  { key: "F2 / ⌘R", descKey: "hb.rename" },
   { key: "__F3__", descKey: "hb.preview" },
   { key: "F5", descKey: "hb.copy" },
   { key: "F6", descKey: "hb.move" },
@@ -90,7 +90,7 @@ const SHORTCUTS: { key: string; descKey: string }[] = [
   { key: "⌘K", descKey: "hb.connectServer" },
   { key: "⌘I", descKey: "hb.previewToggle" },
   { key: "⌘.", descKey: "hb.hidden" },
-  { key: "⌘R", descKey: "hb.refresh" },
+  { key: "⌘⇧R", descKey: "hb.refresh" },
   { key: "⌘F", descKey: "hb.search" },
   { key: "⌘E", descKey: "hb.zip" },
   { key: "/", descKey: "hb.filter" },
