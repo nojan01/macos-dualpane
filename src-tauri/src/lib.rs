@@ -92,6 +92,65 @@ fn mode_to_rwx(mode: u32) -> String {
     s
 }
 
+/// Benutzernamen thread-sicher ermitteln.
+///
+/// `getpwuid` liefert einen Zeiger auf einen prozessweit geteilten Puffer und
+/// ist damit nicht thread-sicher – ein paralleler Aufruf kann den Puffer
+/// überschreiben, während wir ihn noch lesen. Deshalb die `_r`-Variante mit
+/// eigenem Puffer.
+fn lookup_pw_name(uid: u32) -> Option<String> {
+    let mut buf = vec![0 as libc::c_char; 1024];
+    loop {
+        let mut pwd: libc::passwd = unsafe { std::mem::zeroed() };
+        let mut result: *mut libc::passwd = std::ptr::null_mut();
+        let rc = unsafe {
+            libc::getpwuid_r(
+                uid as libc::uid_t,
+                &mut pwd,
+                buf.as_mut_ptr(),
+                buf.len(),
+                &mut result,
+            )
+        };
+        if rc == libc::ERANGE && buf.len() < 65536 {
+            buf.resize(buf.len() * 2, 0);
+            continue;
+        }
+        if rc != 0 || result.is_null() {
+            return None;
+        }
+        let cstr = unsafe { std::ffi::CStr::from_ptr(pwd.pw_name) };
+        return Some(cstr.to_string_lossy().into_owned());
+    }
+}
+
+/// Gruppennamen thread-sicher ermitteln (siehe [`lookup_pw_name`]).
+fn lookup_gr_name(gid: u32) -> Option<String> {
+    let mut buf = vec![0 as libc::c_char; 1024];
+    loop {
+        let mut grp: libc::group = unsafe { std::mem::zeroed() };
+        let mut result: *mut libc::group = std::ptr::null_mut();
+        let rc = unsafe {
+            libc::getgrgid_r(
+                gid as libc::gid_t,
+                &mut grp,
+                buf.as_mut_ptr(),
+                buf.len(),
+                &mut result,
+            )
+        };
+        if rc == libc::ERANGE && buf.len() < 65536 {
+            buf.resize(buf.len() * 2, 0);
+            continue;
+        }
+        if rc != 0 || result.is_null() {
+            return None;
+        }
+        let cstr = unsafe { std::ffi::CStr::from_ptr(grp.gr_name) };
+        return Some(cstr.to_string_lossy().into_owned());
+    }
+}
+
 fn uid_to_name(uid: u32) -> String {
     use std::sync::OnceLock;
     static CACHE: OnceLock<Mutex<HashMap<u32, String>>> = OnceLock::new();
@@ -99,19 +158,8 @@ fn uid_to_name(uid: u32) -> String {
     if let Some(v) = lock_safe(cache).get(&uid) {
         return v.clone();
     }
-    let name = unsafe {
-        let pw = libc::getpwuid(uid as libc::uid_t);
-        if pw.is_null() {
-            uid.to_string()
-        } else {
-            let cstr = std::ffi::CStr::from_ptr((*pw).pw_name);
-            cstr.to_string_lossy().into_owned()
-        }
-    };
-    cache
-        .lock()
-        .unwrap_or_else(|p| p.into_inner())
-        .insert(uid, name.clone());
+    let name = lookup_pw_name(uid).unwrap_or_else(|| uid.to_string());
+    lock_safe(cache).insert(uid, name.clone());
     name
 }
 
@@ -122,19 +170,8 @@ fn gid_to_name(gid: u32) -> String {
     if let Some(v) = lock_safe(cache).get(&gid) {
         return v.clone();
     }
-    let name = unsafe {
-        let gr = libc::getgrgid(gid as libc::gid_t);
-        if gr.is_null() {
-            gid.to_string()
-        } else {
-            let cstr = std::ffi::CStr::from_ptr((*gr).gr_name);
-            cstr.to_string_lossy().into_owned()
-        }
-    };
-    cache
-        .lock()
-        .unwrap_or_else(|p| p.into_inner())
-        .insert(gid, name.clone());
+    let name = lookup_gr_name(gid).unwrap_or_else(|| gid.to_string());
+    lock_safe(cache).insert(gid, name.clone());
     name
 }
 
@@ -408,6 +445,41 @@ fn create_finder_alias(target: String, link_path: String) -> Result<(), String> 
     Ok(())
 }
 
+/// Umbenennen, das ein bestehendes Ziel niemals überschreibt.
+///
+/// `renamex_np(RENAME_EXCL)` prüft und benennt in einem einzigen Systemaufruf um.
+/// Ein vorheriges `exists()` gefolgt von `rename()` hätte eine Lücke, in der ein
+/// anderer Prozess die Zieldatei anlegen kann – sie würde dann kommentarlos
+/// überschrieben.
+fn rename_no_clobber(a: &Path, b: &Path) -> std::io::Result<()> {
+    use std::os::unix::ffi::OsStrExt;
+    let to_c = |p: &Path| {
+        std::ffi::CString::new(p.as_os_str().as_bytes())
+            .map_err(|_| std::io::Error::other("Pfad enthält ein Nullbyte"))
+    };
+    let ca = to_c(a)?;
+    let cb = to_c(b)?;
+    let rc = unsafe { libc::renamex_np(ca.as_ptr(), cb.as_ptr(), libc::RENAME_EXCL) };
+    if rc == 0 {
+        return Ok(());
+    }
+    let err = std::io::Error::last_os_error();
+    match err.raw_os_error() {
+        // Nicht jedes Dateisystem (SMB, WebDAV, FAT …) kennt renamex_np.
+        // Dort bleibt nur die Prüfung vorab.
+        Some(libc::ENOTSUP) | Some(libc::EINVAL) | Some(libc::ENOSYS) => {
+            if path_occupied_no_follow(b) {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::AlreadyExists,
+                    "Ziel existiert bereits",
+                ));
+            }
+            std::fs::rename(a, b)
+        }
+        _ => Err(err),
+    }
+}
+
 #[tauri::command]
 fn rename_path(old_path: String, new_path: String) -> Result<(), String> {
     let a = expand_tilde(&old_path);
@@ -415,10 +487,13 @@ fn rename_path(old_path: String, new_path: String) -> Result<(), String> {
     if a == b {
         return Ok(());
     }
-    if path_occupied_no_follow(&b) {
-        return Err(format!("err.exists\u{1f}{}", b.display()));
+    match rename_no_clobber(&a, &b) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            Err(format!("err.exists\u{1f}{}", b.display()))
+        }
+        Err(e) => Err(e.to_string()),
     }
-    std::fs::rename(&a, &b).map_err(|e| e.to_string())
 }
 
 /// Mountpoints registrierter Time-Machine-Ziele (canonicalize'd) für schnelle
@@ -853,12 +928,22 @@ async fn force_delete_admin(paths: Vec<String>) -> Result<(), String> {
 fn force_delete_admin_blocking(paths: Vec<String>) -> Result<(), String> {
     use std::io::Write;
     // Diagnose-Log nur in Debug-Builds; im Release wird nichts auf die Platte geschrieben.
+    // Bewusst im nutzereigenen Ordner statt in /tmp: dort könnte ein anderer
+    // Nutzer den Namen vorbelegen und per Symlink auf eine fremde Datei zeigen.
     #[cfg(debug_assertions)]
-    let mut log = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open("/tmp/dualbeam-delete.log")
-        .ok();
+    let mut log = {
+        use std::os::unix::fs::OpenOptionsExt;
+        dirs::data_local_dir().and_then(|dir| {
+            let dir = dir.join("DualBeam");
+            std::fs::create_dir_all(&dir).ok()?;
+            std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .custom_flags(libc::O_NOFOLLOW)
+                .open(dir.join("delete.log"))
+                .ok()
+        })
+    };
     #[cfg(not(debug_assertions))]
     let mut log: Option<std::fs::File> = None;
     let logln = |log: &mut Option<std::fs::File>, s: &str| {
@@ -1386,20 +1471,29 @@ fn run_osascript_with_timeout(script: &str) -> Result<std::process::Output, Stri
         .spawn()
         .map_err(|_| "err.mount.failed".to_string())?;
     if let Some(mut stdin) = child.stdin.take() {
-        stdin
-            .write_all(script.as_bytes())
-            .map_err(|_| "err.mount.failed".to_string())?;
+        if let Err(e) = stdin.write_all(script.as_bytes()) {
+            // Sonst bliebe osascript als Waise hängen und würde ewig auf
+            // Eingaben warten.
+            let _ = child.kill();
+            let _ = child.wait();
+            let _ = e;
+            return Err("err.mount.failed".to_string());
+        }
     }
     let deadline = Instant::now() + Duration::from_secs(120);
     loop {
-        if child
-            .try_wait()
-            .map_err(|_| "err.mount.failed".to_string())?
-            .is_some()
-        {
-            return child
-                .wait_with_output()
-                .map_err(|_| "err.mount.failed".to_string());
+        match child.try_wait() {
+            Ok(Some(_)) => {
+                return child
+                    .wait_with_output()
+                    .map_err(|_| "err.mount.failed".to_string());
+            }
+            Ok(None) => {}
+            Err(_) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err("err.mount.failed".to_string());
+            }
         }
         if Instant::now() >= deadline {
             let _ = child.kill();
@@ -3166,6 +3260,34 @@ fn remove_source_after_move(src: &Path, outcome: CopyOutcome) -> Result<(), Stri
     })
 }
 
+/// Stellt sicher, dass `dst` ein echtes Verzeichnis ist – ohne Symlinks zu folgen.
+///
+/// Zeigt am Zielpfad ein Symlink auf ein Verzeichnis, würden `create_dir_all`
+/// und `read_dir` durch den Link hindurch arbeiten und Daten an einer ganz
+/// anderen Stelle im Dateisystem ablegen. Deshalb wird hier ausschließlich mit
+/// `symlink_metadata` geprüft.
+///
+/// Rückgabe `false` bedeutet: Ziel ist belegt und darf nicht ersetzt werden →
+/// überspringen.
+fn ensure_dir_no_follow(dst: &Path, overwrite: bool) -> std::io::Result<bool> {
+    match std::fs::symlink_metadata(dst) {
+        Ok(meta) if meta.is_dir() => Ok(true),
+        Ok(_) => {
+            if !overwrite {
+                return Ok(false);
+            }
+            remove_path(dst)?;
+            std::fs::create_dir_all(dst)?;
+            Ok(true)
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            std::fs::create_dir_all(dst)?;
+            Ok(true)
+        }
+        Err(e) => Err(e),
+    }
+}
+
 fn copy_recursive(
     src: &Path,
     dst: &Path,
@@ -3225,10 +3347,10 @@ fn copy_recursive(
                             let res: std::io::Result<CopyOutcome> = if tmeta.is_dir() {
                                 // read_dir folgt dem Symlink und liest das Zielverzeichnis.
                                 // Fortschritt zählen die Kind-Kopien selbst.
-                                if !dst.exists() {
-                                    std::fs::create_dir_all(dst)?;
-                                }
                                 (|| {
+                                    if !ensure_dir_no_follow(dst, overwrite)? {
+                                        return Ok(CopyOutcome::Skipped);
+                                    }
                                     let mut outcome = CopyOutcome::Copied;
                                     for entry in std::fs::read_dir(src)? {
                                         let entry = entry?;
@@ -3271,15 +3393,8 @@ fn copy_recursive(
             Ok(CopyOutcome::Copied)
         }
     } else if meta.is_dir() {
-        if !path_occupied_no_follow(dst) {
-            std::fs::create_dir_all(dst)?;
-        } else if !dst.is_dir() {
-            if overwrite {
-                std::fs::remove_file(dst)?;
-                std::fs::create_dir_all(dst)?;
-            } else {
-                return Ok(CopyOutcome::Skipped);
-            }
+        if !ensure_dir_no_follow(dst, overwrite)? {
+            return Ok(CopyOutcome::Skipped);
         }
         let mut outcome = CopyOutcome::Copied;
         for entry in std::fs::read_dir(src)? {
@@ -3371,7 +3486,7 @@ async fn run_job(
                 if let Some(parent) = dst.parent() {
                     let _ = std::fs::create_dir_all(parent);
                 }
-                if std::fs::rename(&src, &dst).is_ok() {
+                if rename_no_clobber(&src, &dst).is_ok() {
                     ctx.done += 1;
                     ctx.emit(&it.src);
                     handled = true;
