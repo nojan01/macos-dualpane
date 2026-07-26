@@ -113,7 +113,13 @@ export async function transferEntries(
     overwrite: false,
   }));
 
-  const conflicts = await checkConflicts(items);
+  let conflicts: string[];
+  try {
+    conflicts = await checkConflicts(items);
+  } catch (e) {
+    await notifyError(t("common.error", { msg: errMsg(e) }));
+    return;
+  }
   if (conflicts.length > 0) {
     let choice: ConflictChoice;
     if (conflictMode === "skip") choice = "skip";
@@ -133,18 +139,23 @@ export async function transferEntries(
       );
     } else if (choice === "rename") {
       const resolved: JobItem[] = [];
-      for (const i of items) {
-        if (conflicts.includes(i.dst)) {
-          const name = i.dst.split("/").pop()!;
-          const fresh = await uniqueName(dstCwd, name);
-          resolved.push({
-            src: i.src,
-            dst: joinPath(dstCwd, fresh),
-            overwrite: false,
-          });
-        } else {
-          resolved.push(i);
+      try {
+        for (const i of items) {
+          if (conflicts.includes(i.dst)) {
+            const name = i.dst.split("/").pop()!;
+            const fresh = await uniqueName(dstCwd, name);
+            resolved.push({
+              src: i.src,
+              dst: joinPath(dstCwd, fresh),
+              overwrite: false,
+            });
+          } else {
+            resolved.push(i);
+          }
         }
+      } catch (e) {
+        await notifyError(t("common.error", { msg: errMsg(e) }));
+        return;
       }
       items = resolved;
     }
@@ -191,12 +202,12 @@ export async function createLinksInOther(kind: "symlink" | "alias") {
   if (sel.length === 0) return;
   const errors: string[] = [];
   for (const e of sel) {
-    let name = e.name;
-    if (await pathExists(joinPath(dstCwd, name))) {
-      name = await uniqueName(dstCwd, name);
-    }
-    const dst = joinPath(dstCwd, name);
     try {
+      let name = e.name;
+      if (await pathExists(joinPath(dstCwd, name))) {
+        name = await uniqueName(dstCwd, name);
+      }
+      const dst = joinPath(dstCwd, name);
       if (kind === "symlink") await createSymlink(e.path, dst);
       else await createFinderAlias(e.path, dst);
     } catch (err) {
@@ -215,9 +226,14 @@ export async function duplicateSelected() {
   const dir = state[pane].cwd;
 
   const items: JobItem[] = [];
-  for (const e of sel) {
-    const fresh = await uniqueName(dir, e.name);
-    items.push({ src: e.path, dst: joinPath(dir, fresh), overwrite: false });
+  try {
+    for (const e of sel) {
+      const fresh = await uniqueName(dir, e.name);
+      items.push({ src: e.path, dst: joinPath(dir, fresh), overwrite: false });
+    }
+  } catch (err) {
+    await notifyError(t("common.error", { msg: errMsg(err) }));
+    return;
   }
 
   const id = newJobId();
