@@ -19,6 +19,7 @@ import {
   runNetworkDelete,
   stageDeleteForUndo,
   forceDeleteAdmin,
+  moveToTrash,
   pathExists,
   pathIsNetwork,
   zipCreate,
@@ -283,6 +284,18 @@ export async function deleteSelected(skipConfirm = false) {
         title: t("jobs.trash.timeMachine.title"),
         message: t("jobs.trash.timeMachine.message"),
       });
+      await refreshPane(pane);
+      return;
+    }
+    // Kein beschreibbarer Rückgängig-Puffer auf diesem Volume (z. B. externe
+    // Platte, schreibgeschütztes Image). Das ist kein Rechteproblem: normal in
+    // den Papierkorb verschieben, nur ohne Rückgängig-Funktion.
+    if (raw.includes("UNDO_UNAVAILABLE")) {
+      try {
+        await moveToTrash(sel.map((e) => e.path));
+      } catch (e2) {
+        await notifyError(t("common.error", { msg: errMsg(e2) }));
+      }
       await refreshPane(pane);
       return;
     }

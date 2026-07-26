@@ -1,4 +1,4 @@
-import { createSignal, For, Show, onCleanup } from "solid-js";
+import { createSignal, createEffect, For, Show, onCleanup } from "solid-js";
 import { state, loadPane, selectOnly, setActive } from "../state";
 import { searchInDir } from "../ipc";
 import type { Entry, PaneId } from "../types";
@@ -109,8 +109,14 @@ export function SearchDialog() {
     }
   };
 
-  // Auto-focus beim Mount via ref
-  setTimeout(() => inputEl?.focus(), 0);
+  // Der Dialog wird dauerhaft gerendert und nur über `searchOpen()` ein- und
+  // ausgeblendet. Der Fokus muss deshalb an das Öffnen gekoppelt werden – ein
+  // einmaliger Timeout beim Mount liefe ins Leere, weil das Eingabefeld dann
+  // noch gar nicht existiert.
+  createEffect(() => {
+    if (!searchOpen()) return;
+    queueMicrotask(() => inputEl?.focus());
+  });
 
   onCleanup(() => {
     request += 1;

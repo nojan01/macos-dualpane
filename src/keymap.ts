@@ -1,7 +1,6 @@
 import {
   state,
   setActive,
-  setCursor,
   selectOnly,
   loadPane,
   toggleHidden,
@@ -90,6 +89,14 @@ function typeAhead(pane: PaneId, ch: string) {
   }
 }
 
+/** Selektor für alle modalen Ebenen der App. */
+const MODAL_SELECTOR = ".modal-backdrop, .search-overlay";
+
+/** True, solange irgendein modaler Dialog geöffnet ist. */
+export function modalIsOpen(): boolean {
+  return document.querySelector(MODAL_SELECTOR) !== null;
+}
+
 export function attachKeymap() {
   window.addEventListener("keydown", async (ev) => {
     // Eingaben in Inputs nicht abfangen
@@ -99,6 +106,12 @@ export function attachKeymap() {
       (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable)
     )
       return;
+
+    // Solange ein modaler Dialog offen ist, dürfen globale Kürzel nicht im
+    // dahinterliegenden Pane zuschlagen. Unter WebKit erhalten Buttons beim
+    // Klick keinen Fokus, der Fokus liegt also meist auf `body` – ohne diese
+    // Sperre würde z. B. F6 kommentarlos Dateien im Hintergrund verschieben.
+    if (modalIsOpen()) return;
 
     const pane = state.active;
     const p = state[pane];
@@ -128,12 +141,10 @@ export function attachKeymap() {
         return;
       case "ArrowDown":
         ev.preventDefault();
-        setCursor(pane, p.cursor + 1);
         selectOnly(pane, Math.min(p.entries.length - 1, p.cursor + 1));
         return;
       case "ArrowUp":
         ev.preventDefault();
-        setCursor(pane, p.cursor - 1);
         selectOnly(pane, Math.max(0, p.cursor - 1));
         return;
       case "PageDown":

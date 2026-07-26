@@ -451,14 +451,20 @@ fn is_time_machine_path(full: &Path, tm_mounts: &[std::path::PathBuf]) -> bool {
         }
     }
     // 3) Ein übergeordnetes Verzeichnis ist eine TM-Backup-Wurzel (greift auch
-    //    bei ehemaligen, nicht mehr registrierten Backup-Volumes).
+    //    bei ehemaligen, nicht mehr registrierten Backup-Volumes). Die
+    //    MachineID-Datei markiert Netzwerk-Backups in einem `.sparsebundle`;
+    //    dessen Endung allein reicht nicht, da sie auch für gewöhnliche
+    //    Image-Dateien verwendet wird.
     let mut cur: Option<&Path> = Some(full);
     let mut depth = 0u32;
     while let Some(p) = cur {
         if depth > 64 {
             break;
         }
-        if p.join("backup_manifest.plist").is_file() || p.join("Backups.backupdb").is_dir() {
+        if p.join("backup_manifest.plist").is_file()
+            || p.join("Backups.backupdb").is_dir()
+            || p.join("com.apple.TimeMachine.MachineID.plist").is_file()
+        {
             return true;
         }
         cur = p.parent();
@@ -554,6 +560,51 @@ fn undo_staging_dir(token: &str) -> Result<PathBuf, String> {
     Ok(base.join("DualBeam").join("Undo").join(token))
 }
 
+/// Geräte-ID (Volume) eines Pfads. `None`, wenn der Pfad nicht lesbar ist.
+fn device_of(path: &Path) -> Option<u64> {
+    use std::os::unix::fs::MetadataExt;
+    std::fs::metadata(path).ok().map(|m| m.dev())
+}
+
+/// Volume-Wurzel eines Pfads: nach oben laufen, solange die Geräte-ID gleich
+/// bleibt. Für `/Volumes/Extern/Foo/bar` also `/Volumes/Extern`.
+fn volume_root_of(path: &Path) -> PathBuf {
+    let dev = match device_of(path) {
+        Some(dev) => dev,
+        None => return PathBuf::from("/"),
+    };
+    let mut cur = path.to_path_buf();
+    loop {
+        let parent = match cur.parent() {
+            Some(parent) => parent.to_path_buf(),
+            None => return cur,
+        };
+        match device_of(&parent) {
+            Some(d) if d == dev => cur = parent,
+            _ => return cur,
+        }
+    }
+}
+
+/// Verzeichnis, in das ein zu löschendes Objekt zwischengelagert wird.
+///
+/// `std::fs::rename` scheitert über Volume-Grenzen hinweg immer mit `EXDEV`.
+/// Der Puffer muss deshalb auf demselben Volume wie das Original liegen: für
+/// Objekte auf dem Boot-Volume im App-Datenordner, sonst in einem versteckten
+/// Ordner auf der Wurzel des jeweiligen Volumes.
+fn undo_staging_dir_for(original: &Path, token: &str) -> Result<PathBuf, String> {
+    let default = undo_staging_dir(token)?;
+    let parent = original.parent().unwrap_or_else(|| Path::new("/"));
+    let app_base = dirs::data_local_dir().ok_or_else(|| "Undo-Ordner nicht verfügbar".to_string())?;
+    match (device_of(parent), device_of(&app_base)) {
+        (Some(a), Some(b)) if a == b => Ok(default),
+        (Some(_), _) => Ok(volume_root_of(parent).join(".DualBeamUndo").join(token)),
+        // Volume nicht ermittelbar: der App-Ordner ist die sicherere Annahme,
+        // ein etwaiger EXDEV-Fehler wird sauber als UNDO_UNAVAILABLE gemeldet.
+        _ => Ok(default),
+    }
+}
+
 #[tauri::command]
 fn stage_delete_for_undo(paths: Vec<String>) -> Result<UndoDeleteBatch, String> {
     use std::os::macos::fs::MetadataExt;
@@ -567,8 +618,7 @@ fn stage_delete_for_undo(paths: Vec<String>) -> Result<UndoDeleteBatch, String> 
             .map(|d| d.as_nanos())
             .unwrap_or_default()
     );
-    let dir = undo_staging_dir(&token)?;
-    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let dir_default = undo_staging_dir(&token)?;
     let tm_mounts = tm_mountpoints_canon();
     let mounts = mount_fs_types();
     let mut originals = Vec::new();
@@ -598,15 +648,34 @@ fn stage_delete_for_undo(paths: Vec<String>) -> Result<UndoDeleteBatch, String> 
     }
 
     let mut items: Vec<UndoDeleteItem> = Vec::new();
+    let mut prepared: Vec<PathBuf> = Vec::new();
     for (index, original) in originals.into_iter().enumerate() {
         let name = original
             .file_name()
             .ok_or_else(|| "Ungültiger Löschpfad".to_string())?;
+        // Der Puffer muss auf demselben Volume liegen wie das Original, sonst
+        // scheitert `rename` mit EXDEV (externe Platten, gemountete Images).
+        let dir = undo_staging_dir_for(&original, &token).unwrap_or_else(|_| dir_default.clone());
+        if !prepared.contains(&dir) {
+            if let Err(e) = std::fs::create_dir_all(&dir) {
+                // Kein beschreibbarer Puffer auf diesem Volume (z. B. schreib-
+                // geschützt): ohne Rückgängig-Funktion weiterlöschen statt einen
+                // Fehler zu melden, den das Frontend als Rechteproblem deutet.
+                for item in items.iter().rev() {
+                    let _ = std::fs::rename(&item.staged, &item.original);
+                }
+                return Err(format!("UNDO_UNAVAILABLE\u{1f}{e}"));
+            }
+            prepared.push(dir.clone());
+        }
         let staged = dir.join(format!("{index}-{}", name.to_string_lossy()));
         if let Err(e) = std::fs::rename(&original, &staged) {
             // Eine teilweise verschobene Auswahl darf nie zurückbleiben.
             for item in items.iter().rev() {
                 let _ = std::fs::rename(&item.staged, &item.original);
+            }
+            if e.raw_os_error() == Some(libc::EXDEV) {
+                return Err(format!("UNDO_UNAVAILABLE\u{1f}{e}"));
             }
             return Err(format!("{}: {}", original.display(), e));
         }
@@ -620,9 +689,16 @@ fn stage_delete_for_undo(paths: Vec<String>) -> Result<UndoDeleteBatch, String> 
 
 #[tauri::command]
 fn undo_staged_delete(items: Vec<UndoDeleteItem>) -> Result<(), String> {
+    let mut staging_dirs: Vec<PathBuf> = Vec::new();
     for item in &items {
         let original = PathBuf::from(&item.original);
         let staged = PathBuf::from(&item.staged);
+        if let Some(parent) = staged.parent() {
+            let parent = parent.to_path_buf();
+            if !staging_dirs.contains(&parent) {
+                staging_dirs.push(parent);
+            }
+        }
         if original.exists() {
             return Err(format!("{} existiert bereits", original.display()));
         }
@@ -632,32 +708,65 @@ fn undo_staged_delete(items: Vec<UndoDeleteItem>) -> Result<(), String> {
         std::fs::rename(&staged, &original)
             .map_err(|e| format!("{}: {}", original.display(), e))?;
     }
+    remove_empty_staging_dirs(&staging_dirs);
     Ok(())
+}
+
+/// Räumt leer gewordene Puffer-Verzeichnisse auf. Fehler sind unerheblich: der
+/// periodische `cleanup_expired_undo` fängt Reste später ohnehin ab.
+fn remove_empty_staging_dirs(dirs: &[PathBuf]) {
+    for dir in dirs {
+        let _ = std::fs::remove_dir(dir);
+        // Auf fremden Volumes ist `.DualBeamUndo` der gemeinsame Elternordner.
+        if let Some(parent) = dir.parent() {
+            if parent.file_name().and_then(|n| n.to_str()) == Some(".DualBeamUndo") {
+                let _ = std::fs::remove_dir(parent);
+            }
+        }
+    }
 }
 
 #[tauri::command]
 fn finalize_staged_delete(items: Vec<UndoDeleteItem>) -> Result<(), String> {
+    let mut staging_dirs: Vec<PathBuf> = Vec::new();
+    for item in &items {
+        if let Some(parent) = Path::new(&item.staged).parent() {
+            let parent = parent.to_path_buf();
+            if !staging_dirs.contains(&parent) {
+                staging_dirs.push(parent);
+            }
+        }
+    }
     let staged: Vec<String> = items.into_iter().map(|item| item.staged).collect();
-    move_to_trash(staged)
+    let result = move_to_trash(staged);
+    remove_empty_staging_dirs(&staging_dirs);
+    result
 }
 
 /// Entfernt abgelaufene Rückgängig-Puffer aus früheren Sitzungen. Der Puffer
-/// liegt ausschließlich im App-Datenordner und wird erst nach zehn Minuten
-/// lautlos in den Papierkorb verschoben.
+/// liegt im App-Datenordner bzw. – für Objekte auf anderen Volumes – in einem
+/// versteckten Ordner auf der jeweiligen Volume-Wurzel. Er wird erst nach zehn
+/// Minuten lautlos in den Papierkorb verschoben.
 #[tauri::command]
 fn cleanup_expired_undo() -> Result<(), String> {
-    let base = dirs::data_local_dir()
-        .ok_or_else(|| "Undo-Ordner nicht verfügbar".to_string())?
-        .join("DualBeam")
-        .join("Undo");
-    let expired = match std::fs::read_dir(&base) {
-        Ok(entries) => entries,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(e) => return Err(e.to_string()),
-    };
-    let paths: Vec<String> = expired
-        .filter_map(Result::ok)
-        .filter_map(|entry| {
+    let mut bases: Vec<PathBuf> = Vec::new();
+    if let Some(local) = dirs::data_local_dir() {
+        bases.push(local.join("DualBeam").join("Undo"));
+    }
+    // Puffer auf externen Volumes einsammeln.
+    bases.push(PathBuf::from("/.DualBeamUndo"));
+    if let Ok(volumes) = std::fs::read_dir("/Volumes") {
+        for entry in volumes.filter_map(Result::ok) {
+            bases.push(entry.path().join(".DualBeamUndo"));
+        }
+    }
+    let mut paths: Vec<String> = Vec::new();
+    for base in &bases {
+        let entries = match std::fs::read_dir(base) {
+            Ok(entries) => entries,
+            Err(_) => continue,
+        };
+        paths.extend(entries.filter_map(Result::ok).filter_map(|entry| {
             let meta = entry.metadata().ok()?;
             if !meta.is_dir() {
                 return None;
@@ -665,8 +774,8 @@ fn cleanup_expired_undo() -> Result<(), String> {
             let age = meta.modified().ok()?.elapsed().ok()?;
             (age >= Duration::from_secs(10 * 60))
                 .then(|| entry.path().to_string_lossy().into_owned())
-        })
-        .collect();
+        }));
+    }
     if paths.is_empty() {
         return Ok(());
     }
@@ -2538,6 +2647,22 @@ async fn run_network_delete(
 ) -> Result<(), String> {
     if job_id.is_empty() || paths.is_empty() {
         return Err("Ungültiger Löschauftrag".into());
+    }
+    // Time-Machine-Backups liegen häufig auf per SMB/AFP eingebundenen NAS-
+    // Freigaben und laufen dann über diesen Pfad. Ohne die Prüfung ließe sich
+    // ein komplettes Backup hier endgültig und rekursiv löschen.
+    let guard_paths = paths.clone();
+    let protected = tauri::async_runtime::spawn_blocking(move || {
+        let tm_mounts = tm_mountpoints_canon();
+        guard_paths
+            .iter()
+            .map(|raw| expand_tilde(raw))
+            .find(|path| is_time_machine_path(path, &tm_mounts))
+    })
+    .await
+    .map_err(|e| e.to_string())?;
+    if let Some(path) = protected {
+        return Err(format!("TIMEMACHINE_PROTECTED\u{1f}{}", path.display()));
     }
     let cancel = Arc::new(AtomicBool::new(false));
     {
