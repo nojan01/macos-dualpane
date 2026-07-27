@@ -2401,6 +2401,27 @@ impl<'a> DeleteCtx<'a> {
         }
     }
 
+    /// Meldet, welcher Eintrag gerade bearbeitet wird, ohne den Zähler zu
+    /// verändern. Wichtig vor dem WebDAV-Collection-DELETE: Der Server kann für
+    /// einen großen Ordner eine Weile brauchen, in der sonst gar nichts
+    /// passieren würde.
+    fn working_on(&self, path: &Path) {
+        self.last_emit.set(Instant::now());
+        let _ = self.app.emit(
+            "job-progress",
+            JobProgress {
+                job_id: self.job_id.to_string(),
+                done: self.done,
+                total: self.total,
+                files_done: self.done,
+                current: path.to_string_lossy().into_owned(),
+                finished: false,
+                cancelled: false,
+                error: None,
+            },
+        );
+    }
+
     /// Meldet den Wegfall eines ganzen Teilbaums auf einen Schlag – etwa nach
     /// einem WebDAV-Collection-DELETE, bei dem der Server den kompletten Ordner
     /// in einer Anfrage entfernt. `count` ist die vorab gezählte Zahl der
@@ -2428,11 +2449,26 @@ impl<'a> DeleteCtx<'a> {
 /// Pfades – analog zur Vorschau beim Kopieren. So kennt die Statusleiste eine
 /// echte Gesamtzahl statt „?". Symlinks werden nicht verfolgt (sie zählen wie
 /// eine Datei). Reines Auflisten; weit günstiger als das eigentliche Löschen.
-fn count_delete_entries(p: &Path, cancel: &Arc<AtomicBool>) -> std::io::Result<u64> {
+fn count_delete_entries(
+    p: &Path,
+    cancel: &Arc<AtomicBool>,
+    deadline: Instant,
+) -> std::io::Result<u64> {
     if cancel.load(Ordering::SeqCst) {
         return Err(std::io::Error::new(
             std::io::ErrorKind::Interrupted,
             "Zählen abgebrochen",
+        ));
+    }
+    // Auf Netzlaufwerken kostet das Auflisten genauso viel wie das Löschen
+    // selbst: Jede Ebene ist eine eigene Anfrage. Bei großen Ordnern über
+    // WebDAV liefe die Vorschau minutenlang, bevor überhaupt etwas passiert.
+    // Nach Ablauf des Zeitbudgets wird deshalb ohne Gesamtzahl weitergemacht –
+    // der Fortschritt zählt dann live hoch, statt auf „0" stehen zu bleiben.
+    if Instant::now() >= deadline {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            "Zählen dauert zu lange",
         ));
     }
     let meta = match std::fs::symlink_metadata(p) {
@@ -2453,7 +2489,7 @@ fn count_delete_entries(p: &Path, cancel: &Arc<AtomicBool>) -> std::io::Result<u
                 Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
                 Err(err) => return Err(err),
             };
-            match count_delete_entries(&entry.path(), cancel) {
+            match count_delete_entries(&entry.path(), cancel, deadline) {
                 Ok(n) => count += n,
                 Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
                 Err(err) => return Err(err),
@@ -2461,6 +2497,83 @@ fn count_delete_entries(p: &Path, cancel: &Arc<AtomicBool>) -> std::io::Result<u
         }
     }
     Ok(count)
+}
+
+/// `EBUSY` ("Resource busy") ist auf Netzlaufwerken – allen voran macOS'
+/// `webdavfs` – kein echter Blockadefehler, sondern ein Übergangszustand: Der
+/// Client hält den Eintrag noch im Cache, räumt eine gerade gelöschte
+/// Kind-Ressource nach oder wartet auf die Antwort des Servers. Ein Moment
+/// später gelingt derselbe Aufruf. Auch `ENOTEMPTY` gehört dazu, weil
+/// `webdavfs` ein gecachtes, veraltetes Listing melden kann.
+fn is_retryable_remove_error(err: &std::io::Error) -> bool {
+    matches!(
+        err.raw_os_error(),
+        Some(libc::EBUSY) | Some(libc::ENOTEMPTY)
+    )
+}
+
+/// Entfernt einen einzelnen Eintrag und wiederholt den Versuch bei
+/// vorübergehenden Netzwerkfehlern mit wachsender Wartezeit.
+fn remove_entry_with_retry(p: &Path, is_dir: bool, ctx: &DeleteCtx<'_>) -> std::io::Result<()> {
+    const MAX_RETRIES: u32 = 4;
+    let mut delay = Duration::from_millis(150);
+    let mut attempt = 0;
+    loop {
+        let res = if is_dir {
+            std::fs::remove_dir(p)
+        } else {
+            std::fs::remove_file(p)
+        };
+        match res {
+            Ok(()) => return Ok(()),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(err) if attempt < MAX_RETRIES && is_retryable_remove_error(&err) => {
+                attempt += 1;
+                ctx.check_cancelled()?;
+                std::thread::sleep(delay);
+                delay = (delay * 2).min(Duration::from_millis(1200));
+            }
+            Err(err) => return Err(err),
+        }
+    }
+}
+
+/// Löscht alle Kinder eines Verzeichnisses. Das Listing wird bei jedem Aufruf
+/// frisch geholt, damit ein zweiter Durchgang auch Einträge erwischt, die ein
+/// veraltetes WebDAV-Listing beim ersten Mal verschwiegen hat.
+fn remove_dir_children(p: &Path, ctx: &mut DeleteCtx<'_>) -> std::io::Result<()> {
+    let entries = match std::fs::read_dir(p) {
+        Ok(entries) => entries,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(err) => return Err(err),
+    };
+    for entry in entries {
+        ctx.check_cancelled()?;
+        let entry = match entry {
+            Ok(entry) => entry,
+            // WebDAV-Listings können gerade gelöschte Einträge noch
+            // enthalten. Der Eintrag ist bereits weg und wird übersprungen.
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(err) => return Err(err),
+        };
+        match remove_path_cancellable(&entry.path(), ctx) {
+            Ok(()) => {}
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(err) => return Err(err),
+        }
+    }
+    Ok(())
+}
+
+/// Formt die Fehlermeldung eines fehlgeschlagenen Löschvorgangs. „Resource busy
+/// (os error 16)" ist auf Netzlaufwerken irreführend: Es hat niemand die Datei
+/// geöffnet, das Volume gibt den Eintrag nur nicht frei. Solche Fälle bekommen
+/// eine eigene Kennung, die die Oberfläche in verständlichen Text übersetzt.
+fn delete_error_message(path: &Path, err: &std::io::Error) -> String {
+    if is_retryable_remove_error(err) {
+        return format!("NETWORK_BUSY\u{1f}{}", path.display());
+    }
+    format!("{}: {}", path.display(), err)
 }
 
 fn remove_path_cancellable(p: &Path, ctx: &mut DeleteCtx<'_>) -> std::io::Result<()> {
@@ -2472,33 +2585,25 @@ fn remove_path_cancellable(p: &Path, ctx: &mut DeleteCtx<'_>) -> std::io::Result
     };
 
     if meta.is_dir() && !meta.file_type().is_symlink() {
-        let entries = std::fs::read_dir(p)?;
-        for entry in entries {
-            ctx.check_cancelled()?;
-            let entry = match entry {
-                Ok(entry) => entry,
-                // WebDAV-Listings können gerade gelöschte Einträge noch
-                // enthalten. Der Eintrag ist bereits weg und wird übersprungen.
-                Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
-                Err(err) => return Err(err),
-            };
-            match remove_path_cancellable(&entry.path(), ctx) {
-                Ok(()) => {}
-                Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+        // Bleibt das Verzeichnis belegt, hat das Listing womöglich Kinder
+        // ausgelassen. Dann noch einmal frisch listen, aufräumen und erneut
+        // versuchen – statt den ganzen Auftrag abzubrechen.
+        const MAX_PASSES: u32 = 3;
+        let mut pass = 1;
+        loop {
+            remove_dir_children(p, ctx)?;
+            match remove_entry_with_retry(p, true, ctx) {
+                Ok(()) => break,
+                Err(err) if pass < MAX_PASSES && is_retryable_remove_error(&err) => {
+                    pass += 1;
+                    ctx.check_cancelled()?;
+                    std::thread::sleep(Duration::from_millis(400));
+                }
                 Err(err) => return Err(err),
             }
         }
-        match std::fs::remove_dir(p) {
-            Ok(()) => {}
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-            Err(err) => return Err(err),
-        }
     } else {
-        match std::fs::remove_file(p) {
-            Ok(()) => {}
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-            Err(err) => return Err(err),
-        }
+        remove_entry_with_retry(p, false, ctx)?;
     }
     ctx.removed(p);
     Ok(())
@@ -2683,10 +2788,11 @@ fn webdav_credentials(host: &str) -> Option<(String, String)> {
 #[cfg(target_os = "macos")]
 fn webdav_collection_delete(
     path: &Path,
+    mounts: &[(String, PathBuf)],
     creds_cache: &mut HashMap<String, Option<(String, String)>>,
     cancel: &Arc<AtomicBool>,
 ) -> bool {
-    let Some((source_url, mountpoint)) = best_webdav_mount(&webdav_mounts(), path) else {
+    let Some((source_url, mountpoint)) = best_webdav_mount(mounts, path) else {
         return false;
     };
     let Some(host) = webdav_host_from_url(&source_url) else {
@@ -2708,7 +2814,7 @@ fn webdav_collection_delete(
     // curl liest Ziel und Zugangsdaten aus der Konfiguration auf stdin, damit
     // das Kennwort weder in der Prozessliste (argv) noch auf der Platte landet.
     let config = format!(
-        "silent\nshow-error\nrequest = \"DELETE\"\nconnect-timeout = \"30\"\nmax-time = \"900\"\noutput = \"/dev/null\"\nwrite-out = \"%{{http_code}}\"\nurl = \"{}\"\nuser = \"{}:{}\"\n",
+        "silent\nshow-error\nrequest = \"DELETE\"\nconnect-timeout = \"30\"\nmax-time = \"1800\"\noutput = \"/dev/null\"\nwrite-out = \"%{{http_code}}\"\nurl = \"{}\"\nuser = \"{}:{}\"\n",
         escape_curl_value(&url),
         escape_curl_value(&user),
         escape_curl_value(&password),
@@ -2782,6 +2888,7 @@ fn webdav_collection_delete(
 #[cfg(not(target_os = "macos"))]
 fn webdav_collection_delete(
     _path: &Path,
+    _mounts: &[(String, PathBuf)],
     _creds_cache: &mut HashMap<String, Option<(String, String)>>,
     _cancel: &Arc<AtomicBool>,
 ) -> bool {
@@ -2849,17 +2956,34 @@ async fn run_network_delete(
         );
         // Vorab die Gesamtzahl der Einträge ermitteln – wie die Vorschau beim
         // Kopieren. Damit zeigen Statusleiste, Fortschrittsbalken und Dock-
-        // Badge einen echten Wert statt „?". Die je Pfad gezählte Menge dient
-        // zugleich dazu, den Fortschritt beim WebDAV-Collection-DELETE (löscht
-        // einen ganzen Ordner in einer Anfrage) korrekt hochzuzählen.
+        // Badge einen echten Wert statt „?". Die Vorschau ist aber nur ein
+        // Komfortgewinn: Sie darf den eigentlichen Löschvorgang nicht aufhalten
+        // und wird deshalb übersprungen, sobald sie zu teuer wird.
         let mut planned: Vec<(PathBuf, u64)> = Vec::with_capacity(paths.len());
         let mut count_ok = true;
+        // Zeitbudget für die gesamte Vorschau. Läuft es ab, wird ohne
+        // Gesamtzahl gelöscht statt den Auftrag weiter aufzuhalten.
+        let count_deadline = Instant::now() + Duration::from_secs(2);
+        let mount_list = webdav_mounts();
         for raw in &paths {
             if cancel_for_worker.load(Ordering::SeqCst) {
                 break;
             }
             let path = expand_tilde(raw);
-            match count_delete_entries(&path, &cancel_for_worker) {
+            // Ordner auf einem WebDAV-Laufwerk werden gleich mit einer einzigen
+            // Collection-DELETE-Anfrage entfernt. Sie vorher rekursiv
+            // aufzulisten würde genau die tausenden Einzelanfragen kosten, die
+            // der Schnellpfad einspart – deshalb hier gar nicht erst zählen.
+            let is_webdav_dir = best_webdav_mount(&mount_list, &path).is_some()
+                && std::fs::symlink_metadata(&path)
+                    .map(|m| m.is_dir() && !m.file_type().is_symlink())
+                    .unwrap_or(false);
+            if is_webdav_dir {
+                count_ok = false;
+                planned.push((path, 0));
+                continue;
+            }
+            match count_delete_entries(&path, &cancel_for_worker, count_deadline) {
                 Ok(n) => planned.push((path, n)),
                 // Lässt sich ein Pfad nicht zählen, bleibt die Gesamtzahl offen
                 // (unbestimmter Balken) statt eine falsche Zahl anzuzeigen.
@@ -2891,6 +3015,10 @@ async fn run_network_delete(
             );
         }
         let mut webdav_creds: HashMap<String, Option<(String, String)>> = HashMap::new();
+        // Elternordner, deren Listing der Mount nach einem serverseitigen
+        // DELETE neu einlesen muss (siehe Aufräumen unterhalb der Schleife).
+        let mut stale_parents: Vec<PathBuf> = Vec::new();
+        let mut outcome: Result<(), String> = Ok(());
         for (path, count) in planned {
             if cancel_for_worker.load(Ordering::SeqCst) {
                 break;
@@ -2903,8 +3031,21 @@ async fn run_network_delete(
             let is_dir = std::fs::symlink_metadata(&path)
                 .map(|m| m.is_dir() && !m.file_type().is_symlink())
                 .unwrap_or(false);
-            if is_dir && webdav_collection_delete(&path, &mut webdav_creds, &cancel_for_worker) {
+            if is_dir {
+                ctx.working_on(&path);
+            }
+            if is_dir
+                && webdav_collection_delete(
+                    &path,
+                    &mount_list,
+                    &mut webdav_creds,
+                    &cancel_for_worker,
+                )
+            {
                 ctx.removed_bulk(&path, count);
+                if let Some(parent) = path.parent() {
+                    stale_parents.push(parent.to_path_buf());
+                }
                 continue;
             }
             if cancel_for_worker.load(Ordering::SeqCst) {
@@ -2916,10 +3057,44 @@ async fn run_network_delete(
                 {
                     break;
                 }
-                return Err(format!("{}: {}", path.display(), err));
+                // Letzte Rettung, wenn der Mount den Ordner dauerhaft als
+                // belegt meldet: Der Server kennt diese Sperre nicht. Nach dem
+                // rekursiven Durchlauf ist nur noch ein Rest übrig, die
+                // Anfrage also schnell.
+                if is_dir
+                    && is_retryable_remove_error(&err)
+                    && webdav_collection_delete(
+                        &path,
+                        &mount_list,
+                        &mut webdav_creds,
+                        &cancel_for_worker,
+                    )
+                {
+                    ctx.removed_bulk(&path, 1);
+                    if let Some(parent) = path.parent() {
+                        stale_parents.push(parent.to_path_buf());
+                    }
+                    continue;
+                }
+                outcome = Err(delete_error_message(&path, &err));
+                break;
             }
         }
-        Ok(())
+        // macOS' `webdavfs` merkt sich den Verzeichniseintrag eines
+        // serverseitig gelöschten Ordners noch eine Weile. Er bliebe dann als
+        // Geist in der Liste stehen und ein zweiter Löschversuch würde mit
+        // „Resource busy" scheitern. Ein frisches Listing des Elternordners
+        // räumt diesen Cache auf, bevor die Oberfläche neu einliest.
+        stale_parents.sort();
+        stale_parents.dedup();
+        for parent in stale_parents {
+            if let Ok(entries) = std::fs::read_dir(&parent) {
+                for entry in entries {
+                    let _ = entry;
+                }
+            }
+        }
+        outcome
     })
     .await
     .map_err(|err| err.to_string())?;
@@ -5355,7 +5530,8 @@ pub fn run() {
 mod copy_tests {
     use super::{
         bookmark_url_from_mount_source, copy_file_with_metadata, count_delete_entries,
-        destination_is_within_source, is_protected_admin_root, is_untransferable_file,
+        delete_error_message, destination_is_within_source, is_protected_admin_root,
+        is_retryable_remove_error, is_untransferable_file,
         parse_mount_url, percent_encode_segment, preview_walk_src, remove_source_after_move,
         replace_file_after_copy, search_in_dir_blocking, sync_preview_inner, sync_two_way_preview_inner,
         webdav_host_from_url, webdav_remote_url, zip_extract_inner, CopyOutcome,
@@ -5365,6 +5541,7 @@ mod copy_tests {
     use std::os::unix::net::UnixDatagram;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+    use std::time::{Duration, Instant};
 
     static TEST_PATH_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
@@ -5464,24 +5641,60 @@ mod copy_tests {
     }
 
     #[test]
+    fn count_delete_entries_gives_up_after_deadline() {
+        // Auf langsamen Netzlaufwerken darf die Vorschau den Loeschvorgang
+        // nicht aufhalten: Ist das Zeitbudget aufgebraucht, bricht sie ab.
+        let cancel = std::sync::Arc::new(AtomicBool::new(false));
+        let root = tmp_path("deadline-tree");
+        std::fs::create_dir_all(root.join("a")).unwrap();
+        std::fs::write(root.join("a/f.txt"), b"1").unwrap();
+        let expired = Instant::now() - Duration::from_secs(1);
+        let err = count_delete_entries(&root, &cancel, expired).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::TimedOut);
+        // Der Baum bleibt vom Zaehlen unberuehrt.
+        assert!(root.join("a/f.txt").exists());
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn busy_errors_are_retryable_and_get_own_message() {
+        let busy = std::io::Error::from_raw_os_error(libc::EBUSY);
+        let not_empty = std::io::Error::from_raw_os_error(libc::ENOTEMPTY);
+        let denied = std::io::Error::from_raw_os_error(libc::EACCES);
+        assert!(is_retryable_remove_error(&busy));
+        assert!(is_retryable_remove_error(&not_empty));
+        assert!(!is_retryable_remove_error(&denied));
+
+        // Belegte Eintraege bekommen eine Kennung, die die Oberflaeche
+        // uebersetzt - statt des unverstaendlichen "Resource busy".
+        let msg = delete_error_message(std::path::Path::new("/Volumes/dav/Ordner"), &busy);
+        assert_eq!(msg, "NETWORK_BUSY\u{1f}/Volumes/dav/Ordner");
+        // Alle anderen Fehler bleiben im bisherigen Format.
+        let other = delete_error_message(std::path::Path::new("/Volumes/dav/x"), &denied);
+        assert!(other.starts_with("/Volumes/dav/x: "));
+        assert!(!other.contains("NETWORK_BUSY"));
+    }
+
+    #[test]
     fn count_delete_entries_counts_every_node() {
         let cancel = std::sync::Arc::new(AtomicBool::new(false));
+        let deadline = Instant::now() + Duration::from_secs(30);
         // Einzelne Datei => 1
         let file = tmp_path("solo.txt");
         std::fs::write(&file, b"x").unwrap();
-        assert_eq!(count_delete_entries(&file, &cancel).unwrap(), 1);
+        assert_eq!(count_delete_entries(&file, &cancel, deadline).unwrap(), 1);
 
         // Ordnerbaum: root + a + a/b + a/b/f.txt + c.txt = 5 Knoten
         let root = tmp_path("tree");
         std::fs::create_dir_all(root.join("a/b")).unwrap();
         std::fs::write(root.join("a/b/f.txt"), b"1").unwrap();
         std::fs::write(root.join("c.txt"), b"2").unwrap();
-        assert_eq!(count_delete_entries(&root, &cancel).unwrap(), 5);
+        assert_eq!(count_delete_entries(&root, &cancel, deadline).unwrap(), 5);
 
         // Nicht existierender Pfad => 0
         let gone = tmp_path("nope");
         std::fs::remove_dir_all(gone.parent().unwrap()).ok();
-        assert_eq!(count_delete_entries(&gone, &cancel).unwrap(), 0);
+        assert_eq!(count_delete_entries(&gone, &cancel, deadline).unwrap(), 0);
     }
 
     #[test]

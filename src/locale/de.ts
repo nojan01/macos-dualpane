@@ -52,6 +52,7 @@ export const de: Record<string, string> = {
   "jobbar.moving": "Verschieben",
   "jobbar.deleting": "Löschen",
   "jobbar.items": "{done} / {total} Einträge",
+  "jobbar.itemsDeleted": "{count} Einträge gelöscht",
   "jobbar.filesCopied": "{count} Dateien kopiert",
   "jobbar.rsync": "rsync (SSH)",
 
@@ -345,6 +346,9 @@ export const de: Record<string, string> = {
   "jobs.trash.timeMachine.title": "Time Machine",
   "jobs.trash.timeMachine.message":
     "Time-Machine-Backups sind durch macOS geschützt und können in dieser App nicht gelöscht werden.\n\nVerwende dafür die macOS-App „Time Machine“ oder das Festplattendienstprogramm.",
+  "jobs.trash.networkBusy.title": "Netzlaufwerk gibt den Ordner nicht frei",
+  "jobs.trash.networkBusy.message":
+    "„{name}“ konnte nicht gelöscht werden: Das Netzlaufwerk meldet den Eintrag als belegt.\n\nDas passiert, wenn der Server noch aufräumt oder ein anderes Programm den Ordner geöffnet hat. Warte einen Moment und versuche es erneut. Hilft das nicht, trenne das Laufwerk und binde es neu ein.",
   "jobs.extractFailed": "Entpacken fehlgeschlagen: {msg}",
   "jobs.zipFailed": "ZIP-Erstellung fehlgeschlagen: {msg}",
 
