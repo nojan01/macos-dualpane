@@ -242,8 +242,34 @@ Aufruf: `⌘D` (oder Menü) auf Markierung.
 
 - **Favoriten** (vom User pinnbar)
 - **Volumes** (alle eingehängten, `diskutil`/`/Volumes`)
+- **Netzwerk** (verbundene Freigaben und gespeicherte Lesezeichen)
 - **Zuletzt besuchte Ordner** (max. 20)
 - Drop auf Eintrag = Kopier-/Verschiebe-Ziel
+
+### Netzwerkprotokolle
+
+Zwei getrennte Wege, beide über `⌘K` erreichbar:
+
+| Weg | Protokolle | Umsetzung |
+|-----|-----------|-----------|
+| macOS | `smb`, `https`/`http` (WebDAV), `afp`, `nfs`, `cifs`, `ftp` | AppleScript `mount volume` → NetFS, Mountpunkt unter `/Volumes` |
+| rclone | `sftp`/`ssh`, `ftps`, `ftpes` | mitgeliefertes `rclone nfsmount` über den NFS-Client von macOS, Mountpunkt unter `Application Support/DualBeam/Remote/Volumes` |
+
+Der zweite Weg ist nötig, weil macOS SFTP und FTPS nicht selbst einhängen kann.
+Er kommt ohne Kernel-Erweiterung und ohne Administratorrechte aus; das Ergebnis
+ist ein gewöhnlicher Ordner, mit dem alle bestehenden Befehle arbeiten.
+
+Festlegungen für den rclone-Weg:
+
+- Zugangsdaten werden ausschließlich über `RCLONE_CONFIG_*`-Umgebungsvariablen
+  übergeben, nie als Argument — sonst stünden sie in der Prozessliste.
+- Hostschlüssel liegen in einer eigenen `known_hosts` der App; `~/.ssh` bleibt
+  unangetastet. Vor dem ersten Verbinden bestätigt der Benutzer den
+  Fingerabdruck.
+- Schreiben setzt `--vfs-cache-mode full` voraus.
+- Unverschlüsseltes FTP bleibt auf direkte private IP-Adressen beschränkt.
+- Beim Beenden der App werden alle eigenen Einhängungen gelöst, beim Start
+  werden Reste eines abgestürzten Laufs weggeräumt.
 
 ---
 
