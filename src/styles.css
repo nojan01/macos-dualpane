@@ -962,21 +962,26 @@ body.col-resizing * {
   cursor: default;
 }
 .help-modal {
-  width: min(760px, 94vw);
+  width: min(1180px, 94vw);
+  max-width: 94vw;
+  max-height: 92vh;
+  display: flex;
+  flex-direction: column;
 }
 .help-layout {
   display: flex;
   gap: 14px;
   margin: 4px 0 12px;
   min-height: 0;
+  flex: 1;
 }
 .help-nav {
-  flex: 0 0 190px;
+  flex: 0 0 230px;
   display: flex;
   flex-direction: column;
   gap: 2px;
   overflow-y: auto;
-  max-height: min(62vh, 560px);
+  max-height: min(78vh, 860px);
   border-right: 1px solid var(--border);
   padding-right: 10px;
 }
@@ -1001,7 +1006,7 @@ body.col-resizing * {
 }
 .help-body {
   flex: 1;
-  max-height: min(62vh, 560px);
+  max-height: min(78vh, 860px);
   overflow-y: auto;
   margin: 0;
   padding-right: 6px;
@@ -1033,8 +1038,8 @@ body.col-resizing * {
 }
 .help-grid {
   display: grid;
-  grid-template-columns: minmax(120px, auto) 1fr;
-  gap: 6px 14px;
+  grid-template-columns: minmax(170px, max-content) 1fr;
+  gap: 6px 18px;
   margin: 0;
   font-size: 12.5px;
 }
