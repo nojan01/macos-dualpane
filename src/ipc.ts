@@ -95,7 +95,12 @@ export async function pathIsNetwork(path: string): Promise<boolean> {
   return invoke<boolean>("path_is_network", { path });
 }
 
-export type Volume = { name: string; path: string; kind: "local" | "network" };
+export type Volume = {
+  name: string;
+  path: string;
+  /** „remote“ steht für die von DualBeam selbst eingehängten Ziele (SFTP, FTPS). */
+  kind: "local" | "network" | "remote";
+};
 
 export async function listVolumes(): Promise<Volume[]> {
   return invoke<Volume[]>("list_volumes");
@@ -129,6 +134,79 @@ export async function mountNetworkUrl(
   allowInsecureLocal = false,
 ): Promise<string> {
   return invoke<string>("mount_network_url", { url, allowInsecureLocal });
+}
+
+/** Protokolle, die DualBeam über das mitgelieferte rclone einhängt. */
+export type RemoteProtocol = "sftp" | "ftp" | "ftpsExplicit" | "ftpsImplicit";
+
+export type RemoteSpec = {
+  protocol: RemoteProtocol;
+  host: string;
+  /** Leer lassen für den Standardport des Protokolls. */
+  port?: number | null;
+  username: string;
+  /** Pfad auf dem Server. Leer bedeutet die Wurzel des Zugangs. */
+  path: string;
+  /** Anzeigename. Leer bedeutet: aus dem Rechnernamen ableiten. */
+  label: string;
+};
+
+export type HostKeyReport = {
+  host: string;
+  port: number;
+  /** Fingerabdrücke in der Form „ED25519 SHA256:…“. */
+  fingerprints: string[];
+  trusted: boolean;
+};
+
+export type RemoteMount = {
+  path: string;
+  label: string;
+  descriptor: string;
+};
+
+export async function remoteHostKeys(
+  host: string,
+  port?: number | null,
+): Promise<HostKeyReport> {
+  return invoke<HostKeyReport>("remote_host_keys", { host, port: port ?? null });
+}
+
+export async function remoteTrustHost(
+  host: string,
+  port?: number | null,
+): Promise<void> {
+  return invoke<void>("remote_trust_host", { host, port: port ?? null });
+}
+
+export async function saveRemotePassword(
+  spec: RemoteSpec,
+  password: string,
+): Promise<void> {
+  return invoke<void>("save_remote_password", { spec, password });
+}
+
+export async function loadRemotePassword(
+  spec: RemoteSpec,
+): Promise<string | null> {
+  return invoke<string | null>("load_remote_password", { spec });
+}
+
+/** Hängt das Ziel ein und liefert den lokalen Pfad des neuen Ordners. */
+export async function mountRemote(
+  spec: RemoteSpec,
+  password: string,
+  allowInsecure = false,
+): Promise<string> {
+  return invoke<string>("mount_remote", { spec, password, allowInsecure });
+}
+
+export async function unmountRemote(path: string): Promise<void> {
+  return invoke<void>("unmount_remote", { path });
+}
+
+export async function remoteMounts(): Promise<RemoteMount[]> {
+  return invoke<RemoteMount[]>("remote_mounts");
 }
 
 export async function appVersion(): Promise<string> {

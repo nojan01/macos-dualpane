@@ -1184,11 +1184,15 @@ fn list_volumes_blocking() -> Result<Vec<Volume>, String> {
     // Netzlaufwerke, die DualBeam selbst über rclone eingehängt hat (SFTP,
     // FTPS). Sie liegen nicht unter /Volumes, weil dort ohne Administratorrechte
     // kein Ordner angelegt werden darf.
+    // Eigene Art: Diese Laufwerke sind kein macOS-Mount, sondern laufen über
+    // rclone. Sie dürfen deshalb nicht als Netzwerk-Lesezeichen gemerkt werden,
+    // denn ihre Mount-Quelle lautet "localhost:/..." und taugt nicht zum
+    // erneuten Verbinden.
     for mount in remote::active_mounts() {
         out.push(Volume {
             name: mount.label,
             path: mount.path,
-            kind: "network".to_string(),
+            kind: "remote".to_string(),
         });
     }
     out.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));

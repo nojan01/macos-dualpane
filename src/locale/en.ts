@@ -445,7 +445,7 @@ export const en: Record<string, string> = {
 
   // Backend error codes
   "err.network.scheme":
-    "Unsupported address. smb:// and https:// (WebDAV) are allowed. Insecure protocols require confirmation and a direct local IP address.",
+    "Unsupported address. smb://, https:// (WebDAV), sftp:// and ftps:// are allowed. Insecure protocols require confirmation and a direct local IP address.",
   "err.network.badchars": "Invalid characters in the address.",
   "err.network.invalidUrl": "Invalid server address.",
   "err.network.credentials":
@@ -468,5 +468,70 @@ export const en: Record<string, string> = {
   "err.eject.failed": "Eject failed: {0}",
   "err.eject.invalidMount":
     "Only mounted volumes below /Volumes can be ejected.",
+
+  // Network drives via rclone (SFTP, FTPS)
+  "remote.title": "Connect network drive",
+  "remote.description":
+    "Connects to a server over SFTP or FTPS. The target then appears as an ordinary folder in the sidebar.",
+  "remote.protocol": "Protocol",
+  "remote.protocol.sftp": "SFTP (over SSH)",
+  "remote.protocol.ftpsExplicit": "FTPS – explicit (AUTH TLS)",
+  "remote.protocol.ftpsImplicit": "FTPS – implicit",
+  "remote.protocol.ftp": "FTP (unencrypted)",
+  "remote.insecureNote":
+    "FTP sends the password and all data in the clear. Use it on your own local network only.",
+  "remote.host": "Server",
+  "remote.port": "Port (empty = {port})",
+  "remote.username": "User name",
+  "remote.password": "Password",
+  "remote.path": "Path on the server",
+  "remote.label": "Display name",
+  "remote.savePassword": "Save password in the macOS Keychain",
+  "remote.loadPassword": "Load password from Keychain",
+  "remote.connect": "Connect",
+  "remote.connecting": "Connecting…",
+  "remote.required": "Server, user name and password are required.",
+  "remote.hostUserRequired": "Please enter the server and user name first.",
+  "remote.passwordMissing":
+    "No password is stored in the Keychain for this server and user.",
+  "remote.hostKeyPrompt":
+    "“{host}” is not known yet. Check the server's fingerprint before continuing:",
+  "remote.hostKeyHint":
+    "The fingerprint should match the one your provider publishes. Once confirmed, DualBeam remembers the key.",
+  "remote.hostKeyTrust": "Confirm fingerprint and connect",
+
+  "err.remote.host": "Invalid server name.",
+  "err.remote.username": "Invalid user name.",
+  "err.remote.path": "Invalid path on the server.",
+  "err.remote.port": "Invalid port.",
+  "err.remote.label": "Invalid display name.",
+  "err.remote.noAppDir": "The app's working folder could not be created.",
+  "err.remote.rcloneMissing":
+    "The bundled connection helper is missing. Please reinstall DualBeam.",
+  "err.remote.keyscan": "The server's host key could not be retrieved.",
+  "err.remote.keyscanTimeout":
+    "The server did not respond while retrieving the host key.",
+  "err.remote.noHostKey": "The server did not provide a host key.",
+  "err.remote.hostKeyUnknown":
+    "The server's host key has not been confirmed yet.",
+  "err.remote.hostKeyChanged":
+    "The server's host key has changed. This may indicate an attack. Connection aborted.",
+  "err.remote.emptyPassword": "The password must not be empty.",
+  "err.remote.keychainUnavailable": "The Keychain is not available.",
+  "err.remote.badKeychainEntry": "The Keychain entry could not be read.",
+  "err.remote.obscure": "The password could not be prepared for transfer.",
+  "err.remote.mountDir":
+    "The folder for the network drive could not be created.",
+  "err.remote.mountFailed": "Connection failed.",
+  "err.remote.mountTimeout":
+    "The server did not respond in time while connecting.",
+  "err.remote.auth": "Sign-in rejected. Check the user name and password.",
+  "err.remote.unreachable":
+    "Server unreachable. Check the address, port and network connection.",
+  "err.remote.certificate": "The server's certificate was not accepted.",
+  "err.remote.unmountFailed": "Eject failed.",
+  "err.remote.busy":
+    "The drive is still in use. Please close any open files and try again.",
+  "err.remote.notOurs": "This folder was not mounted by DualBeam.",
   "err.update.failed": "Update check failed.",
 };

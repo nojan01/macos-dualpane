@@ -448,7 +448,7 @@ export const de: Record<string, string> = {
 
   // Backend-Fehler-Codes
   "err.network.scheme":
-    "Nicht unterstützte Adresse. Erlaubt sind smb:// und https:// (WebDAV). Unsichere Protokolle sind nur für direkte lokale IP-Adressen nach Bestätigung erlaubt.",
+    "Nicht unterstützte Adresse. Erlaubt sind smb://, https:// (WebDAV), sftp:// und ftps://. Unsichere Protokolle sind nur für direkte lokale IP-Adressen nach Bestätigung erlaubt.",
   "err.network.badchars": "Ungültige Zeichen in der Adresse.",
   "err.network.invalidUrl": "Ungültige Serveradresse.",
   "err.network.credentials":
@@ -473,5 +473,79 @@ export const de: Record<string, string> = {
   "err.eject.failed": "Aushängen fehlgeschlagen: {0}",
   "err.eject.invalidMount":
     "Nur eingebundene Volumes unter /Volumes können ausgehängt werden.",
+
+  // Netzlaufwerke über rclone (SFTP, FTPS)
+  "remote.title": "Netzlaufwerk verbinden",
+  "remote.description":
+    "Verbindet einen Server per SFTP oder FTPS. Das Ziel erscheint danach als gewöhnlicher Ordner in der Seitenleiste.",
+  "remote.protocol": "Protokoll",
+  "remote.protocol.sftp": "SFTP (über SSH)",
+  "remote.protocol.ftpsExplicit": "FTPS – explizit (AUTH TLS)",
+  "remote.protocol.ftpsImplicit": "FTPS – implizit",
+  "remote.protocol.ftp": "FTP (unverschlüsselt)",
+  "remote.insecureNote":
+    "FTP überträgt Kennwort und Daten im Klartext. Nur im eigenen lokalen Netz verwenden.",
+  "remote.host": "Server",
+  "remote.port": "Port (leer = {port})",
+  "remote.username": "Benutzername",
+  "remote.password": "Passwort",
+  "remote.path": "Pfad auf dem Server",
+  "remote.label": "Anzeigename",
+  "remote.savePassword": "Passwort im macOS-Schlüsselbund speichern",
+  "remote.loadPassword": "Passwort aus Schlüsselbund laden",
+  "remote.connect": "Verbinden",
+  "remote.connecting": "Verbindet…",
+  "remote.required": "Server, Benutzername und Passwort sind erforderlich.",
+  "remote.hostUserRequired":
+    "Bitte zuerst Server und Benutzernamen eingeben.",
+  "remote.passwordMissing":
+    "Für diesen Server und Benutzer ist kein Passwort im Schlüsselbund gespeichert.",
+  "remote.hostKeyPrompt":
+    "„{host}“ ist noch nicht bekannt. Prüfe den Fingerabdruck des Servers, bevor du fortfährst:",
+  "remote.hostKeyHint":
+    "Der Fingerabdruck sollte mit dem übereinstimmen, den dein Anbieter nennt. Nach der Bestätigung merkt sich DualBeam den Schlüssel.",
+  "remote.hostKeyTrust": "Fingerabdruck bestätigen und verbinden",
+
+  "err.remote.host": "Ungültiger Servername.",
+  "err.remote.username": "Ungültiger Benutzername.",
+  "err.remote.path": "Ungültiger Pfad auf dem Server.",
+  "err.remote.port": "Ungültiger Port.",
+  "err.remote.label": "Ungültiger Anzeigename.",
+  "err.remote.noAppDir":
+    "Der Arbeitsordner der App konnte nicht angelegt werden.",
+  "err.remote.rcloneMissing":
+    "Der mitgelieferte Verbindungsdienst fehlt. Bitte DualBeam neu installieren.",
+  "err.remote.keyscan":
+    "Der Hostschlüssel des Servers konnte nicht abgerufen werden.",
+  "err.remote.keyscanTimeout":
+    "Der Server hat beim Abruf des Hostschlüssels nicht geantwortet.",
+  "err.remote.noHostKey": "Der Server hat keinen Hostschlüssel geliefert.",
+  "err.remote.hostKeyUnknown":
+    "Der Hostschlüssel des Servers ist noch nicht bestätigt.",
+  "err.remote.hostKeyChanged":
+    "Der Hostschlüssel des Servers hat sich geändert. Das kann auf einen Angriff hindeuten. Verbindung abgebrochen.",
+  "err.remote.emptyPassword": "Das Passwort darf nicht leer sein.",
+  "err.remote.keychainUnavailable":
+    "Der Schlüsselbund ist nicht verfügbar.",
+  "err.remote.badKeychainEntry":
+    "Der Eintrag im Schlüsselbund ist unlesbar.",
+  "err.remote.obscure":
+    "Das Passwort konnte nicht für die Übergabe vorbereitet werden.",
+  "err.remote.mountDir":
+    "Der Ordner für das Netzlaufwerk konnte nicht angelegt werden.",
+  "err.remote.mountFailed": "Verbinden fehlgeschlagen.",
+  "err.remote.mountTimeout":
+    "Der Server hat beim Verbinden nicht rechtzeitig geantwortet.",
+  "err.remote.auth":
+    "Anmeldung abgelehnt. Benutzername und Passwort prüfen.",
+  "err.remote.unreachable":
+    "Server nicht erreichbar. Adresse, Port und Netzwerkverbindung prüfen.",
+  "err.remote.certificate":
+    "Das Zertifikat des Servers wurde nicht akzeptiert.",
+  "err.remote.unmountFailed": "Aushängen fehlgeschlagen.",
+  "err.remote.busy":
+    "Das Laufwerk ist noch in Benutzung. Bitte offene Dateien schließen und erneut versuchen.",
+  "err.remote.notOurs":
+    "Dieser Ordner wurde nicht von DualBeam eingehängt.",
   "err.update.failed": "Update-Prüfung fehlgeschlagen.",
 };

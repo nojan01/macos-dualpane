@@ -843,10 +843,12 @@ body.col-resizing * {
   cursor: pointer;
 }
 
-.rsync-dialog {
+.rsync-dialog,
+.remote-dialog {
   width: min(520px, calc(100vw - 32px));
 }
-.rsync-dialog label:not(.check-line) {
+.rsync-dialog label:not(.check-line),
+.remote-dialog label:not(.check-line) {
   display: grid;
   gap: 4px;
   margin: 10px 0;
@@ -854,15 +856,45 @@ body.col-resizing * {
   font-size: 12px;
 }
 .rsync-dialog input[type="text"],
-.rsync-dialog input[type="password"] {
+.rsync-dialog input[type="password"],
+.remote-dialog input[type="text"],
+.remote-dialog input[type="password"],
+.remote-dialog select {
   width: 100%;
   box-sizing: border-box;
 }
-.rsync-dialog .check-line {
+.rsync-dialog .check-line,
+.remote-dialog .check-line {
   display: flex;
   align-items: center;
   gap: 6px;
   margin: 12px 0;
+}
+/* Hinweis auf ein unverschlüsseltes Protokoll: auffällig, aber nicht als
+   Fehler, denn der Benutzer hat es bewusst gewählt. */
+.remote-dialog .warning {
+  margin: 4px 0 0;
+  color: #e0a030;
+  font-size: 12px;
+}
+.remote-dialog .hint {
+  color: var(--text-dim);
+  font-size: 12px;
+}
+/* Fingerabdrücke in Festbreite, damit sich zwei Zeichenfolgen zeichenweise
+   vergleichen lassen. */
+.remote-dialog .fingerprint-list {
+  margin: 8px 0;
+  padding: 8px 12px;
+  border-radius: 6px;
+  background: var(--accent-bg);
+  list-style: none;
+  font-family: var(--mono);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+.remote-dialog .fingerprint-list li + li {
+  margin-top: 4px;
 }
 
 .modal-backdrop {
