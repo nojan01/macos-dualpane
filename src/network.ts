@@ -3,16 +3,25 @@ import { mountNetworkUrl } from "./ipc";
 import { askPrompt, askConfirm } from "./components/Dialogs";
 import { t, errMsg } from "./i18n";
 import { openRsyncDialog } from "./components/RsyncDialog";
+import { openRemoteDialog } from "./components/RemoteDialog";
 
 const SECURE_SCHEMES = new Set(["https:", "smb:"]);
 const INSECURE_SCHEMES = new Set([
   "http:",
   "ftp:",
-  "ftps:",
   "afp:",
   "nfs:",
   "cifs:",
 ]);
+/** Protokolle, die DualBeam über das mitgelieferte rclone einhängt statt über
+ * macOS. Sie führen in den eigenen Verbindungsdialog, weil dafür Benutzername
+ * und Kennwort einzeln gebraucht werden. */
+const RCLONE_SCHEMES: Record<string, "sftp" | "ftps" | "ftpes"> = {
+  "sftp:": "sftp",
+  "ssh:": "sftp",
+  "ftps:": "ftps",
+  "ftpes:": "ftpes",
+};
 let connecting = false;
 
 /** Akzeptiert zusätzlich den vollständigen, von IONOS dokumentierten
@@ -59,6 +68,33 @@ function isDirectLocalIp(hostname: string): boolean {
   );
 }
 
+/** Zerlegt eine sftp-/ftps-Adresse in die Felder des Verbindungsdialogs.
+ * Liefert `null`, wenn das Schema nicht zu rclone gehört. Exportiert, damit es
+ * sich einzeln prüfen lässt. */
+export function remoteFromUrl(parsed: URL): {
+  protocol: "sftp" | "ftpsExplicit" | "ftpsImplicit";
+  host: string;
+  port: string;
+  path: string;
+} | null {
+  const kind = RCLONE_SCHEMES[parsed.protocol];
+  if (!kind) return null;
+  // `ftps:` meint hier die implizite Variante (Port 990), `ftpes:` die
+  // explizite. Wer es anders braucht, stellt es im Dialog um.
+  const protocol =
+    kind === "sftp"
+      ? "sftp"
+      : kind === "ftps"
+        ? "ftpsImplicit"
+        : "ftpsExplicit";
+  return {
+    protocol,
+    host: parsed.hostname.replace(/^\[|\]$/g, ""),
+    port: parsed.port,
+    path: decodeURIComponent(parsed.pathname || ""),
+  };
+}
+
 /** Öffnet den Finder-ähnlichen Dialog „Mit Server verbinden …“ (⌘K). */
 export async function connectToServer(): Promise<void> {
   if (connecting) return;
@@ -94,7 +130,11 @@ export async function connectToServer(): Promise<void> {
     });
     return;
   }
-  if (parsed.username || parsed.password) {
+  // Bei den eigenen Protokollen darf ein Benutzername in der Adresse stehen; er
+  // landet nur als Vorbelegung im Dialog. Ein Kennwort bleibt auch dort
+  // ausgeschlossen, damit es nicht in der Eingabezeile auftaucht.
+  const allowsUser = RCLONE_SCHEMES[parsed.protocol] != null;
+  if ((parsed.username && !allowsUser) || parsed.password) {
     await askConfirm({
       title: t("network.connectFailed"),
       message: t("err.network.credentials"),
@@ -114,6 +154,26 @@ export async function connectToServer(): Promise<void> {
       return;
     }
     openRsyncDialog(parsed.hostname, decodeURIComponent(parsed.pathname || "/"));
+    return;
+  }
+  const remote = remoteFromUrl(parsed);
+  if (remote) {
+    if (!remote.host) {
+      await askConfirm({
+        title: t("network.connectFailed"),
+        message: t("err.network.invalidUrl"),
+        okLabel: t("common.ok"),
+        cancelLabel: t("common.close"),
+      });
+      return;
+    }
+    openRemoteDialog({
+      protocol: remote.protocol,
+      host: remote.host,
+      port: remote.port,
+      path: remote.path,
+      username: decodeURIComponent(parsed.username || ""),
+    });
     return;
   }
   if (

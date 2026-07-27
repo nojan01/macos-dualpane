@@ -16,6 +16,8 @@ Schlanker Dual-Pane-Dateimanager für macOS im Stil von **Commander One** /
 - Copy-/Move-/Trash-Jobs mit Progress, Pause, Abbruch
 - **Sync-Dialog** zum Abgleich zweier Verzeichnisse
 - QuickLook-Vorschau (`F3`), Sidebar mit Volumes & Favoriten
+- **Netzlaufwerke** per `⌘K`: SMB, WebDAV, AFP, NFS sowie **SFTP und FTPS**
+  über das mitgelieferte `rclone`
 - Auto-Refresh via FSEvents
 - Mehrsprachig (Deutsch / Englisch)
 
@@ -46,6 +48,15 @@ npm install
 npm run tauri:dev     # Dev-Modus
 npm run tauri:build   # DMG bauen
 npm test              # Tests
+```
+
+Für SFTP und FTPS wird `rclone` als Beiprogramm mitgeliefert. Es wird nicht im
+Git verwaltet, sondern vor jedem `tauri:dev`/`tauri:build` automatisch geladen
+und anhand seiner Prüfsumme überprüft. Bei Bedarf auch einzeln:
+
+```sh
+npm run rclone:fetch          # für die eigene Architektur
+bash scripts/fetch-rclone.sh all   # arm64 und amd64
 ```
 
 ## Lizenz

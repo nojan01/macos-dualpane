@@ -33,6 +33,12 @@ function basename(p: string): string {
   return i < 0 ? trimmed : trimmed.slice(i + 1) || "/";
 }
 
+/** Alles, was kein Netzlaufwerk ist – also die eigentlichen Datenträger.
+ * „remote“ steht für die selbst über rclone eingehängten Ziele. */
+function isLocalVolume(vol: Volume): boolean {
+  return vol.kind !== "network" && vol.kind !== "remote";
+}
+
 type Menu = { idx: number; x: number; y: number } | null;
 type VolMenu = { vol: Volume; x: number; y: number } | null;
 
@@ -271,12 +277,16 @@ export function Sidebar() {
 
   async function doEject(vol: Volume) {
     const isNetwork = vol.kind === "network";
+    // Über rclone eingehängte Ziele (SFTP, FTPS) verhalten sich beim Trennen wie
+    // Netzlaufwerke, lassen sich aber nicht als Lesezeichen merken.
+    const isRemote = vol.kind === "remote";
+    const detach = isNetwork || isRemote;
     const ok = await askConfirm({
-      title: isNetwork ? t("sidebar.unmount") : t("sidebar.ejectTitle"),
-      message: isNetwork
+      title: detach ? t("sidebar.unmount") : t("sidebar.ejectTitle"),
+      message: detach
         ? t("sidebar.unmountConfirm", { name: vol.name })
         : t("sidebar.ejectConfirm", { name: vol.name }),
-      okLabel: isNetwork ? t("sidebar.unmount") : t("sidebar.eject"),
+      okLabel: detach ? t("sidebar.unmount") : t("sidebar.eject"),
       danger: true,
     });
     if (!ok) return;
@@ -406,10 +416,10 @@ export function Sidebar() {
         </For>
         <div class="sb-section">{t("sidebar.volumes")}</div>
         <Show
-          when={vols().filter((v) => v.kind !== "network").length > 0}
+          when={vols().filter(isLocalVolume).length > 0}
           fallback={<div class="sb-empty">{t("sidebar.none")}</div>}
         >
-          <For each={vols().filter((v) => v.kind !== "network")}>
+          <For each={vols().filter(isLocalVolume)}>
             {(v) => (
               <div
                 class={`sb-item ${state[state.active].cwd === v.path ? "active" : ""}`}
@@ -499,7 +509,7 @@ export function Sidebar() {
         <For
           each={vols().filter(
             (v) =>
-              v.kind === "network" &&
+              (v.kind === "network" || v.kind === "remote") &&
               !bookmarks().some((b) => b.mountPath === v.path),
           )}
         >

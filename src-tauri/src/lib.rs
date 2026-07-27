@@ -7,6 +7,7 @@ use std::net::IpAddr;
 use std::process::{Command, Stdio};
 
 mod promise_drag;
+mod remote;
 use notify_debouncer_mini::notify::RecommendedWatcher;
 use notify_debouncer_mini::{new_debouncer, notify::RecursiveMode, Debouncer};
 use std::path::{Path, PathBuf};
@@ -1180,6 +1181,20 @@ fn list_volumes_blocking() -> Result<Vec<Volume>, String> {
             });
         }
     }
+    // Netzlaufwerke, die DualBeam selbst über rclone eingehängt hat (SFTP,
+    // FTPS). Sie liegen nicht unter /Volumes, weil dort ohne Administratorrechte
+    // kein Ordner angelegt werden darf.
+    // Eigene Art: Diese Laufwerke sind kein macOS-Mount, sondern laufen über
+    // rclone. Sie dürfen deshalb nicht als Netzwerk-Lesezeichen gemerkt werden,
+    // denn ihre Mount-Quelle lautet "localhost:/..." und taugt nicht zum
+    // erneuten Verbinden.
+    for mount in remote::active_mounts() {
+        out.push(Volume {
+            name: mount.label,
+            path: mount.path,
+            kind: "remote".to_string(),
+        });
+    }
     out.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
     Ok(out)
 }
@@ -1395,7 +1410,7 @@ fn remember_network_volume(path: String) -> Result<(), String> {
     remember_network_volume_inner(&expand_tilde(&path))
 }
 
-fn is_local_network_address(ip: IpAddr) -> bool {
+pub(crate) fn is_local_network_address(ip: IpAddr) -> bool {
     match ip {
         IpAddr::V4(ip) => {
             let [a, b, ..] = ip.octets();
@@ -1547,6 +1562,12 @@ async fn eject_volume(path: String) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
         let full = std::fs::canonicalize(expand_tilde(&path))
             .map_err(|_| "err.eject.invalidMount".to_string())?;
+        // Von DualBeam selbst eingehängte Netzlaufwerke (SFTP, FTPS) liegen im
+        // eigenen App-Ordner. Sie brauchen zusätzlich das Beenden des zugehörigen
+        // rclone-Prozesses, sonst bliebe er als Waise zurück.
+        if remote::is_remote_mount(&full) {
+            return remote::unmount_owned(&full);
+        }
         if !full.starts_with("/Volumes/") {
             return Err("err.eject.invalidMount".into());
         }
@@ -5409,6 +5430,9 @@ pub fn run() {
         .manage(WatcherManager::default())
         .setup(|app| {
             promise_drag::init(app.handle());
+            // Reste eines abgestürzten früheren Laufs wegräumen: verwaiste
+            // Einhängeordner und liegengebliebene Protokolle.
+            remote::cleanup_stale();
             #[cfg(target_os = "macos")]
             {
                 use tauri::Emitter;
@@ -5507,6 +5531,13 @@ pub fn run() {
             set_dock_badge,
             clipboard_read_files,
             drag_icon_path,
+            remote::remote_host_keys,
+            remote::remote_trust_host,
+            remote::save_remote_password,
+            remote::load_remote_password,
+            remote::mount_remote,
+            remote::unmount_remote,
+            remote::remote_mounts,
             promise_drag::start_promise_drag,
             promise_drag::resolve_promise_drop,
         ])
@@ -5522,6 +5553,12 @@ pub fn run() {
                 if !*has_visible_windows {
                     open_new_window(_app_handle);
                 }
+            }
+            // Beim Beenden alle selbst eingehängten Netzlaufwerke lösen. Sonst
+            // bliebe im Finder eine tote Freigabe stehen, die sich nur noch von
+            // Hand aushängen ließe.
+            if matches!(_event, tauri::RunEvent::Exit) {
+                remote::unmount_all();
             }
         });
 }

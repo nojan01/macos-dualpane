@@ -283,6 +283,14 @@ const CONTENT: Record<
             desc: "Verschlüsselte WebDAV-Freigaben (z. B. Nextcloud, HiDrive, ownCloud). Beispiel: https://server/webdav.",
           },
           {
+            term: "sftp:// (SSH)",
+            desc: "Dateizugriff über SSH – bei vielen Hostern die übliche Wahl. Beispiel: sftp://sftp.example.com/daten. Es öffnet sich ein eigener Dialog für Benutzername und Passwort. Beim ersten Verbinden zeigt DualBeam den Fingerabdruck des Servers zur Bestätigung; danach merkt es ihn sich.",
+          },
+          {
+            term: "ftps:// und ftpes://",
+            desc: "FTP über TLS. ftps:// ist die implizite Variante (Port 990), ftpes:// die explizite mit AUTH TLS (Port 21). Im Dialog lässt sich zwischen beiden umschalten.",
+          },
+          {
             term: "Netzwerk in der Seitenleiste",
             desc: "Gespeicherte Server erscheinen im Bereich „Netzwerk“. Ein verbundenes Lesezeichen öffnet den Mountpunkt; ein getrenntes verbindet sich per Klick. ↻ verbindet neu. ⏏ ist Stufe 1: Es hängt nur aus und behält das Lesezeichen. × ist Stufe 2: Es hängt aus und entfernt das DualBeam-Lesezeichen dauerhaft. Nicht als Lesezeichen gespeicherte Netzwerk-Volumes erscheinen ebenfalls dort.",
           },
@@ -292,7 +300,11 @@ const CONTENT: Record<
           },
           {
             term: "Unsichere lokale Protokolle",
-            desc: "http, ftp(s), afp, nfs und cifs sind ausschließlich für direkte private, Link-Local- oder Loopback-IP-Adressen verfügbar und erfordern eine ausdrückliche Warnbestätigung.",
+            desc: "http, ftp, afp, nfs und cifs sind ausschließlich für direkte private, Link-Local- oder Loopback-IP-Adressen verfügbar und erfordern eine ausdrückliche Warnbestätigung.",
+          },
+          {
+            term: "SFTP/FTPS im Hintergrund",
+            desc: "Diese beiden Protokolle bringt macOS nicht selbst mit. DualBeam liefert dafür das Hilfsprogramm rclone mit und bindet das Ziel über den NFS-Dienst von macOS ein. Ein Administratorpasswort ist dafür nicht nötig. Die Verbindung endet automatisch, wenn du DualBeam beendest.",
           },
         ],
       },
@@ -608,6 +620,14 @@ const CONTENT: Record<
             desc: "Encrypted WebDAV shares (e.g. Nextcloud, HiDrive, ownCloud). Example: https://server/webdav.",
           },
           {
+            term: "sftp:// (SSH)",
+            desc: "File access over SSH — the usual choice at many hosting providers. Example: sftp://sftp.example.com/data. A dedicated dialog asks for user name and password. On the first connection DualBeam shows the server's fingerprint for confirmation and remembers it afterwards.",
+          },
+          {
+            term: "ftps:// and ftpes://",
+            desc: "FTP over TLS. ftps:// is the implicit variant (port 990), ftpes:// the explicit one using AUTH TLS (port 21). The dialog lets you switch between them.",
+          },
+          {
             term: "Network in the sidebar",
             desc: "Saved servers appear in the “Network” section. Clicking a connected bookmark opens its mount point; clicking a disconnected one connects it. ↻ reconnects. ⏏ is stage 1: it only unmounts and keeps the bookmark. × is stage 2: it unmounts and permanently removes the DualBeam bookmark. Network volumes that are not bookmarks appear there as well.",
           },
@@ -617,7 +637,11 @@ const CONTENT: Record<
           },
           {
             term: "Insecure local protocols",
-            desc: "http, ftp(s), afp, nfs and cifs are available only for direct private, link-local or loopback IP addresses and require an explicit warning confirmation.",
+            desc: "http, ftp, afp, nfs and cifs are available only for direct private, link-local or loopback IP addresses and require an explicit warning confirmation.",
+          },
+          {
+            term: "How SFTP/FTPS work",
+            desc: "macOS does not support these two protocols itself. DualBeam bundles the rclone helper and mounts the target through the macOS NFS service. No administrator password is required. The connection ends automatically when you quit DualBeam.",
           },
         ],
       },

@@ -33,6 +33,7 @@ import { PropertiesDialog } from "./components/PropertiesDialog";
 import { JobBar } from "./components/JobBar";
 import { AboutDialog, openAbout } from "./components/AboutDialog";
 import { RsyncDialog } from "./components/RsyncDialog";
+import { RemoteDialog } from "./components/RemoteDialog";
 import { HelpDialog, openHelp } from "./components/HelpDialog";
 import {
   loadPane,
@@ -906,6 +907,7 @@ export function App() {
       <SearchDialog />
       <SyncDialog />
       <RsyncDialog />
+      <RemoteDialog />
       <Dialogs />
       <PropertiesDialog />
       <AboutDialog />

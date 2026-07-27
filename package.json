@@ -1,7 +1,7 @@
 {
   "name": "dualbeam",
   "private": true,
-  "version": "0.3.1",
+  "version": "0.4.0",
   "license": "MIT",
   "author": "N.J.",
   "type": "module",
@@ -10,10 +10,11 @@
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview",
     "tauri": "tauri",
-    "tauri:dev": "tauri dev",
-    "tauri:build": "tauri build",
-    "tauri:build:public": "tauri build --no-default-features",
-    "test": "vitest run"
+    "tauri:dev": "bash scripts/fetch-rclone.sh && tauri dev",
+    "tauri:build": "bash scripts/fetch-rclone.sh && tauri build",
+    "tauri:build:public": "bash scripts/fetch-rclone.sh && tauri build --no-default-features",
+    "test": "vitest run",
+    "rclone:fetch": "bash scripts/fetch-rclone.sh"
   },
   "dependencies": {
     "@crabnebula/tauri-plugin-drag": "^2.1.0",

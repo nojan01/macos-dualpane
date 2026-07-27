@@ -146,6 +146,24 @@ Es gibt zwei Build-Varianten, gesteuert über das Cargo-Feature `hidrive`:
   HiDrive-Lesezeichen entfällt in der öffentlichen Version.
 - Für die Veröffentlichung **immer** `npm run tauri:build:public` verwenden.
 
+## Mitgeliefertes `rclone`
+
+Für SFTP und FTPS liegt `rclone` als Beiprogramm im Paket unter
+`Contents/MacOS/rclone`. Es wird nicht im Git verwaltet, sondern von
+`scripts/fetch-rclone.sh` geladen und anhand seiner Prüfsumme geprüft; der
+Build ruft das Skript automatisch auf.
+
+Für die Notarisierung muss das Beiprogramm **mitsigniert** sein. Nach dem Build
+prüfen:
+
+```sh
+codesign -dv --verbose=4 \
+  "src-tauri/target/release/bundle/macos/DualBeam.app/Contents/MacOS/rclone"
+```
+
+Erwartet wird eine Signatur mit derselben Developer-ID und aktiviertem Hardened
+Runtime wie bei der App selbst. Fehlt sie, weist Apple das Paket zurück.
+
 > Hinweis: Sollen beide Varianten parallel auf demselben Mac installierbar sein,
 > in `src-tauri/tauri.conf.json` für die öffentliche Version ggf. eigene
 > `identifier`/`productName` vergeben (sonst überschreiben sie sich gegenseitig).
