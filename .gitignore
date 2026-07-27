@@ -20,3 +20,6 @@ dist-ssr
 # Rust / Tauri
 src-tauri/target
 src-tauri/gen/schemas
+
+# Mitgelieferte Fremdprogramme (per scripts/fetch-rclone.sh geholt, ~78 MB)
+src-tauri/binaries
