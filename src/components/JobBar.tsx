@@ -34,7 +34,19 @@ export function JobBar() {
                 when={j().kind !== "rsync"}
                 fallback={t("jobbar.filesCopied", { count: j().filesDone })}
               >
-                {t("jobbar.items", { done: j().done, total: j().total || "?" })}
+                {/* Auf Netzlaufwerken ist die Gesamtzahl nicht bekannt: Sie
+                    vorab zu ermitteln würde so lange dauern wie das Löschen
+                    selbst. Dann lieber melden, was schon erledigt ist, statt
+                    „0 / ?" anzuzeigen. */}
+                <Show
+                  when={j().kind === "delete" && j().total === 0}
+                  fallback={t("jobbar.items", {
+                    done: j().done,
+                    total: j().total || "?",
+                  })}
+                >
+                  {t("jobbar.itemsDeleted", { count: j().done })}
+                </Show>
               </Show>
               <Show when={j().kind !== "delete" && j().kind !== "rsync"}>
                 {" · "}

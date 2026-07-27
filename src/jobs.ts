@@ -1,12 +1,7 @@
 // Orchestriert Datei-Operationen: Konfliktprüfung, Job-Lauf, Refresh.
 import { createSignal } from "solid-js";
 import { state, setState, refreshPane, loadPane } from "./state";
-import {
-  askPrompt,
-  askConfirm,
-  notify,
-  notifyError,
-} from "./components/Dialogs";
+import { askPrompt, askConfirm, notifyError } from "./components/Dialogs";
 import type { Entry, PaneId } from "./types";
 import { t, errMsg } from "./i18n";
 import { isSameOrChildPath, joinPath, splitName, uniqueName } from "./paths";
@@ -32,6 +27,7 @@ import {
 } from "./ipc";
 import { openSyncDialog } from "./sync";
 import { rememberStagedDelete } from "./undo";
+import { reportKnownDeleteError } from "./deleteErrors";
 
 const newJobId = () => `job-${Date.now()}-${Math.floor(Math.random() * 1e6)}`;
 
@@ -295,11 +291,7 @@ export async function deleteSelected(skipConfirm = false) {
     }
   } catch (e) {
     const raw = errMsg(e);
-    if (raw.includes("TIMEMACHINE_PROTECTED")) {
-      await notify({
-        title: t("jobs.trash.timeMachine.title"),
-        message: t("jobs.trash.timeMachine.message"),
-      });
+    if (await reportKnownDeleteError(raw)) {
       await refreshPane(pane);
       return;
     }

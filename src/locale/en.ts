@@ -51,6 +51,7 @@ export const en: Record<string, string> = {
   "jobbar.moving": "Moving",
   "jobbar.deleting": "Deleting",
   "jobbar.items": "{done} / {total} entries",
+  "jobbar.itemsDeleted": "{count} entries deleted",
   "jobbar.filesCopied": "{count} files copied",
   "jobbar.rsync": "rsync (SSH)",
 
@@ -343,6 +344,9 @@ export const en: Record<string, string> = {
   "jobs.trash.timeMachine.title": "Time Machine",
   "jobs.trash.timeMachine.message":
     "Time Machine backups are protected by macOS and can't be deleted in this app.\n\nUse the macOS Time Machine app or Disk Utility instead.",
+  "jobs.trash.networkBusy.title": "Network drive won't release the folder",
+  "jobs.trash.networkBusy.message":
+    "\"{name}\" could not be deleted: the network drive reports the item as busy.\n\nThis happens while the server is still cleaning up or when another program has the folder open. Wait a moment and try again. If that doesn't help, unmount the drive and mount it again.",
   "jobs.extractFailed": "Extraction failed: {msg}",
   "jobs.zipFailed": "ZIP creation failed: {msg}",
 

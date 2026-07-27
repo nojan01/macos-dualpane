@@ -17,7 +17,8 @@ import {
 import type { PaneId } from "./types";
 import { t, errMsg } from "./i18n";
 import { joinPath } from "./paths";
-import { askConfirm, askPrompt, notify, notifyError } from "./components/Dialogs";
+import { askConfirm, askPrompt, notifyError } from "./components/Dialogs";
+import { reportKnownDeleteError } from "./deleteErrors";
 import {
   newSyncProfileId,
   removeSyncProfile,
@@ -605,12 +606,7 @@ export async function confirmSync() {
   } catch (e) {
     const raw = errMsg(e);
     // Time-Machine-Ziele sind auch beim Sync-Löschen geschützt.
-    if (raw.includes("TIMEMACHINE_PROTECTED")) {
-      await notify({
-        title: t("jobs.trash.timeMachine.title"),
-        message: t("jobs.trash.timeMachine.message"),
-      });
-    } else {
+    if (!(await reportKnownDeleteError(raw))) {
       await notifyError(t("common.error", { msg: raw }));
     }
   } finally {
