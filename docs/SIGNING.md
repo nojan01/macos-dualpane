@@ -25,6 +25,78 @@ Zertifikatswechsel oder auf einem neuen Rechner zu tun ist.
 
 ---
 
+## RemoteDeskRDP (remote-client/)
+
+Der RDP-Client wird getrennt gebaut und notarisiert:
+
+```bash
+cd remote-client
+npm run tauri:build    # baut, signiert dabei auch das FreeRDP-Backend
+npm run notarize       # siegelt nach, reicht ein, heftet das Ticket an
+```
+
+Zugangsdaten liegen als notarytool-Profil `remotedesk-notary` im Schluesselbund:
+
+```bash
+xcrun notarytool store-credentials "remotedesk-notary" --team-id TXF2V79Z6N
+```
+
+### Zwei Fallen, die je einen Fehlversuch kosten
+
+**1. Tauri liefert `resources/` unsigniert durch.** Das mitgelieferte
+FreeRDP-Backend besteht aus 35 Mach-O-Dateien. Tauri signiert nur die aeussere
+App und die eigenen Binaerdateien; alles unter `resources/` bleibt unberuehrt.
+Ohne Signatur lehnt Apple ab. `scripts/sign-freerdp-backend.sh` erledigt das und
+haengt fest im Bauablauf (`npm run tauri:build`).
+
+**2. Tauri loest beim Kopieren Symlinks auf.** Das Backend enthaelt 34 davon
+(`libz.1.dylib` → `libz.1.4.1.1.dylib` und aehnliche). Aus 44 Dateien mit 47 MB
+werden dabei 78 Dateien mit 111 MB. `MacFreeRDP.app` ist aber ein **eigenes
+Bundle mit eigenem Siegel**, und dieses Siegel haelt die Symlinks fest. Nach dem
+Kopieren passt es nicht mehr:
+
+```
+codesign --verify ...  ->  file modified: .../libz.1.dylib
+```
+
+Das wird leicht uebersehen, weil die **aeussere App trotzdem sauber
+verifiziert** – auch mit `--deep --strict`; ihr Siegel erfasst `Resources/` nur
+als Daten. Apples Notardienst prueft genauer:
+
+```
+The signature of the binary is invalid
+.../MacFreeRDP.app/Contents/MacOS/MacFreeRDP
+```
+
+Belegt am 01.08.2026: Vorgang `4f1fd1ef-…` abgelehnt (zwei Beanstandungen, beide
+an `MacFreeRDP`), derselbe Bau nach dem Nachsiegeln als `bb133bd5-…` angenommen.
+
+Deshalb siegelt `scripts/notarize.sh` das eingebettete Bundle nach dem Bauen neu
+und signiert anschliessend die aeussere App – **ohne `--deep`**. Mit `--deep`
+wuerde codesign die eingebetteten Bundles mit der Kennung der aeusseren App
+ueberschreiben und das eben erneuerte Siegel wieder zerstoeren.
+
+> Bewusst zurueckgestellt: Die aufgeloesten Symlinks kosten rund 64 MB.
+> Zusammenlegen ginge nur ueber `install_name_tool` an 35 Binaerdateien, weil
+> tatsaechlich **beide** Namensvarianten geladen werden (`libz.1.dylib` 18×,
+> `libz.1.4.1.1.dylib` 1×). Der Aufwand steht derzeit nicht dafuer.
+
+### Werkzeugtuecken beim Signieren
+
+- **Von innen nach aussen signieren.** Wird die Huelle zuerst signiert,
+  entwertet jede spaetere Signatur im Inneren das aeussere Siegel.
+- **Die Hauptdatei eines Bundles nie einzeln signieren.** codesign erkennt
+  `Contents/MacOS/<CFBundleExecutable>` als Bundle-Hauptdatei und signiert
+  daraufhin das *gesamte* Bundle. Mitten in einer Schleife sind die uebrigen
+  Dateien dann noch unsigniert und der Lauf bricht ab mit
+  „code object is not signed at all / In subcomponent: …".
+- **Symlinks tragen keine Signatur.** `find -type f` laesst sie aus.
+- **Fette Binaerdateien** melden bei `file` eine Zeile *je Architektur*
+  (`… (for architecture arm64):`). Ohne Nachbearbeitung entstehen daraus
+  ungueltige Pfade – im ersten Anlauf 105 statt 35 Dateien.
+
+---
+
 ## 1. Voraussetzung: Apple Developer Account
 
 - **Apple Developer Program** Mitgliedschaft (99 USD/Jahr): https://developer.apple.com
