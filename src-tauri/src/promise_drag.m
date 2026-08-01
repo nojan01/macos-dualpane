@@ -544,8 +544,125 @@ int db_open_with(const char *const *paths, int count, const char *app_path,
     return 0;
 }
 
-void db_set_dock_badge(const char *label) {
-    NSString *text = (label && label[0] != '\0')
+int db_choose_application(char **out_path, const char **out_err) {
+    if (out_path) *out_path = NULL;
+    if (out_err) *out_err = NULL;
+    if (!out_path) {
+        if (out_err) *out_err = strdup("invalid arguments");
+        return -1;
+    }
+
+    __block int retval = 0;
+    __block NSString *picked = nil;
+    __block NSString *errstr = nil;
+
+    dispatch_block_t work = ^{
+        @try {
+            NSOpenPanel *panel = [NSOpenPanel openPanel];
+            // Ein .app-Bündel ist im Dateisystem ein Verzeichnis. Ohne
+            // treatsFilePackagesAsDirectories:NO würde der Dialog hineinnavigieren,
+            // statt es auswählbar zu machen.
+            panel.canChooseFiles = YES;
+            panel.canChooseDirectories = NO;
+            panel.treatsFilePackagesAsDirectories = NO;
+            panel.allowsMultipleSelection = NO;
+            panel.allowedContentTypes = @[ UTTypeApplicationBundle ];
+            panel.directoryURL = [NSURL fileURLWithPath:@"/Applications"];
+
+            // Ohne Aktivieren erscheint der Dialog unter Umständen hinter dem
+            // Fenster, aus dem er angefordert wurde.
+            [NSApp activateIgnoringOtherApps:YES];
+            if ([panel runModal] == NSModalResponseOK) {
+                picked = [[panel URL] path];
+                if (picked.length == 0) retval = 1;
+            } else {
+                retval = 1;
+            }
+        } @catch (NSException *ex) {
+            errstr = [ex reason] ?: @"objc exception";
+            retval = -3;
+        }
+    };
+
+    if ([NSThread isMainThread]) {
+        work();
+    } else {
+        // Ohne Zeitgrenze: Der Dialog wartet auf den Nutzer, und der darf sich
+        // Zeit lassen. Der Hauptthread arbeitet den Block sicher ab, weil hier
+        // ausdrücklich nicht von ihm aus gewartet wird.
+        dispatch_semaphore_t done = dispatch_semaphore_create(0);
+        dispatch_async(dispatch_get_main_queue(), ^{
+            work();
+            dispatch_semaphore_signal(done);
+        });
+        dispatch_semaphore_wait(done, DISPATCH_TIME_FOREVER);
+    }
+
+    if (retval < 0) {
+        if (out_err) *out_err = strdup([errstr UTF8String] ?: "unknown error");
+        return retval;
+    }
+    if (retval == 1) return 1;
+    *out_path = strdup([picked UTF8String] ?: "");
+    return 0;
+}
+
+int db_set_default_application(const char *app_path, const char *file_path,
+                               const char **out_err) {
+    if (out_err) *out_err = NULL;
+    if (!app_path || !file_path) {
+        if (out_err) *out_err = strdup("invalid arguments");
+        return -1;
+    }
+
+    NSURL *app = [NSURL fileURLWithPath:[NSString stringWithUTF8String:app_path]];
+    NSURL *file = [NSURL fileURLWithPath:[NSString stringWithUTF8String:file_path]];
+
+    __block int retval = 0;
+    __block NSString *errstr = nil;
+    dispatch_semaphore_t done = dispatch_semaphore_create(0);
+    dispatch_block_t work = ^{
+        @try {
+            [[NSWorkspace sharedWorkspace]
+                setDefaultApplicationAtURL:app
+                          toOpenFileAtURL:file
+                        completionHandler:^(NSError *error) {
+                            if (error != nil) {
+                                errstr = [error localizedDescription]
+                                    ?: @"could not set default application";
+                                retval = -2;
+                            }
+                            dispatch_semaphore_signal(done);
+                        }];
+        } @catch (NSException *ex) {
+            errstr = [ex reason] ?: @"objc exception";
+            retval = -3;
+            dispatch_semaphore_signal(done);
+        }
+    };
+
+    if ([NSThread isMainThread]) {
+        // Wie bei db_open_with: Auf dem Hauptthread wird nur angestoßen, sonst
+        // stünde das Warten dem eigenen Abschlussblock im Weg.
+        work();
+        return 0;
+    }
+
+    dispatch_async(dispatch_get_main_queue(), work);
+    if (dispatch_semaphore_wait(done,
+            dispatch_time(DISPATCH_TIME_NOW, (int64_t)(30 * NSEC_PER_SEC))) != 0) {
+        if (out_err) *out_err = strdup("Zeitüberschreitung beim Festlegen");
+        return -4;
+    }
+
+    if (retval != 0) {
+        if (out_err) *out_err = strdup([errstr UTF8String] ?: "unknown error");
+        return retval;
+    }
+    return 0;
+}
+
+void db_set_dock_badge(const char *label) {    NSString *text = (label && label[0] != '\0')
         ? [NSString stringWithUTF8String:label]
         : nil;
     dispatch_block_t work = ^{

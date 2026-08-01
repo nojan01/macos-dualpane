@@ -447,6 +447,19 @@ export async function openWithApp(
   return invoke<void>("open_with_app", { paths, appPath });
 }
 
+/** Systemdialog zur Programmauswahl. `null`, wenn der Nutzer abbricht. */
+export async function chooseApplication(): Promise<string | null> {
+  return invoke<string | null>("choose_application_dialog");
+}
+
+/** Macht das Programm zum systemweiten Standard für Dateien dieses Typs. */
+export async function setDefaultApplicationFor(
+  appPath: string,
+  filePath: string,
+): Promise<void> {
+  return invoke<void>("set_default_application_for", { appPath, filePath });
+}
+
 export async function setDockBadge(label: string | null): Promise<void> {
   return invoke<void>("set_dock_badge", { label });
 }

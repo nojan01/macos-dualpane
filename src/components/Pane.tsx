@@ -52,6 +52,8 @@ import {
   openInEditor,
   listOpenWithApps,
   openWithApp,
+  chooseApplication,
+  setDefaultApplicationFor,
   type OpenWithApp,
 } from "../ipc";
 import { openSearch } from "./SearchDialog";
@@ -346,20 +348,121 @@ export function Pane(props: { id: PaneId }) {
     const e = firstSel();
     if (e) await quickLook(e.path);
   };
-  const actOpenWith = async (appPath: string) => {
-    // Verzeichnisse bleiben aussen vor: LaunchServices würde sie an den Finder
-    // weiterreichen statt an das gewählte Programm.
-    const paths = sel()
-      .filter((e) => !e.isDir)
-      .map((e) => e.path);
-    closeMenu();
-    if (paths.length === 0) return;
+  /** Programmname aus dem Bündelpfad, wenn die Liste keinen mitliefert. */
+  const appLabel = (p: string) =>
+    (p.split("/").pop() ?? p).replace(/\.app$/i, "");
+  /** Endung samt Punkt; ohne Endung der ganze Name, damit die Rückfrage
+   *  trotzdem etwas Greifbares nennt. */
+  const fileExt = (name: string) => {
+    const i = name.lastIndexOf(".");
+    return i > 0 ? name.slice(i) : name;
+  };
+
+  const runOpenWith = async (
+    entries: ReturnType<typeof sel>,
+    appPath: string,
+    always: boolean,
+    appName?: string,
+  ) => {
+    const first = entries[0];
+    if (!first) return;
     try {
-      await openWithApp(paths, appPath);
+      if (always) {
+        // Die Zuordnung gilt systemweit, nicht nur in DualBeam – das sollte
+        // niemand versehentlich auslösen.
+        const ok = await askConfirm({
+          title: t("pane.ctx.setDefaultTitle"),
+          message: t("pane.ctx.setDefaultMsg", {
+            ext: fileExt(first.name),
+            app: appName ?? appLabel(appPath),
+          }),
+          okLabel: t("pane.ctx.setDefaultOk"),
+        });
+        if (!ok) return;
+        await setDefaultApplicationFor(appPath, first.path);
+      }
+      await openWithApp(
+        entries.map((e) => e.path),
+        appPath,
+      );
     } catch (e) {
       await notifyError(errMsg(e));
     }
   };
+
+  const actOpenWith = (appPath: string, always: boolean, appName?: string) => {
+    // Verzeichnisse bleiben aussen vor: LaunchServices würde sie an den Finder
+    // weiterreichen statt an das gewählte Programm.
+    const entries = sel().filter((e) => !e.isDir);
+    closeMenu();
+    void runOpenWith(entries, appPath, always, appName);
+  };
+
+  const actOpenWithOther = async (always: boolean) => {
+    // Die Auswahl vor dem Schliessen sichern: Der Dialog läuft asynchron, bis
+    // zu seiner Rückkehr kann sich die Markierung geändert haben.
+    const entries = sel().filter((e) => !e.isDir);
+    closeMenu();
+    if (entries.length === 0) return;
+    try {
+      const app = await chooseApplication();
+      // Abbruch ist kein Fehler und bleibt deshalb ohne Meldung.
+      if (!app) return;
+      await runOpenWith(entries, app, always);
+    } catch (e) {
+      await notifyError(errMsg(e));
+    }
+  };
+  /** Menüeintrag samt Untermenü – einmal zum einmaligen Öffnen, einmal zum
+   *  dauerhaften Festlegen. Beide teilen sich dieselbe Programmliste. */
+  const openWithEntry = (always: boolean) => (
+    <div class="ctx-item ctx-sub" onMouseEnter={loadOpenWith}>
+      <span>
+        {always ? t("pane.ctx.openWithAlways") : t("pane.ctx.openWith")}
+      </span>
+      <span class="ctx-sub-arrow" aria-hidden="true">
+        ›
+      </span>
+      <div class="ctx-submenu" classList={{ flip: owFlip() }}>
+        <Show
+          when={owApps()}
+          fallback={
+            <div class="ctx-hint">{t("pane.ctx.openWithLoading")}</div>
+          }
+        >
+          {(apps) => (
+            <Show
+              when={apps().length > 0}
+              fallback={
+                <div class="ctx-hint">{t("pane.ctx.openWithEmpty")}</div>
+              }
+            >
+              <For each={apps()}>
+                {(a) => (
+                  <div
+                    class="ctx-item ctx-app"
+                    onClick={() => actOpenWith(a.path, always, a.name)}
+                  >
+                    <FileIcon path={a.path} fallback="📦" />
+                    <span class="ctx-app-name">
+                      {a.isDefault && !always
+                        ? t("pane.ctx.openWithDefault", { name: a.name })
+                        : a.name}
+                    </span>
+                  </div>
+                )}
+              </For>
+            </Show>
+          )}
+        </Show>
+        <div class="ctx-sep" />
+        <div class="ctx-item" onClick={() => void actOpenWithOther(always)}>
+          {t("pane.ctx.openWithOther")}
+        </div>
+      </div>
+    </div>
+  );
+
   const actRename = () => {
     closeMenu();
     beginRename();
@@ -789,51 +892,8 @@ export function Pane(props: { id: PaneId }) {
                   {t("pane.ctx.open")}
                 </div>
                 <Show when={firstSel() && !firstSel()!.isDir}>
-                  <div class="ctx-item ctx-sub" onMouseEnter={loadOpenWith}>
-                    <span>{t("pane.ctx.openWith")}</span>
-                    <span class="ctx-sub-arrow" aria-hidden="true">
-                      ›
-                    </span>
-                    <div class="ctx-submenu" classList={{ flip: owFlip() }}>
-                      <Show
-                        when={owApps()}
-                        fallback={
-                          <div class="ctx-hint">
-                            {t("pane.ctx.openWithLoading")}
-                          </div>
-                        }
-                      >
-                        {(apps) => (
-                          <Show
-                            when={apps().length > 0}
-                            fallback={
-                              <div class="ctx-hint">
-                                {t("pane.ctx.openWithEmpty")}
-                              </div>
-                            }
-                          >
-                            <For each={apps()}>
-                              {(a) => (
-                                <div
-                                  class="ctx-item ctx-app"
-                                  onClick={() => void actOpenWith(a.path)}
-                                >
-                                  <FileIcon path={a.path} fallback="📦" />
-                                  <span class="ctx-app-name">
-                                    {a.isDefault
-                                      ? t("pane.ctx.openWithDefault", {
-                                          name: a.name,
-                                        })
-                                      : a.name}
-                                  </span>
-                                </div>
-                              )}
-                            </For>
-                          </Show>
-                        )}
-                      </Show>
-                    </div>
-                  </div>
+                  {openWithEntry(false)}
+                  {openWithEntry(true)}
                 </Show>
                 <div class="ctx-item" onClick={() => void actQuickLook()}>
                   {t("pane.ctx.quickLook")}

@@ -91,6 +91,12 @@ export const de: Record<string, string> = {
   "pane.ctx.openWithLoading": "Wird geladen …",
   "pane.ctx.openWithEmpty": "Kein Programm gefunden",
   "pane.ctx.openWithDefault": "{name} (Standard)",
+  "pane.ctx.openWithOther": "Andere …",
+  "pane.ctx.openWithAlways": "Immer öffnen mit",
+  "pane.ctx.setDefaultTitle": "Standardprogramm ändern?",
+  "pane.ctx.setDefaultMsg":
+    "Dateien vom Typ „{ext}“ werden künftig immer mit {app} geöffnet – auch im Finder und in anderen Programmen.",
+  "pane.ctx.setDefaultOk": "Festlegen und öffnen",
   "pane.ctx.quickLook": "Schnellansicht",
   "pane.ctx.rename": "Umbenennen",
   "pane.ctx.multiRename": "Mehrfach umbenennen… ({count}) ⌘R",

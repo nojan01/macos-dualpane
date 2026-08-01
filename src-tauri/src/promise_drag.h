@@ -63,6 +63,18 @@ int db_open_with(const char *const *paths, int count, const char *app_path,
  * is toggled closed. Runs on the main thread. */
 void db_quick_look(const char *const *paths, int count);
 
+/* Show a native open panel restricted to application bundles, starting in
+ * /Applications. Returns 0 when the user picked one and sets *out_path
+ * (malloc'd, caller frees), 1 when the user cancelled, and a negative value
+ * on error (may set *out_err, malloc'd, caller frees). */
+int db_choose_application(char **out_path, const char **out_err);
+
+/* Make the application bundle at app_path the system-wide default handler for
+ * files of the same type as file_path. Returns 0 on success, non-zero on
+ * error (may set *out_err, malloc'd, caller frees). */
+int db_set_default_application(const char *app_path, const char *file_path,
+                               const char **out_err);
+
 #ifdef __cplusplus
 }
 #endif

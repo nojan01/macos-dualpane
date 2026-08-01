@@ -45,6 +45,15 @@ extern "C" {
         app_path: *const c_char,
         out_err: *mut *const c_char,
     ) -> c_int;
+    fn db_choose_application(
+        out_path: *mut *mut c_char,
+        out_err: *mut *const c_char,
+    ) -> c_int;
+    fn db_set_default_application(
+        app_path: *const c_char,
+        file_path: *const c_char,
+        out_err: *mut *const c_char,
+    ) -> c_int;
 }
 
 static APP_HANDLE: OnceLock<AppHandle> = OnceLock::new();
@@ -319,4 +328,64 @@ pub fn open_with_app(paths: Vec<String>, app_path: String) -> Result<(), String>
     } else {
         Err(take_err(err, r))
     }
+}
+
+/// Zeigt den Systemdialog zur Programmauswahl.
+///
+/// Liefert `None`, wenn der Nutzer abbricht — das ist kein Fehler und darf
+/// keine Meldung auslösen.
+fn choose_application() -> Result<Option<String>, String> {
+    let mut out_path: *mut c_char = std::ptr::null_mut();
+    let mut err: *const c_char = std::ptr::null();
+    let r = unsafe { db_choose_application(&mut out_path as *mut _, &mut err as *mut _) };
+    if r < 0 {
+        return Err(take_err(err, r));
+    }
+    if r == 1 || out_path.is_null() {
+        return Ok(None);
+    }
+    let s = unsafe { CStr::from_ptr(out_path) }
+        .to_string_lossy()
+        .to_string();
+    unsafe { libc::free(out_path as *mut libc::c_void) };
+    if s.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(s))
+}
+
+/// Der Dialog wartet auf den Nutzer. Er läuft deshalb auf einem eigenen
+/// Thread, damit die Laufzeitumgebung von Tauri währenddessen weiterarbeitet.
+#[tauri::command]
+pub async fn choose_application_dialog() -> Result<Option<String>, String> {
+    tauri::async_runtime::spawn_blocking(choose_application)
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+fn set_default_application(app_path: String, file_path: String) -> Result<(), String> {
+    let app = CString::new(app_path).map_err(|e| e.to_string())?;
+    let file = CString::new(file_path).map_err(|e| e.to_string())?;
+    let mut err: *const c_char = std::ptr::null();
+    let r =
+        unsafe { db_set_default_application(app.as_ptr(), file.as_ptr(), &mut err as *mut _) };
+    if r == 0 {
+        Ok(())
+    } else {
+        Err(take_err(err, r))
+    }
+}
+
+/// Legt das Programm als systemweiten Standard für Dateien dieses Typs fest.
+///
+/// Läuft auf einem eigenen Thread, weil LaunchServices den Aufruf unter
+/// Umständen mit einer Rückfrage an den Nutzer beantwortet.
+#[tauri::command]
+pub async fn set_default_application_for(
+    app_path: String,
+    file_path: String,
+) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || set_default_application(app_path, file_path))
+        .await
+        .map_err(|e| e.to_string())?
 }

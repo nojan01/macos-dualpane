@@ -90,6 +90,12 @@ export const en: Record<string, string> = {
   "pane.ctx.openWithLoading": "Loading …",
   "pane.ctx.openWithEmpty": "No application found",
   "pane.ctx.openWithDefault": "{name} (default)",
+  "pane.ctx.openWithOther": "Other …",
+  "pane.ctx.openWithAlways": "Always Open With",
+  "pane.ctx.setDefaultTitle": "Change default application?",
+  "pane.ctx.setDefaultMsg":
+    "From now on, “{ext}” files will always open with {app} — in Finder and other applications too.",
+  "pane.ctx.setDefaultOk": "Set and open",
   "pane.ctx.quickLook": "Quick Look",
   "pane.ctx.rename": "Rename",
   "pane.ctx.multiRename": "Batch rename… ({count}) ⌘R",

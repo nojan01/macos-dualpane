@@ -5625,6 +5625,8 @@ pub fn run() {
             promise_drag::resolve_promise_drop,
             promise_drag::list_open_with_apps,
             promise_drag::open_with_app,
+            promise_drag::choose_application_dialog,
+            promise_drag::set_default_application_for,
         ])
         .build(tauri::generate_context!())
         .expect("error while running tauri application")
