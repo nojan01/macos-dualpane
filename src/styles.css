@@ -233,6 +233,10 @@
   color: var(--text);
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.18);
 }
+:root[data-theme="light"] .ctx-submenu {
+  background: #ffffff;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.18);
+}
 :root[data-theme="light"] .ctx-item:hover {
   background: var(--row-selected);
   color: var(--text);
@@ -820,7 +824,12 @@ body.col-resizing * {
 .jobbar .bar-fill {
   height: 100%;
   background: #4a90e2;
-  transition: width 80ms linear;
+  /* Bewusst `transform` statt `width`: Eine Breitenänderung erzwingt bei jedem
+     Fortschrittsschritt Layout und Neuzeichnen im Hauptthread – genau dort, wo
+     während eines Kopierjobs ohnehin die Arbeit liegt. Die Skalierung
+     übernimmt der Compositor. */
+  transform-origin: left center;
+  transition: transform 80ms linear;
 }
 .jobbar .prog {
   font-variant-numeric: tabular-nums;
@@ -1270,6 +1279,17 @@ body.col-resizing * {
   resize: vertical;
   margin: 0 0 6px;
   padding: 6px;
+}
+.sync-max-size {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0 0 6px;
+}
+.sync-max-size input {
+  width: 90px;
+  box-sizing: border-box;
+  padding: 4px 6px;
 }
 .modal-actions button {
   background: #4a90e2;
@@ -1823,6 +1843,57 @@ body.dragging * {
   color: #fff;
 }
 
+/* "Öffnen mit": Untermenü, das beim Überfahren des Eintrags aufklappt. */
+.ctx-sub {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.ctx-sub-arrow {
+  opacity: 0.6;
+}
+.ctx-submenu {
+  display: none;
+  position: absolute;
+  top: -5px;
+  left: 100%;
+  width: 240px;
+  max-height: 320px;
+  overflow-y: auto;
+  background: var(--panel, #2a2a2a);
+  /* Ohne diese Angabe erbte das Untermenü die weisse Schriftfarbe, die der
+     übergeordnete Eintrag beim Überfahren annimmt. */
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+  padding: 4px 0;
+}
+/* An der rechten Fensterkante nach links aufklappen. */
+.ctx-submenu.flip {
+  left: auto;
+  right: 100%;
+}
+.ctx-sub:hover > .ctx-submenu {
+  display: block;
+}
+.ctx-app {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.ctx-app-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.ctx-hint {
+  padding: 6px 12px;
+  color: var(--muted, #999);
+  white-space: nowrap;
+}
+
 .preview-pane {
   display: flex;
   flex-direction: column;
@@ -2252,15 +2323,19 @@ body.dragging * {
   white-space: nowrap;
 }
 .jobbar-fill {
-  width: var(--pct, 0%);
+  /* Volle Breite, sichtbarer Anteil über die Skalierung (0…1). */
+  width: 100%;
+  transform: scaleX(var(--progress, 0));
 }
 .jobbar-fill.indeterminate {
-  width: 32% !important;
   animation: jobbar-indeterminate 1.15s ease-in-out infinite;
 }
 @keyframes jobbar-indeterminate {
-  from { transform: translateX(-120%); }
-  to { transform: translateX(420%); }
+  /* scaleX(0.32) ersetzt die frühere feste Breite von 32 %. Weil die
+     Verschiebung mitskaliert wird, bleiben die Prozentwerte dieselben wie
+     zuvor – der Lauf sieht unverändert aus. */
+  from { transform: scaleX(0.32) translateX(-120%); }
+  to { transform: scaleX(0.32) translateX(420%); }
 }
 .sidebar-ctx {
   left: var(--cx, 0px);

@@ -46,6 +46,18 @@ void db_clean_edit_menu(void);
 typedef void (*db_dock_callback)(void);
 void db_install_dock_menu(const char *title, db_dock_callback cb);
 
+/* List the applications that can open the given file, as a UTF-8 JSON array of
+ * objects: [{"name":..., "path":..., "isDefault":bool}, ...]. The default
+ * handler is marked and sorted first. On success returns 0 and sets *out_json
+ * to a malloc'd string (caller frees). On error returns non-zero and may set
+ * *out_err (malloc'd, caller frees). */
+int db_open_with_apps(const char *path, char **out_json, const char **out_err);
+
+/* Open the given files with the application bundle at app_path. Returns 0 on
+ * success, non-zero on error (may set *out_err, malloc'd, caller frees). */
+int db_open_with(const char *const *paths, int count, const char *app_path,
+                 const char **out_err);
+
 /* Present a native Quick Look preview panel (like Finder's spacebar preview)
  * for the given file paths. If the same selection is already shown, the panel
  * is toggled closed. Runs on the main thread. */

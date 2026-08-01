@@ -11,6 +11,12 @@ export type SyncProfile = {
   verifyChecksums: boolean;
   /** Dateisystem nutzt das eingebundene Ziel direkt. rsync überträgt per SSH. */
   transport: "filesystem" | "rsync";
+  /**
+   * Obergrenze je Datei in MB. 0 bedeutet „keine Grenze“. Sehr große Dateien
+   * (Datenträgerabbilder, Videoarchive) blockieren auf langsamen Zielen sonst
+   * den gesamten Abgleich.
+   */
+  maxFileSizeMb: number;
   /** Zugangsdaten ohne Passwort; dieses liegt ausschließlich im Schlüsselbund. */
   rsync?: {
     host: string;
@@ -44,6 +50,16 @@ function load(): SyncProfile[] {
         mode: profile.mode === "twoWay" ? "twoWay" : "oneWay",
         verifyChecksums: !!profile.verifyChecksums,
         transport: profile.transport === "rsync" ? "rsync" : "filesystem",
+        // Bestandsprofile kennen das Feld nicht; ebenso wenig sind negative,
+        // gebrochene oder unendliche Werte sinnvoll. Alles Ungültige bedeutet
+        // „keine Grenze“, damit ein beschädigter Eintrag nie stillschweigend
+        // Dateien vom Abgleich ausschließt.
+        maxFileSizeMb:
+          typeof profile.maxFileSizeMb === "number" &&
+          Number.isFinite(profile.maxFileSizeMb) &&
+          profile.maxFileSizeMb > 0
+            ? Math.floor(profile.maxFileSizeMb)
+            : 0,
         rsync:
           profile.rsync &&
           typeof profile.rsync.host === "string" &&

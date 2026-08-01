@@ -24,7 +24,9 @@ export function JobBar() {
                 }}
                 ref={(el) =>
                   createEffect(() =>
-                    el.style.setProperty("--pct", `${pct()}%`),
+                    // Als Faktor 0…1, weil der Balken über `scaleX` skaliert
+                    // wird statt seine Breite zu ändern (kein Layout je Schritt).
+                    el.style.setProperty("--progress", `${pct() / 100}`),
                   )
                 }
               />

@@ -34,6 +34,17 @@ extern "C" {
         out_len: *mut c_int,
         out_err: *mut *const c_char,
     ) -> c_int;
+    fn db_open_with_apps(
+        path: *const c_char,
+        out_json: *mut *mut c_char,
+        out_err: *mut *const c_char,
+    ) -> c_int;
+    fn db_open_with(
+        paths: *const *const c_char,
+        count: c_int,
+        app_path: *const c_char,
+        out_err: *mut *const c_char,
+    ) -> c_int;
 }
 
 static APP_HANDLE: OnceLock<AppHandle> = OnceLock::new();
@@ -237,4 +248,75 @@ pub fn file_icon_png(path: &str, size: u32) -> Result<Vec<u8>, String> {
     let bytes = unsafe { std::slice::from_raw_parts(out_png, out_len as usize) }.to_vec();
     unsafe { libc::free(out_png as *mut libc::c_void) };
     Ok(bytes)
+}
+
+/// Nimmt die von der C-Seite gelieferte Fehlermeldung entgegen und gibt den
+/// zugehörigen Speicher frei. Ohne das Freigeben würde jeder Fehlschlag ein
+/// kleines Leck hinterlassen.
+fn take_err(err: *const c_char, code: c_int) -> String {
+    if err.is_null() {
+        return format!("error {}", code);
+    }
+    let s = unsafe { CStr::from_ptr(err) }.to_string_lossy().to_string();
+    unsafe { libc::free(err as *mut libc::c_void) };
+    s
+}
+
+/// Ein Programm, das die ausgewählte Datei öffnen kann.
+#[derive(serde::Serialize, serde::Deserialize)]
+pub struct OpenWithApp {
+    pub name: String,
+    pub path: String,
+    #[serde(rename = "isDefault")]
+    pub is_default: bool,
+}
+
+/// Liefert die Programme, die macOS für diese Datei anbietet – das
+/// Standardprogramm zuerst, danach alphabetisch.
+#[tauri::command]
+pub fn list_open_with_apps(path: String) -> Result<Vec<OpenWithApp>, String> {
+    let c = CString::new(path).map_err(|e| e.to_string())?;
+    let mut out_json: *mut c_char = std::ptr::null_mut();
+    let mut err: *const c_char = std::ptr::null();
+    let r = unsafe { db_open_with_apps(c.as_ptr(), &mut out_json as *mut _, &mut err as *mut _) };
+    if r != 0 {
+        return Err(take_err(err, r));
+    }
+    if out_json.is_null() {
+        return Ok(Vec::new());
+    }
+    let json = unsafe { CStr::from_ptr(out_json) }
+        .to_string_lossy()
+        .to_string();
+    unsafe { libc::free(out_json as *mut libc::c_void) };
+    serde_json::from_str(&json).map_err(|e| e.to_string())
+}
+
+/// Öffnet die angegebenen Dateien mit einem bestimmten Programm.
+#[tauri::command]
+pub fn open_with_app(paths: Vec<String>, app_path: String) -> Result<(), String> {
+    if paths.is_empty() {
+        return Err("keine Pfade angegeben".into());
+    }
+    let cstrings: Vec<CString> = paths
+        .iter()
+        .map(|p| CString::new(p.as_str()))
+        .collect::<Result<_, _>>()
+        .map_err(|e| e.to_string())?;
+    let ptrs: Vec<*const c_char> = cstrings.iter().map(|c| c.as_ptr()).collect();
+    let app = CString::new(app_path).map_err(|e| e.to_string())?;
+    let mut err: *const c_char = std::ptr::null();
+    let r = unsafe {
+        db_open_with(
+            ptrs.as_ptr(),
+            ptrs.len() as c_int,
+            app.as_ptr(),
+            &mut err as *mut _,
+        )
+    };
+    if r == 0 {
+        Ok(())
+    } else {
+        Err(take_err(err, r))
+    }
 }

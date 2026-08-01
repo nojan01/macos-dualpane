@@ -261,6 +261,8 @@ export type RsyncRequest = {
   password: string;
   deleteExtra: boolean;
   excludePatterns: string[];
+  /** Obergrenze je Datei in Bytes; 0 bedeutet „keine Grenze". */
+  maxFileSize: number;
 };
 
 /** Synchronisiert direkt mit einem rsync-over-SSH-Endpunkt. Das Passwort wird
@@ -300,6 +302,7 @@ export async function syncPreview(
   deleteExtra: boolean,
   ignorePatterns: string[] = [],
   verifyChecksums = false,
+  maxFileSize = 0,
 ): Promise<SyncEntry[]> {
   return invoke<SyncEntry[]>("sync_preview", {
     previewId,
@@ -308,6 +311,7 @@ export async function syncPreview(
     deleteExtra,
     ignorePatterns,
     verifyChecksums,
+    maxFileSize,
   });
 }
 
@@ -317,6 +321,7 @@ export async function syncTwoWayPreview(
   right: string,
   ignorePatterns: string[] = [],
   verifyChecksums = false,
+  maxFileSize = 0,
 ): Promise<SyncEntry[]> {
   return invoke<SyncEntry[]>("sync_two_way_preview", {
     previewId,
@@ -324,6 +329,7 @@ export async function syncTwoWayPreview(
     right,
     ignorePatterns,
     verifyChecksums,
+    maxFileSize,
   });
 }
 
@@ -421,6 +427,24 @@ export async function openTerminal(path: string): Promise<void> {
 
 export async function openInEditor(path: string): Promise<void> {
   return invoke<void>("open_in_editor", { path });
+}
+
+/** Ein Programm, das macOS für eine bestimmte Datei anbietet. */
+export type OpenWithApp = {
+  name: string;
+  path: string;
+  isDefault: boolean;
+};
+
+export async function listOpenWithApps(path: string): Promise<OpenWithApp[]> {
+  return invoke<OpenWithApp[]>("list_open_with_apps", { path });
+}
+
+export async function openWithApp(
+  paths: string[],
+  appPath: string,
+): Promise<void> {
+  return invoke<void>("open_with_app", { paths, appPath });
 }
 
 export async function setDockBadge(label: string | null): Promise<void> {

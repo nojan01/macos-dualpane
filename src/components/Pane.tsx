@@ -50,10 +50,13 @@ import {
   dragIconPath,
   openTerminal,
   openInEditor,
+  listOpenWithApps,
+  openWithApp,
+  type OpenWithApp,
 } from "../ipc";
 import { openSearch } from "./SearchDialog";
 import { startDrag } from "@crabnebula/tauri-plugin-drag";
-import { askConfirm } from "./Dialogs";
+import { askConfirm, notifyError } from "./Dialogs";
 import { openProperties } from "./PropertiesDialog";
 import { syncToOther } from "../sync";
 import { openRenameDialog } from "../rename";
@@ -62,6 +65,10 @@ import { PathBar } from "./PathBar";
 import { TabBar } from "./TabBar";
 import { FileIcon } from "./FileIcon";
 import { t, errMsg } from "../i18n";
+
+// Breite des "Öffnen mit"-Untermenüs. Muss zur Regel `.ctx-submenu` in
+// styles.css passen, damit die Platzprüfung an der rechten Fensterkante stimmt.
+const OPEN_WITH_WIDTH = 240;
 
 function fmtSize(n: number, isDir: boolean): string {
   if (isDir) return "—";
@@ -254,7 +261,44 @@ export function Pane(props: { id: PaneId }) {
     x: number;
     y: number;
   } | null>(null);
-  const closeMenu = () => setMenu(null);
+  const closeMenu = () => {
+    setMenu(null);
+    resetOpenWith();
+  };
+
+  // ---------- Untermenü "Öffnen mit" ----------
+  // Die Programmliste kostet einen LaunchServices-Aufruf. Sie wird deshalb
+  // erst geholt, wenn der Zeiger den Menüpunkt erreicht, nicht schon beim
+  // Öffnen des Kontextmenüs.
+  const [owApps, setOwApps] = createSignal<OpenWithApp[] | null>(null);
+  const [owFlip, setOwFlip] = createSignal(false);
+  let owLoading = false;
+
+  const resetOpenWith = () => {
+    setOwApps(null);
+    setOwFlip(false);
+    owLoading = false;
+  };
+
+  const loadOpenWith = (ev: MouseEvent) => {
+    // Reicht der Platz rechts nicht, klappt das Untermenü nach links auf.
+    const el = ev.currentTarget as HTMLElement;
+    const r = el.getBoundingClientRect();
+    setOwFlip(r.right + OPEN_WITH_WIDTH > window.innerWidth - 8);
+
+    if (owApps() !== null || owLoading) return;
+    const e = firstSel();
+    if (!e) return;
+    owLoading = true;
+    listOpenWithApps(e.path)
+      .then(setOwApps)
+      // Ein Fehlschlag darf das Menü nicht offen hängen lassen; die leere
+      // Liste zeigt dem Nutzer, dass nichts zur Auswahl steht.
+      .catch(() => setOwApps([]))
+      .finally(() => {
+        owLoading = false;
+      });
+  };
 
   const onRowContextMenu = (ev: MouseEvent, idx: number) => {
     ev.preventDefault();
@@ -264,6 +308,7 @@ export function Pane(props: { id: PaneId }) {
     const e = p.entries[idx];
     if (!e) return;
     if (!p.selected.has(e.path)) selectOnly(id, idx);
+    resetOpenWith();
     setMenu({ kind: "row", x: ev.clientX, y: ev.clientY });
   };
   const onEmptyContextMenu = (ev: MouseEvent) => {
@@ -300,6 +345,20 @@ export function Pane(props: { id: PaneId }) {
     closeMenu();
     const e = firstSel();
     if (e) await quickLook(e.path);
+  };
+  const actOpenWith = async (appPath: string) => {
+    // Verzeichnisse bleiben aussen vor: LaunchServices würde sie an den Finder
+    // weiterreichen statt an das gewählte Programm.
+    const paths = sel()
+      .filter((e) => !e.isDir)
+      .map((e) => e.path);
+    closeMenu();
+    if (paths.length === 0) return;
+    try {
+      await openWithApp(paths, appPath);
+    } catch (e) {
+      await notifyError(errMsg(e));
+    }
   };
   const actRename = () => {
     closeMenu();
@@ -729,6 +788,53 @@ export function Pane(props: { id: PaneId }) {
                 <div class="ctx-item" onClick={() => void actOpen()}>
                   {t("pane.ctx.open")}
                 </div>
+                <Show when={firstSel() && !firstSel()!.isDir}>
+                  <div class="ctx-item ctx-sub" onMouseEnter={loadOpenWith}>
+                    <span>{t("pane.ctx.openWith")}</span>
+                    <span class="ctx-sub-arrow" aria-hidden="true">
+                      ›
+                    </span>
+                    <div class="ctx-submenu" classList={{ flip: owFlip() }}>
+                      <Show
+                        when={owApps()}
+                        fallback={
+                          <div class="ctx-hint">
+                            {t("pane.ctx.openWithLoading")}
+                          </div>
+                        }
+                      >
+                        {(apps) => (
+                          <Show
+                            when={apps().length > 0}
+                            fallback={
+                              <div class="ctx-hint">
+                                {t("pane.ctx.openWithEmpty")}
+                              </div>
+                            }
+                          >
+                            <For each={apps()}>
+                              {(a) => (
+                                <div
+                                  class="ctx-item ctx-app"
+                                  onClick={() => void actOpenWith(a.path)}
+                                >
+                                  <FileIcon path={a.path} fallback="📦" />
+                                  <span class="ctx-app-name">
+                                    {a.isDefault
+                                      ? t("pane.ctx.openWithDefault", {
+                                          name: a.name,
+                                        })
+                                      : a.name}
+                                  </span>
+                                </div>
+                              )}
+                            </For>
+                          </Show>
+                        )}
+                      </Show>
+                    </div>
+                  </div>
+                </Show>
                 <div class="ctx-item" onClick={() => void actQuickLook()}>
                   {t("pane.ctx.quickLook")}
                 </div>

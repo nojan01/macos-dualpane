@@ -9,6 +9,7 @@ import {
   activeSyncProfileId,
   syncMode,
   syncVerifyChecksums,
+  syncMaxFileSizeMb,
   syncTransport,
   syncRsyncAvailable,
   syncRsyncHost,
@@ -21,6 +22,7 @@ import {
   setSyncIgnoreText,
   setSyncModeAndRefresh,
   setSyncVerifyChecksumsAndRefresh,
+  setSyncMaxFileSizeAndRefresh,
   setSyncTransportAndRefresh,
   setSyncRsyncHostValue,
   setSyncRsyncUsernameValue,
@@ -38,6 +40,11 @@ import {
 } from "../sync";
 import { notifyError } from "./Dialogs";
 import { syncProfiles } from "../syncProfiles";
+
+/** Vorgabe beim Einschalten der Größengrenze: 1 GB. Darüber liegen in der
+ * Praxis Datenträgerabbilder und Videoarchive, deren Übertragung einen
+ * Abgleich über Netzlaufwerke unangemessen lange blockiert. */
+const DEFAULT_MAX_FILE_SIZE_MB = 1024;
 import type { SyncAction, SyncEntry } from "../ipc";
 import { t } from "../i18n";
 
@@ -434,6 +441,47 @@ export function SyncDialog() {
                     >
                       {t("sync.ignoreApply")}
                     </button>
+                  </details>
+                  <details class="sync-ignore" open={syncMaxFileSizeMb() > 0}>
+                    <summary>{t("sync.maxSizeTitle")}</summary>
+                    <p>{t("sync.maxSizeHelp")}</p>
+                    <label class="sync-option">
+                      <input
+                        type="checkbox"
+                        checked={syncMaxFileSizeMb() > 0}
+                        onChange={(e) =>
+                          // Beim Einschalten eine brauchbare Vorgabe setzen,
+                          // damit das Feld nicht bei 0 („keine Grenze") steht
+                          // und der Schalter dadurch wirkungslos bliebe.
+                          setSyncMaxFileSizeAndRefresh(
+                            e.currentTarget.checked ? DEFAULT_MAX_FILE_SIZE_MB : 0,
+                          )
+                        }
+                      />
+                      {t("sync.maxSizeEnable")}
+                    </label>
+                    <Show when={syncMaxFileSizeMb() > 0}>
+                      <label class="sync-max-size">
+                        <input
+                          type="number"
+                          min="1"
+                          step="1"
+                          value={syncMaxFileSizeMb()}
+                          onInput={(e) =>
+                            setSyncMaxFileSizeAndRefresh(
+                              Number(e.currentTarget.value),
+                            )
+                          }
+                        />
+                        {t("sync.maxSizeUnit")}
+                      </label>
+                      <button
+                        class="secondary"
+                        onClick={() => void refreshSyncPreview()}
+                      >
+                        {t("sync.ignoreApply")}
+                      </button>
+                    </Show>
                   </details>
                 </>
               }

@@ -1875,6 +1875,10 @@ struct RsyncRequest {
     password: String,
     delete_extra: bool,
     exclude_patterns: Vec<String>,
+    /// Obergrenze je Datei in Bytes; `None` oder `0` bedeutet „keine Grenze“.
+    /// `#[serde(default)]`, damit ältere Aufrufer ohne das Feld weiterhin gehen.
+    #[serde(default)]
+    max_file_size: Option<u64>,
 }
 
 fn valid_rsync_username(value: &str) -> bool {
@@ -2115,6 +2119,12 @@ fn run_rsync_inner(
         // nicht eine Shell. Damit bleiben gespeicherte Ausschlussmuster wie
         // `node_modules/` und `*.log` ohne Shell-Injection nutzbar.
         command.arg("--exclude").arg(pattern);
+    }
+    // Größengrenze: rsync bringt dafür `--max-size` mit. Die Angabe erfolgt in
+    // Bytes ohne Suffix, damit rsync nicht selbst eine Einheit interpretieren
+    // muss. Ohne Grenze entfällt das Argument vollständig.
+    if let Some(limit) = normalize_max_file_size(request.max_file_size) {
+        command.arg(format!("--max-size={limit}"));
     }
     command.arg(local_arg).arg(&remote);
     let mut child = command.spawn().map_err(|e| {
@@ -4045,12 +4055,30 @@ fn preview_compare_file(
 
 /// Läuft die Quelle rekursiv ab und sammelt copy/update-Einträge. Folgt keinen
 /// Symlink-Verzeichnissen (deren Inhalte liegen unter den realen Pfaden).
+/// Normalisiert die vom Frontend gelieferte Größengrenze. `None` und `0`
+/// bedeuten beide „keine Grenze“ – so bleibt ein leeres bzw. abgeschaltetes
+/// Eingabefeld wirkungslos, statt versehentlich alles auszuschließen.
+fn normalize_max_file_size(value: Option<u64>) -> Option<u64> {
+    value.filter(|v| *v > 0)
+}
+
+/// Prüft, ob ein Verzeichnis keinerlei Einträge enthält. Lesefehler gelten als
+/// „nicht leer“, damit im Zweifel der bisherige Weg (Teilbaum als Einheit)
+/// gewählt wird und nichts stillschweigend unter den Tisch fällt.
+fn dir_is_empty(dir: &Path) -> bool {
+    match std::fs::read_dir(dir) {
+        Ok(mut it) => it.next().is_none(),
+        Err(_) => false,
+    }
+}
+
 fn preview_walk_src(
     src_root: &Path,
     dst_root: &Path,
     cur: &Path,
     ignore_patterns: &[String],
     verify_checksums: bool,
+    max_file_size: Option<u64>,
     out: &mut Vec<SyncEntry>,
 ) -> Result<(), String> {
     check_sync_preview_cancelled()?;
@@ -4097,17 +4125,37 @@ fn preview_walk_src(
                         &p,
                         ignore_patterns,
                         verify_checksums,
+                        max_file_size,
                         out,
                     )?;
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                     // Ganzer Teilbaum ist neu → als Einheit melden, nicht rekursieren.
-                    out.push(SyncEntry {
-                        rel: rel_str,
-                        action: "copy".into(),
-                        is_dir: true,
-                        size: 0,
-                    });
+                    //
+                    // Ausnahme bei aktiver Größengrenze: Ein Verzeichniseintrag wird
+                    // vom Kopierjob rekursiv übertragen – übergroße Dateien darin
+                    // kämen also trotz Grenze mit. Deshalb wird hier einzeln
+                    // aufgelöst. Ein leeres Quellverzeichnis hat keine Dateien, die
+                    // der Rekursion Einträge liefern könnten; es wird weiterhin als
+                    // Einheit gemeldet, damit es am Ziel angelegt wird.
+                    if max_file_size.is_some() && !dir_is_empty(&p) {
+                        preview_walk_src(
+                            src_root,
+                            dst_root,
+                            &p,
+                            ignore_patterns,
+                            verify_checksums,
+                            max_file_size,
+                            out,
+                        )?;
+                    } else {
+                        out.push(SyncEntry {
+                            rel: rel_str,
+                            action: "copy".into(),
+                            is_dir: true,
+                            size: 0,
+                        });
+                    }
                 }
                 Err(e) => return Err(format!("Ziel-Metadaten lesen fehlgeschlagen: {e}")),
                 Ok(d) if d.is_dir() => preview_walk_src(
@@ -4116,6 +4164,7 @@ fn preview_walk_src(
                     &p,
                     ignore_patterns,
                     verify_checksums,
+                    max_file_size,
                     out,
                 )?,
                 Ok(_) => {
@@ -4131,7 +4180,15 @@ fn preview_walk_src(
             }
             continue;
         }
-        // Reguläre Datei.
+        // Reguläre Datei. Übergroße Dateien werden auf Wunsch ausgelassen: Bei
+        // langsamen Zielen (WebDAV, SMB) blockiert eine einzelne Riesendatei den
+        // gesamten Abgleich. Die Grenze wirkt nur auf reguläre Dateien – Symlinks
+        // tragen keine sinnvolle Größe.
+        if let Some(limit) = max_file_size {
+            if link_meta.len() > limit {
+                continue;
+            }
+        }
         preview_compare_file(rel_str, &p, &dst_path, &link_meta, verify_checksums, out)?;
     }
     Ok(())
@@ -4226,6 +4283,7 @@ async fn sync_preview(
     delete_extra: bool,
     ignore_patterns: Vec<String>,
     verify_checksums: bool,
+    max_file_size: Option<u64>,
 ) -> Result<Vec<SyncEntry>, String> {
     if preview_id.is_empty() {
         return Err("Ungültige Vorschaukennung".into());
@@ -4243,7 +4301,14 @@ async fn sync_preview(
     // sodass die UI weiterhin reagiert und den Hinweis anzeigt.
     let result = tauri::async_runtime::spawn_blocking(move || {
         run_cancellable_preview(cancel, || {
-            sync_preview_inner(&src, &dst, delete_extra, ignore_patterns, verify_checksums)
+            sync_preview_inner(
+                &src,
+                &dst,
+                delete_extra,
+                ignore_patterns,
+                verify_checksums,
+                normalize_max_file_size(max_file_size),
+            )
         })
     })
     .await;
@@ -4260,6 +4325,7 @@ fn sync_preview_inner(
     delete_extra: bool,
     extra_ignore_patterns: Vec<String>,
     verify_checksums: bool,
+    max_file_size: Option<u64>,
 ) -> Result<Vec<SyncEntry>, String> {
     check_sync_preview_cancelled()?;
     let src_root = expand_tilde(src);
@@ -4292,6 +4358,7 @@ fn sync_preview_inner(
         &src_root,
         &ignore_patterns,
         verify_checksums,
+        max_file_size,
         &mut out,
     )?;
 
@@ -4315,6 +4382,7 @@ async fn sync_two_way_preview(
     right: String,
     ignore_patterns: Vec<String>,
     verify_checksums: bool,
+    max_file_size: Option<u64>,
 ) -> Result<Vec<SyncEntry>, String> {
     if preview_id.is_empty() {
         return Err("Ungültige Vorschaukennung".into());
@@ -4326,7 +4394,13 @@ async fn sync_two_way_preview(
     }
     let result = tauri::async_runtime::spawn_blocking(move || {
         run_cancellable_preview(cancel, || {
-            sync_two_way_preview_inner(&left, &right, ignore_patterns, verify_checksums)
+            sync_two_way_preview_inner(
+                &left,
+                &right,
+                ignore_patterns,
+                verify_checksums,
+                normalize_max_file_size(max_file_size),
+            )
         })
     })
     .await;
@@ -4359,6 +4433,7 @@ fn sync_two_way_preview_inner(
     right: &str,
     ignore_patterns: Vec<String>,
     verify_checksums: bool,
+    max_file_size: Option<u64>,
 ) -> Result<Vec<SyncEntry>, String> {
     check_sync_preview_cancelled()?;
     let left_root = expand_tilde(left);
@@ -4369,8 +4444,16 @@ fn sync_two_way_preview_inner(
         false,
         ignore_patterns.clone(),
         verify_checksums,
+        max_file_size,
     )?;
-    let right_to_left = sync_preview_inner(right, left, false, ignore_patterns, verify_checksums)?;
+    let right_to_left = sync_preview_inner(
+        right,
+        left,
+        false,
+        ignore_patterns,
+        verify_checksums,
+        max_file_size,
+    )?;
     check_sync_preview_cancelled()?;
     let mut combined: HashMap<String, (Option<SyncEntry>, Option<SyncEntry>)> = HashMap::new();
     for entry in left_to_right {
@@ -5540,6 +5623,8 @@ pub fn run() {
             remote::remote_mounts,
             promise_drag::start_promise_drag,
             promise_drag::resolve_promise_drop,
+            promise_drag::list_open_with_apps,
+            promise_drag::open_with_app,
         ])
         .build(tauri::generate_context!())
         .expect("error while running tauri application")
@@ -5568,7 +5653,7 @@ mod copy_tests {
     use super::{
         bookmark_url_from_mount_source, copy_file_with_metadata, count_delete_entries,
         delete_error_message, destination_is_within_source, is_protected_admin_root,
-        is_retryable_remove_error, is_untransferable_file,
+        is_retryable_remove_error, is_untransferable_file, normalize_max_file_size,
         parse_mount_url, percent_encode_segment, preview_walk_src, remove_source_after_move,
         replace_file_after_copy, search_in_dir_blocking, sync_preview_inner, sync_two_way_preview_inner,
         webdav_host_from_url, webdav_remote_url, zip_extract_inner, CopyOutcome,
@@ -5861,7 +5946,7 @@ mod copy_tests {
         let socket = UnixDatagram::bind(src.join("fsmonitor--daemon.ipc")).unwrap();
 
         let mut entries = Vec::new();
-        preview_walk_src(&src, &dst, &src, &[], false, &mut entries).unwrap();
+        preview_walk_src(&src, &dst, &src, &[], false, None, &mut entries).unwrap();
         assert!(entries.is_empty());
 
         drop(socket);
@@ -5886,6 +5971,7 @@ mod copy_tests {
             true,
             vec![],
             false,
+            None,
         )
         .unwrap();
         assert!(entries.iter().any(|entry| entry.rel == ".hidden"));
@@ -5917,6 +6003,7 @@ mod copy_tests {
             true,
             vec!["build/".into()],
             false,
+            None,
         )
         .unwrap();
         assert!(entries.iter().any(|entry| entry.rel == "keep.txt"));
@@ -5943,6 +6030,7 @@ mod copy_tests {
             &right.to_string_lossy(),
             vec![],
             false,
+            None,
         )
         .unwrap();
         assert!(entries
@@ -5974,6 +6062,7 @@ mod copy_tests {
             false,
             vec![],
             false,
+            None,
         )
         .unwrap();
         assert!(without_checksums.is_empty());
@@ -5984,6 +6073,7 @@ mod copy_tests {
             false,
             vec![],
             true,
+            None,
         )
         .unwrap();
         assert!(with_checksums
@@ -5991,6 +6081,107 @@ mod copy_tests {
             .any(|entry| entry.rel == "same-size.txt"));
 
         let _ = std::fs::remove_dir_all(root.parent().unwrap());
+    }
+
+    #[test]
+    fn skips_files_above_the_size_limit() {
+        let root = tmp_path("size-limit-root");
+        let src = root.join("src");
+        let dst = root.join("dst");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::create_dir_all(&dst).unwrap();
+        std::fs::write(src.join("small.txt"), vec![b'a'; 10]).unwrap();
+        std::fs::write(src.join("huge.bin"), vec![b'b'; 5000]).unwrap();
+
+        let entries = sync_preview_inner(
+            &src.to_string_lossy(),
+            &dst.to_string_lossy(),
+            true,
+            vec![],
+            false,
+            Some(1000),
+        )
+        .unwrap();
+        assert!(entries.iter().any(|entry| entry.rel == "small.txt"));
+        assert!(!entries.iter().any(|entry| entry.rel == "huge.bin"));
+
+        // Ohne Grenze muss dieselbe Datei wieder auftauchen – sonst wäre die
+        // Filterung nicht an die Einstellung gebunden.
+        let all = sync_preview_inner(
+            &src.to_string_lossy(),
+            &dst.to_string_lossy(),
+            true,
+            vec![],
+            false,
+            None,
+        )
+        .unwrap();
+        assert!(all.iter().any(|entry| entry.rel == "huge.bin"));
+
+        let _ = std::fs::remove_dir_all(root.parent().unwrap());
+    }
+
+    #[test]
+    fn size_limit_resolves_new_subtrees_file_by_file() {
+        // Ein neuer Unterbaum wird sonst als ein einziger Verzeichniseintrag
+        // gemeldet und vom Kopierjob rekursiv übertragen – die Grenze bliebe
+        // wirkungslos. Mit Grenze muss er einzeln aufgelöst werden.
+        let root = tmp_path("size-limit-subtree");
+        let src = root.join("src");
+        let dst = root.join("dst");
+        std::fs::create_dir_all(src.join("neu")).unwrap();
+        std::fs::create_dir_all(&dst).unwrap();
+        std::fs::write(src.join("neu").join("klein.txt"), vec![b'a'; 10]).unwrap();
+        std::fs::write(src.join("neu").join("gross.bin"), vec![b'b'; 5000]).unwrap();
+
+        let entries = sync_preview_inner(
+            &src.to_string_lossy(),
+            &dst.to_string_lossy(),
+            true,
+            vec![],
+            false,
+            Some(1000),
+        )
+        .unwrap();
+        assert!(entries.iter().any(|entry| entry.rel == "neu/klein.txt"));
+        assert!(!entries.iter().any(|entry| entry.rel == "neu/gross.bin"));
+        // Kein gebündelter Verzeichniseintrag, der die große Datei mitnähme.
+        assert!(!entries.iter().any(|entry| entry.rel == "neu" && entry.is_dir));
+
+        let _ = std::fs::remove_dir_all(root.parent().unwrap());
+    }
+
+    #[test]
+    fn size_limit_still_creates_empty_directories() {
+        let root = tmp_path("size-limit-empty-dir");
+        let src = root.join("src");
+        let dst = root.join("dst");
+        std::fs::create_dir_all(src.join("leer")).unwrap();
+        std::fs::create_dir_all(&dst).unwrap();
+
+        let entries = sync_preview_inner(
+            &src.to_string_lossy(),
+            &dst.to_string_lossy(),
+            true,
+            vec![],
+            false,
+            Some(1000),
+        )
+        .unwrap();
+        assert!(entries
+            .iter()
+            .any(|entry| entry.rel == "leer" && entry.is_dir));
+
+        let _ = std::fs::remove_dir_all(root.parent().unwrap());
+    }
+
+    #[test]
+    fn treats_zero_size_limit_as_no_limit() {
+        // Ein leeres bzw. abgeschaltetes Eingabefeld darf nicht dazu führen,
+        // dass jede Datei als „zu groß" gilt.
+        assert_eq!(normalize_max_file_size(None), None);
+        assert_eq!(normalize_max_file_size(Some(0)), None);
+        assert_eq!(normalize_max_file_size(Some(42)), Some(42));
     }
 
     #[test]
@@ -6016,6 +6207,7 @@ mod copy_tests {
             false,
             vec![],
             true,
+            None,
         );
         assert!(matches!(
             result,

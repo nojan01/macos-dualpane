@@ -392,6 +392,158 @@ int db_clipboard_read_files(char ***out_paths, const char **out_err) {
     return n;
 }
 
+int db_open_with_apps(const char *path, char **out_json, const char **out_err) {
+    if (out_json) *out_json = NULL;
+    if (out_err) *out_err = NULL;
+    if (!path || !out_json) {
+        if (out_err) *out_err = strdup("invalid arguments");
+        return -1;
+    }
+
+    __block int retval = 0;
+    __block NSString *errstr = nil;
+    __block NSString *json = nil;
+    NSString *file = [NSString stringWithUTF8String:path];
+
+    dispatch_block_t work = ^{
+        @try {
+            NSURL *url = [NSURL fileURLWithPath:file];
+            NSWorkspace *ws = [NSWorkspace sharedWorkspace];
+            NSURL *defaultApp = [ws URLForApplicationToOpenURL:url];
+            NSArray<NSURL *> *apps = [ws URLsForApplicationsToOpenURL:url] ?: @[];
+
+            NSFileManager *fm = [NSFileManager defaultManager];
+            NSMutableArray *items = [NSMutableArray array];
+            NSMutableSet<NSString *> *seen = [NSMutableSet set];
+            for (NSURL *app in apps) {
+                NSString *appPath = [app path];
+                if (appPath.length == 0) continue;
+                // Dieselbe App kann mehrfach registriert sein (z. B. zwei
+                // Versionen am selben Ort); doppelte Einträge im Menü wären
+                // für den Nutzer nicht unterscheidbar.
+                if ([seen containsObject:appPath]) continue;
+                [seen addObject:appPath];
+                NSString *name = [fm displayNameAtPath:appPath];
+                if (name.length == 0) name = [appPath lastPathComponent];
+                BOOL isDefault = defaultApp != nil &&
+                    [[defaultApp path] isEqualToString:appPath];
+                [items addObject:@{
+                    @"name": name,
+                    @"path": appPath,
+                    @"isDefault": @(isDefault),
+                }];
+            }
+
+            // Standardprogramm zuerst, danach alphabetisch nach Anzeigename –
+            // die Reihenfolge von LaunchServices ist für Menschen willkürlich.
+            [items sortUsingComparator:^NSComparisonResult(NSDictionary *a, NSDictionary *b) {
+                BOOL da = [a[@"isDefault"] boolValue];
+                BOOL db_ = [b[@"isDefault"] boolValue];
+                if (da != db_) return da ? NSOrderedAscending : NSOrderedDescending;
+                return [a[@"name"] localizedStandardCompare:b[@"name"]];
+            }];
+
+            NSError *jsonErr = nil;
+            NSData *data = [NSJSONSerialization dataWithJSONObject:items
+                                                           options:0
+                                                             error:&jsonErr];
+            if (data == nil) {
+                errstr = [jsonErr localizedDescription] ?: @"json encoding failed";
+                retval = -2;
+            } else {
+                json = [[NSString alloc] initWithData:data
+                                             encoding:NSUTF8StringEncoding];
+            }
+        } @catch (NSException *ex) {
+            errstr = [ex reason] ?: @"objc exception";
+            retval = -3;
+        }
+    };
+    if ([NSThread isMainThread]) work();
+    else dispatch_sync(dispatch_get_main_queue(), work);
+
+    if (retval != 0) {
+        if (out_err) *out_err = strdup([errstr UTF8String] ?: "unknown error");
+        return retval;
+    }
+    *out_json = strdup([json UTF8String] ?: "[]");
+    return 0;
+}
+
+int db_open_with(const char *const *paths, int count, const char *app_path,
+                 const char **out_err) {
+    if (out_err) *out_err = NULL;
+    if (!paths || count <= 0 || !app_path) {
+        if (out_err) *out_err = strdup("invalid arguments");
+        return -1;
+    }
+
+    NSMutableArray<NSURL *> *urls = [NSMutableArray arrayWithCapacity:(NSUInteger)count];
+    for (int i = 0; i < count; i++) {
+        if (!paths[i]) continue;
+        NSString *p = [NSString stringWithUTF8String:paths[i]];
+        if (p.length == 0) continue;
+        [urls addObject:[NSURL fileURLWithPath:p]];
+    }
+    if (urls.count == 0) {
+        if (out_err) *out_err = strdup("no valid paths");
+        return -1;
+    }
+    NSURL *app = [NSURL fileURLWithPath:[NSString stringWithUTF8String:app_path]];
+
+    __block int retval = 0;
+    __block NSString *errstr = nil;
+    // `openURLs:` meldet das Ergebnis asynchron. Ohne Warten wüsste der Nutzer
+    // bei einer beschädigten App nie, dass das Öffnen fehlgeschlagen ist.
+    dispatch_semaphore_t done = dispatch_semaphore_create(0);
+    dispatch_block_t work = ^{
+        @try {
+            NSWorkspaceOpenConfiguration *cfg =
+                [NSWorkspaceOpenConfiguration configuration];
+            [[NSWorkspace sharedWorkspace]
+                        openURLs:urls
+            withApplicationAtURL:app
+                   configuration:cfg
+               completionHandler:^(NSRunningApplication *running, NSError *error) {
+                   (void)running;
+                   if (error != nil) {
+                       errstr = [error localizedDescription] ?: @"open failed";
+                       retval = -2;
+                   }
+                   dispatch_semaphore_signal(done);
+               }];
+        } @catch (NSException *ex) {
+            errstr = [ex reason] ?: @"objc exception";
+            retval = -3;
+            dispatch_semaphore_signal(done);
+        }
+    };
+
+    if ([NSThread isMainThread]) {
+        // Auf dem Hauptthread darf nicht gewartet werden: Käme der
+        // Abschlussblock ebenfalls auf der Hauptschleife an, stünden beide
+        // Seiten still. Hier wird nur angestoßen; ein Fehler bliebe ungemeldet.
+        work();
+        return 0;
+    }
+
+    dispatch_async(dispatch_get_main_queue(), work);
+
+    // Zeitgrenze, damit ein hängender LaunchServices-Aufruf den aufrufenden
+    // Tauri-Befehl nicht dauerhaft blockiert.
+    if (dispatch_semaphore_wait(done,
+            dispatch_time(DISPATCH_TIME_NOW, (int64_t)(30 * NSEC_PER_SEC))) != 0) {
+        if (out_err) *out_err = strdup("Zeitüberschreitung beim Öffnen");
+        return -4;
+    }
+
+    if (retval != 0) {
+        if (out_err) *out_err = strdup([errstr UTF8String] ?: "unknown error");
+        return retval;
+    }
+    return 0;
+}
+
 void db_set_dock_badge(const char *label) {
     NSString *text = (label && label[0] != '\0')
         ? [NSString stringWithUTF8String:label]

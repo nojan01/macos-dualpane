@@ -44,6 +44,9 @@ const [syncPreviewReady, setSyncPreviewReady] = createSignal(false);
 const [syncIgnorePatterns, setSyncIgnorePatterns] = createSignal("");
 const [syncMode, setSyncMode] = createSignal<"oneWay" | "twoWay">("oneWay");
 const [syncVerifyChecksums, setSyncVerifyChecksums] = createSignal(false);
+// Obergrenze je Datei in MB; 0 bedeutet „keine Grenze". Sehr große Dateien
+// blockieren auf langsamen Zielen sonst den gesamten Abgleich.
+const [syncMaxFileSizeMb, setSyncMaxFileSizeMb] = createSignal(0);
 const [syncTransport, setSyncTransport] = createSignal<
   "filesystem" | "rsync"
 >("filesystem");
@@ -72,6 +75,7 @@ export {
   syncIgnorePatterns,
   syncMode,
   syncVerifyChecksums,
+  syncMaxFileSizeMb,
   syncTransport,
   syncRsyncHost,
   syncRsyncUsername,
@@ -83,6 +87,14 @@ export {
 };
 
 const newJobId = () => `job-${Date.now()}-${Math.floor(Math.random() * 1e6)}`;
+
+/** Rechnet die Eingabe in MB auf Bytes um. Ungültige oder nicht positive
+ * Werte ergeben 0, was im Backend „keine Grenze" bedeutet. */
+function maxFileSizeBytes(): number {
+  const mb = syncMaxFileSizeMb();
+  if (!Number.isFinite(mb) || mb <= 0) return 0;
+  return Math.floor(mb) * 1024 * 1024;
+}
 
 function ignorePatternList(): string[] {
   return syncIgnorePatterns()
@@ -157,6 +169,7 @@ async function reloadPreview() {
             s.dst,
             ignorePatternList(),
             syncVerifyChecksums(),
+            maxFileSizeBytes(),
           )
         : await syncPreview(
             previewId,
@@ -165,6 +178,7 @@ async function reloadPreview() {
             true,
             ignorePatternList(),
             syncVerifyChecksums(),
+            maxFileSizeBytes(),
           );
     if (generation !== previewGeneration) return;
     // IPC-Daten defensiv prüfen: Ein unvollständiger Eintrag darf den Dialog
@@ -207,6 +221,7 @@ export async function openSyncDialog(
   setSyncIgnorePatterns("");
   setSyncMode("oneWay");
   setSyncVerifyChecksums(false);
+  setSyncMaxFileSizeMb(0);
   setSyncTransport("filesystem");
   setRsyncDefaults(dst);
   setSyncRsyncPassword("");
@@ -245,6 +260,16 @@ export function setSyncModeAndRefresh(mode: "oneWay" | "twoWay") {
 
 export function setSyncVerifyChecksumsAndRefresh(value: boolean) {
   setSyncVerifyChecksums(value);
+  setSyncPreviewReady(false);
+}
+
+/** Setzt die Größengrenze in MB. Ungültige Eingaben werden auf 0 („keine
+ * Grenze") abgebildet, damit ein leeres Feld nicht alles ausschließt. Die
+ * Vorschau muss danach neu erstellt werden, weil sich die Auswahl ändert. */
+export function setSyncMaxFileSizeAndRefresh(value: number) {
+  setSyncMaxFileSizeMb(
+    Number.isFinite(value) && value > 0 ? Math.floor(value) : 0,
+  );
   setSyncPreviewReady(false);
 }
 
@@ -310,6 +335,7 @@ export async function applySyncProfile(id: string, preview = false) {
   setSyncIgnorePatterns(profile.ignorePatterns);
   setSyncMode(profile.mode);
   setSyncVerifyChecksums(profile.verifyChecksums);
+  setSyncMaxFileSizeMb(profile.maxFileSizeMb);
   // Sicherheitsnetz: rsync gilt nur für HiDrive-Ziele. Ein (altes) Profil mit
   // lokalem Ziel fällt auf den Dateisystem-Transport zurück.
   const transport =
@@ -390,6 +416,7 @@ export async function saveCurrentSyncProfile() {
     ignorePatterns: syncIgnorePatterns(),
     mode: syncMode(),
     verifyChecksums: syncVerifyChecksums(),
+    maxFileSizeMb: syncMaxFileSizeMb(),
     transport: syncTransport(),
     rsync:
       syncTransport() === "rsync"
@@ -477,6 +504,7 @@ export async function confirmSync() {
         password,
         deleteExtra: syncDeleteExtra(),
         excludePatterns: ignorePatternList(),
+        maxFileSize: maxFileSizeBytes(),
       });
     } catch (e) {
       // Ein bewusster Klick auf „Abbrechen“ ist kein Fehlerdialog.
