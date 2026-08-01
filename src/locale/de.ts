@@ -451,6 +451,7 @@ export const de: Record<string, string> = {
   "about.version": "Version",
   "about.author": "Autor",
   "about.license": "Lizenz",
+  "about.licenseName": "EULA (Endbenutzer-Lizenzvereinbarung)",
   "about.website": "Webseite",
   "about.checkUpdates": "Nach Updates suchen",
   "about.checking": "Suche nach Updates…",
@@ -465,6 +466,9 @@ export const de: Record<string, string> = {
   "about.updateFailed": "Update-Prüfung fehlgeschlagen.",
   "toolbar.about": "Über DualBeam",
   "toolbar.help": "Hilfe",
+  "toolbar.license": "Lizenz",
+  "fn.copyright.title":
+    "DualBeam — Endbenutzer-Lizenzvereinbarung. Einzelheiten unter „Lizenz“ in der Werkzeugleiste.",
 
   // Backend-Fehler-Codes
   "err.network.scheme":

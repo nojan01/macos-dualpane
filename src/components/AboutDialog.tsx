@@ -1,6 +1,7 @@
 import { Show, createSignal } from "solid-js";
 import { appVersion } from "../ipc";
 import { t } from "../i18n";
+import { openLicense } from "./LicenseDialog";
 
 const [open, setOpen] = createSignal(false);
 const [version, setVersion] = createSignal("");
@@ -47,7 +48,17 @@ export function AboutDialog() {
             <dt>{t("about.author")}</dt>
             <dd>N.J.</dd>
             <dt>{t("about.license")}</dt>
-            <dd>MIT</dd>
+            <dd>
+              <button
+                class="link-like"
+                onClick={() => {
+                  close();
+                  openLicense();
+                }}
+              >
+                {t("about.licenseName")}
+              </button>
+            </dd>
           </dl>
           <div class="modal-actions">
             <button onClick={close}>{t("common.close")}</button>

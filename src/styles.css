@@ -962,6 +962,21 @@ body.col-resizing * {
 .about-grid a:hover {
   text-decoration: underline;
 }
+/* Die Lizenz ist anklickbar und oeffnet den Lizenzdialog. Ein Button statt
+   eines Links, weil kein Ziel aufgerufen wird - sieht aber aus wie ein Link. */
+.about-grid .link-like {
+  all: unset;
+  color: #5aa6ec;
+  cursor: pointer;
+}
+.about-grid .link-like:hover {
+  text-decoration: underline;
+}
+.about-grid .link-like:focus-visible {
+  outline: 2px solid #5aa6ec;
+  outline-offset: 2px;
+  border-radius: 2px;
+}
 .about-status {
   font-size: 12px;
   color: #cfcfcf;

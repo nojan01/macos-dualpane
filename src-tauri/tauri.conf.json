@@ -29,8 +29,16 @@
   },
   "bundle": {
     "active": true,
-    "targets": ["dmg", "app"],
-    "externalBin": ["binaries/rclone"],
+    "targets": [
+      "dmg",
+      "app"
+    ],
+    "externalBin": [
+      "binaries/rclone"
+    ],
+    "resources": {
+      "resources/licenses/*": "licenses/"
+    },
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
@@ -40,8 +48,8 @@
     "category": "Utility",
     "shortDescription": "Dual-Pane File Manager",
     "longDescription": "Schlanker Dateimanager mit zwei Panes im Stil von Commander One / ForkLift.",
-    "copyright": "Copyright © 2026 N.J. — MIT License",
-    "license": "MIT",
+    "copyright": "Copyright © 2026 N.J. — Alle Rechte vorbehalten",
+    "license": "LicenseRef-DualBeam-EULA",
     "licenseFile": "../LICENSE",
     "macOS": {
       "minimumSystemVersion": "12.0",

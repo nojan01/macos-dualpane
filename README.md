@@ -84,4 +84,19 @@ bash scripts/fetch-rclone.sh all   # arm64 und amd64
 
 ## Lizenz
 
-[MIT](LICENSE) — Copyright © 2026 N.J.
+DualBeam steht unter einer eigenen Endbenutzer-Lizenzvereinbarung:
+**[EULA](LICENSE)** — Copyright © 2026 N.J., alle Rechte vorbehalten.
+
+Die Nutzung ist kostenlos, privat wie geschäftlich. Verändern, Dekompilieren und
+das Erstellen abgeleiteter Werke sind untersagt; die Weitergabe ist nur in
+unveränderter Form erlaubt.
+
+Für die mitgelieferten Fremdkomponenten gelten deren eigene Lizenzen, die
+vorgehen — allen voran **rclone** unter der MIT-Lizenz. Die vollständige
+Auflistung steht in [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md), die
+Lizenztexte liegen dem Programm unter
+`DualBeam.app/Contents/Resources/licenses/` bei.
+
+> Bis einschließlich Version 0.4.0 stand DualBeam unter der MIT-Lizenz. Bereits
+> erteilte MIT-Rechte bleiben für die damals veröffentlichten Fassungen
+> bestehen; die EULA gilt für alles Spätere.

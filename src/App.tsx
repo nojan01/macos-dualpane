@@ -35,6 +35,7 @@ import { AboutDialog, openAbout } from "./components/AboutDialog";
 import { RsyncDialog } from "./components/RsyncDialog";
 import { RemoteDialog } from "./components/RemoteDialog";
 import { HelpDialog, openHelp } from "./components/HelpDialog";
+import { LicenseDialog, openLicense } from "./components/LicenseDialog";
 import {
   loadPane,
   state,
@@ -864,6 +865,13 @@ export function App() {
         >
           <span class="tb-icon-text">?</span>
         </button>
+        <button
+          class="tb-glyph"
+          onClick={() => openLicense()}
+          title={t("toolbar.license")}
+        >
+          <span class="tb-icon-text">§</span>
+        </button>
       </div>
       <div
         class={`panes panes-grid ${state.sidebarVisible ? "" : "no-sidebar"} ${state.previewVisible ? "with-preview" : ""}`}
@@ -912,6 +920,7 @@ export function App() {
       <PropertiesDialog />
       <AboutDialog />
       <HelpDialog />
+      <LicenseDialog />
       <div class="resize-grip" aria-hidden="true" />
     </div>
   );

@@ -448,6 +448,7 @@ export const en: Record<string, string> = {
   "about.version": "Version",
   "about.author": "Author",
   "about.license": "License",
+  "about.licenseName": "EULA (End User Licence Agreement)",
   "about.website": "Website",
   "about.checkUpdates": "Check for updates",
   "about.checking": "Checking for updates…",
@@ -462,6 +463,9 @@ export const en: Record<string, string> = {
   "about.updateFailed": "Update check failed.",
   "toolbar.about": "About DualBeam",
   "toolbar.help": "Help",
+  "toolbar.license": "Licence",
+  "fn.copyright.title":
+    "DualBeam — End User Licence Agreement. See “Licence” in the toolbar for details.",
 
   // Backend error codes
   "err.network.scheme":
