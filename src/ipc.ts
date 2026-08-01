@@ -520,3 +520,15 @@ export async function resolvePromiseDrop(
 }
 
 export type PaneChanged = { paneId: string; path: string };
+
+/** Eine in RemoteDeskRDP eingerichtete RDP-Verbindung. */
+export type RdpProfile = { id: string; name: string; host: string };
+
+export async function rdpProfiles(): Promise<RdpProfile[]> {
+  return invoke<RdpProfile[]>("rdp_profiles");
+}
+
+/** Reicht die Verbindung an RemoteDeskRDP weiter; die Sitzung baut jene App auf. */
+export async function rdpConnect(id: string): Promise<void> {
+  return invoke<void>("rdp_connect", { id });
+}

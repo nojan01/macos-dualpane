@@ -17,9 +17,12 @@ import {
   removeNetworkBookmark,
   rememberNetworkVolume,
   mountNetworkUrl,
+  rdpProfiles,
+  rdpConnect,
   type Volume,
   type Favorite,
   type NetworkBookmark,
+  type RdpProfile,
 } from "../ipc";
 import { askConfirm, notify, notifyError } from "./Dialogs";
 import { connectToServer } from "../network";
@@ -53,6 +56,28 @@ export function Sidebar() {
   const [volMenu, setVolMenu] = createSignal<VolMenu>(null);
   const [dragIdx, setDragIdx] = createSignal<number | null>(null);
   const [overIdx, setOverIdx] = createSignal<number | null>(null);
+  const [rdp, setRdp] = createSignal<RdpProfile[]>([]);
+
+  /** Liest die in RemoteDeskRDP eingerichteten Verbindungen. Fehlt die App,
+   *  kommt eine leere Liste und der Abschnitt bleibt unsichtbar. */
+  async function refreshRdp() {
+    try {
+      setRdp(await rdpProfiles());
+    } catch {
+      setRdp([]);
+    }
+  }
+
+  const refreshRdpOnFocus = () => void refreshRdp();
+
+  /** Startet die Sitzung in RemoteDeskRDP. DualBeam selbst spricht kein RDP. */
+  async function openRdp(profile: RdpProfile) {
+    try {
+      await rdpConnect(profile.id);
+    } catch (err) {
+      await notifyError(errMsg(err));
+    }
+  }
 
   async function refreshVols() {
     try {
@@ -333,10 +358,14 @@ export function Sidebar() {
       window.removeEventListener("click", onGlobalClick);
       window.removeEventListener("keydown", onGlobalKey);
       window.removeEventListener("dualbeam:open-favorite", onOpenFavorite);
+      window.removeEventListener("focus", refreshRdpOnFocus);
     });
     window.addEventListener("click", onGlobalClick);
     window.addEventListener("keydown", onGlobalKey);
     window.addEventListener("dualbeam:open-favorite", onOpenFavorite);
+    // Legt der Nutzer in RemoteDeskRDP eine Verbindung an und kommt zurueck,
+    // soll sie ohne Neustart erscheinen.
+    window.addEventListener("focus", refreshRdpOnFocus);
     void (async () => {
       try {
         setFavs(await loadFavorites());
@@ -345,6 +374,7 @@ export function Sidebar() {
         if (!disposed) setFavs([{ name: "Home", icon: "🏠", path: home }]);
       }
       await refreshVols();
+      await refreshRdp();
       if (!disposed) volTimer = window.setInterval(refreshVols, 5000);
     })();
   });
@@ -443,7 +473,7 @@ export function Sidebar() {
             )}
           </For>
         </Show>
-        <div class="sb-section sb-section-spaced">
+        <div class="sb-section">
           <span>{t("sidebar.network")}</span>
           <button
             class="sb-add"
@@ -549,6 +579,25 @@ export function Sidebar() {
                 title={`${profile.src} → ${profile.dst}`}
               >
                 <span class="sb-icon">⇄</span>
+                <span class="sb-label">{profile.name}</span>
+              </button>
+            )}
+          </For>
+        </Show>
+        <Show when={rdp().length > 0}>
+          <div class="sb-section">
+            {t("sidebar.remoteDesktop")}
+          </div>
+          <For each={rdp()}>
+            {(profile) => (
+              <button
+                class="sb-item sb-rdp"
+                onClick={() => void openRdp(profile)}
+                title={t("rdp.connectTitle", {
+                  target: profile.host || profile.name,
+                })}
+              >
+                <span class="sb-icon">🖥</span>
                 <span class="sb-label">{profile.name}</span>
               </button>
             )}

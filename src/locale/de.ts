@@ -73,6 +73,10 @@ export const de: Record<string, string> = {
   "rsync.passwordMissing": "Für diesen Server und Benutzer ist kein Passwort im Schlüsselbund gespeichert.",
   "rsync.start": "Synchronisieren",
   "rsync.running": "Synchronisiert…",
+  "rdp.connectTitle": "RDP-Sitzung zu {target} in RemoteDeskRDP öffnen",
+  "err.rdp.unknown":
+    "Diese Verbindung steht nicht mehr in RemoteDeskRDP. Vermutlich wurde sie dort gelöscht.",
+  "err.rdp.open": "RemoteDeskRDP ließ sich nicht starten: {0}",
   "err.rsyncCancelled": "rsync-Synchronisation wurde abgebrochen.",
 
   // Pane
@@ -253,6 +257,7 @@ export const de: Record<string, string> = {
   "sidebar.volumes": "Volumes",
   "sidebar.network": "Netzwerk",
   "sidebar.syncProfiles": "Sync-Profile",
+  "sidebar.remoteDesktop": "Remote-Desktop",
   "sidebar.clickToMount": "Klicken zum Verbinden",
   "sidebar.mountFailed": "Verbinden fehlgeschlagen",
   "sidebar.none": "keine",

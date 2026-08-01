@@ -1593,6 +1593,14 @@ body.dragging * {
   cursor: default;
   opacity: 0.55;
 }
+.sb-rdp {
+  width: 100%;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+}
 .sb-empty {
   padding: 2px 14px;
   color: var(--text-dim);

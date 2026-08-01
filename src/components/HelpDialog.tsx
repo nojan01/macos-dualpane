@@ -82,7 +82,7 @@ const CONTENT: Record<
           },
           {
             term: "Seitenleiste (⌘B)",
-            desc: "Enthält Favoriten (eigene Schnellzugriffe – über „+“ den aktuellen Ordner hinzufügen, mit ⌥1–⌥9 öffnen), eingebundene Volumes, Netzwerk-Server und gespeicherte Sync-Profile.",
+            desc: "Enthält Favoriten (eigene Schnellzugriffe – über „+“ den aktuellen Ordner hinzufügen, mit ⌥1–⌥9 öffnen), eingebundene Volumes, Netzwerk-Server, gespeicherte Sync-Profile und – falls RemoteDeskRDP installiert ist – die dort eingerichteten RDP-Verbindungen.",
           },
           {
             term: "Dateiliste",
@@ -267,6 +267,10 @@ const CONTENT: Record<
             term: "Sync-Profile",
             desc: "Ein Profil speichert Quelle, Ziel und Optionen. Es kann im Synchronisationsdialog ausgewählt, aktualisiert oder gelöscht werden. In der Seitenleiste unter „Sync-Profile“ startet ein Klick das gespeicherte Profil unabhängig von den aktuell geöffneten Ordnern. Nicht auflösbare Zwei-Wege-Konflikte werden dabei sicher übersprungen.",
           },
+          {
+            term: "Remote-Desktop",
+            desc: "Ist RemoteDeskRDP installiert und dort mindestens eine Verbindung eingerichtet, erscheint in der Seitenleiste der Abschnitt „Remote-Desktop“. Ein Klick öffnet die Sitzung direkt in RemoteDeskRDP – DualBeam selbst baut keine RDP-Verbindung auf und speichert keine Kennwörter. Gelesen werden nur Name und Adresse; die Kennwörter bleiben im Schlüsselbund von RemoteDeskRDP. Neu angelegte Verbindungen erscheinen, sobald das DualBeam-Fenster wieder in den Vordergrund kommt. Fehlt der Abschnitt, ist die App nicht installiert oder es ist dort noch keine Verbindung eingerichtet.",
+          },
         ],
       },
       {
@@ -423,7 +427,7 @@ const CONTENT: Record<
           },
           {
             term: "Sidebar (⌘B)",
-            desc: "Contains favorites (your own shortcuts – add the current folder via “+”, open with ⌥1–⌥9), mounted volumes, network servers and saved sync profiles.",
+            desc: "Contains favorites (your own shortcuts – add the current folder via “+”, open with ⌥1–⌥9), mounted volumes, network servers, saved sync profiles and – if RemoteDeskRDP is installed – the RDP connections configured there.",
           },
           {
             term: "File list",
@@ -603,6 +607,10 @@ const CONTENT: Record<
           {
             term: "Sync profiles",
             desc: "A profile stores source, target and options. It can be selected, updated or deleted in the synchronization dialog. Clicking a profile in the sidebar’s “Sync profiles” section starts it regardless of the folders currently open in the panes. Unresolved two-way conflicts are skipped safely.",
+          },
+          {
+            term: "Remote desktop",
+            desc: "If RemoteDeskRDP is installed and has at least one connection configured, the sidebar shows a “Remote desktop” section. Clicking an entry opens the session in RemoteDeskRDP – DualBeam never speaks RDP itself and stores no passwords. Only the name and address are read; passwords stay in RemoteDeskRDP’s keychain. Newly created connections appear as soon as the DualBeam window comes back to the front. If the section is missing, the app is not installed or no connection has been configured there yet.",
           },
         ],
       },

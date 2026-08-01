@@ -72,6 +72,10 @@ export const en: Record<string, string> = {
   "rsync.passwordMissing": "No password is stored in Keychain for this server and user.",
   "rsync.start": "Synchronize",
   "rsync.running": "Synchronizing…",
+  "rdp.connectTitle": "Open an RDP session to {target} in RemoteDeskRDP",
+  "err.rdp.unknown":
+    "This connection no longer exists in RemoteDeskRDP. It was probably deleted there.",
+  "err.rdp.open": "RemoteDeskRDP could not be started: {0}",
   "err.rsyncCancelled": "rsync synchronization was cancelled.",
 
   // Pane
@@ -251,6 +255,7 @@ export const en: Record<string, string> = {
   "sidebar.volumes": "Volumes",
   "sidebar.network": "Network",
   "sidebar.syncProfiles": "Sync profiles",
+  "sidebar.remoteDesktop": "Remote desktop",
   "sidebar.clickToMount": "Click to connect",
   "sidebar.mountFailed": "Mount failed",
   "sidebar.none": "none",

@@ -7,6 +7,7 @@ use std::net::IpAddr;
 use std::process::{Command, Stdio};
 
 mod promise_drag;
+mod rdp;
 mod remote;
 use notify_debouncer_mini::notify::RecommendedWatcher;
 use notify_debouncer_mini::{new_debouncer, notify::RecursiveMode, Debouncer};
@@ -5627,6 +5628,9 @@ pub fn run() {
             promise_drag::open_with_app,
             promise_drag::choose_application_dialog,
             promise_drag::set_default_application_for,
+            rdp::rdp_available,
+            rdp::rdp_profiles,
+            rdp::rdp_connect,
         ])
         .build(tauri::generate_context!())
         .expect("error while running tauri application")
