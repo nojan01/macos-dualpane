@@ -74,6 +74,7 @@ export const de: Record<string, string> = {
   "rsync.start": "Synchronisieren",
   "rsync.running": "Synchronisiert…",
   "rdp.connectTitle": "RDP-Sitzung zu {target} in RemoteDeskRDP öffnen",
+  "rdp.connecting": "Verbindung wird aufgebaut …",
   "err.rdp.unknown":
     "Diese Verbindung steht nicht mehr in RemoteDeskRDP. Vermutlich wurde sie dort gelöscht.",
   "err.rdp.open": "RemoteDeskRDP ließ sich nicht starten: {0}",

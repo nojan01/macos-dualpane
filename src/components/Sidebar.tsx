@@ -57,6 +57,10 @@ export function Sidebar() {
   const [dragIdx, setDragIdx] = createSignal<number | null>(null);
   const [overIdx, setOverIdx] = createSignal<number | null>(null);
   const [rdp, setRdp] = createSignal<RdpProfile[]>([]);
+  /** Läuft gerade ein Verbindungsaufbau? Dann ist die Liste gesperrt. */
+  const [connectingRdp, setConnectingRdp] = createSignal<string | null>(null);
+  let rdpUnlock: number | undefined;
+  onCleanup(() => window.clearTimeout(rdpUnlock));
 
   /** Liest die in RemoteDeskRDP eingerichteten Verbindungen. Fehlt die App,
    *  kommt eine leere Liste und der Abschnitt bleibt unsichtbar. */
@@ -72,9 +76,20 @@ export function Sidebar() {
 
   /** Startet die Sitzung in RemoteDeskRDP. DualBeam selbst spricht kein RDP. */
   async function openRdp(profile: RdpProfile) {
+    // Sperre gegen den zweiten Klick. RemoteDeskRDP braucht einige Sekunden,
+    // bis das Sitzungsfenster steht; ohne Rückmeldung klickt man erneut. Eine
+    // zweite Sitzung zum selben Ziel ist aber schädlich: Der RDP-Server lässt
+    // je Benutzer nur eine zu und trennt die ältere ohne jede Meldung – das
+    // Fenster verschwindet dann einfach. Im Systemprotokoll nachgewiesen.
+    if (connectingRdp()) return;
+    setConnectingRdp(profile.id);
     try {
       await rdpConnect(profile.id);
+      // Die Sperre läuft bewusst nach: `rdpConnect` kehrt bereits zurück,
+      // sobald macOS den Start angenommen hat – lange bevor die Sitzung steht.
+      rdpUnlock = window.setTimeout(() => setConnectingRdp(null), 4000);
     } catch (err) {
+      setConnectingRdp(null);
       await notifyError(errMsg(err));
     }
   }
@@ -593,11 +608,18 @@ export function Sidebar() {
               <button
                 class="sb-item sb-rdp"
                 onClick={() => void openRdp(profile)}
-                title={t("rdp.connectTitle", {
-                  target: profile.host || profile.name,
-                })}
+                disabled={connectingRdp() !== null}
+                title={
+                  connectingRdp() === profile.id
+                    ? t("rdp.connecting")
+                    : t("rdp.connectTitle", {
+                        target: profile.host || profile.name,
+                      })
+                }
               >
-                <span class="sb-icon">🖥</span>
+                <span class="sb-icon">
+                  {connectingRdp() === profile.id ? "⏳" : "🖥"}
+                </span>
                 <span class="sb-label">{profile.name}</span>
               </button>
             )}
