@@ -73,6 +73,11 @@ npm run tauri:build   # DMG bauen
 npm test              # Tests
 ```
 
+`tauri:dev` und `tauri:build` erzeugen die persönliche Variante (Cargo-Feature
+`hidrive`, enthält ein vorkonfiguriertes IONOS-HiDrive-Lesezeichen). Für eine
+Veröffentlichung `npm run tauri:build:public` verwenden – siehe
+[docs/SIGNING.md](docs/SIGNING.md).
+
 Für SFTP und FTPS wird `rclone` als Beiprogramm mitgeliefert. Es wird nicht im
 Git verwaltet, sondern vor jedem `tauri:dev`/`tauri:build` automatisch geladen
 und anhand seiner Prüfsumme überprüft. Bei Bedarf auch einzeln:
