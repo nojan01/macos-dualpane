@@ -6,6 +6,22 @@ export function joinPath(dir: string, name: string): string {
   return dir + "/" + name;
 }
 
+/** Exakte Zielauflösung des normalen Ordner-Kopierens. Ist im Ziel bereits
+ * der gleichnamige Ordner geöffnet, werden die Inhalte dort zusammengeführt;
+ * andernfalls wird der Quellordner unterhalb des Zielordners angelegt. */
+export function folderCopyDestination(
+  sourceName: string,
+  destinationDirectory: string,
+): string {
+  const destinationName = destinationDirectory
+    .replace(/\/+$/, "")
+    .split("/")
+    .pop() || "";
+  return sourceName === destinationName
+    ? destinationDirectory
+    : joinPath(destinationDirectory, sourceName);
+}
+
 /**
  * Prüft rein lexikalisch, ob `candidate` mit `root` identisch ist oder darin
  * liegt. Die Backend-Prüfung löst zusätzlich Symlinks auf; diese schnelle

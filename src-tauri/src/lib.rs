@@ -6,7 +6,9 @@ use std::io::{BufReader, Read, Write};
 use std::net::IpAddr;
 use std::process::{Command, Stdio};
 
+mod object_storage;
 mod promise_drag;
+mod rdp;
 mod remote;
 use notify_debouncer_mini::notify::RecommendedWatcher;
 use notify_debouncer_mini::{new_debouncer, notify::RecursiveMode, Debouncer};
@@ -253,7 +255,66 @@ async fn list_dir(path: String, show_hidden: bool) -> Result<Vec<Entry>, String>
 
 fn list_dir_blocking(path: String, show_hidden: bool) -> Result<Vec<Entry>, String> {
     let p = expand_tilde(&path);
+    // S3 und Swift sind ab Version 0.4.17 direkte DualBeam-Dateiräume. Ihre
+    // Inhalte werden über die Objekt-Speicher-API gelesen, nicht über einen
+    // NFS-Mount. Der lokale Pfad bleibt lediglich die stabile Kennung für die
+    // Pane-Navigation und gespeicherte Sync-Profile.
+    if let Some(result) = remote::list_object_storage_dir(&p) {
+        let remembered_times = remote::object_directory_times_in(&p);
+        return result.map(|entries| {
+            entries
+                .into_iter()
+                .filter(|entry| {
+                    (show_hidden || !entry.name.starts_with('.')) && entry.name != ".DualBeamUndo"
+                })
+                .map(|entry| {
+                    let hidden = entry.name.starts_with('.');
+                    let ext = if entry.is_dir {
+                        String::new()
+                    } else {
+                        Path::new(&entry.name)
+                            .extension()
+                            .and_then(|part| part.to_str())
+                            .map(|part| part.to_ascii_lowercase())
+                            .unwrap_or_default()
+                    };
+                    let mtime = if entry.is_dir && entry.mtime == 946_684_800 {
+                        remembered_times.get(&entry.name).copied().unwrap_or(0)
+                    } else {
+                        entry.mtime
+                    };
+                    Entry {
+                        name: entry.name,
+                        path: entry.path.to_string_lossy().into_owned(),
+                        is_dir: entry.is_dir,
+                        is_symlink: false,
+                        size: if entry.is_dir { 0 } else { entry.size },
+                        mtime,
+                        ext: ext.clone(),
+                        hidden,
+                        birth_time: mtime,
+                        kind: classify(&ext, entry.is_dir).to_string(),
+                        owner: String::new(),
+                        group: String::new(),
+                        mode_str: String::new(),
+                    }
+                })
+                .collect()
+        });
+    }
     let read = std::fs::read_dir(&p).map_err(|e| format!("{}: {}", p.display(), e))?;
+    // S3/Swift haben keine echten Ordnerobjekte. rclone liefert für virtuelle
+    // Präfixe den Default 2000-01-01; das ist kein Erstellungsdatum und wird
+    // deshalb als fehlender Zeitwert dargestellt.
+    const RCLONE_VIRTUAL_DIRECTORY_TIME: i64 = 946_684_800;
+    let is_object_storage = remote::is_object_storage_mount(&p);
+    let remembered_object_directory_times = remote::object_directory_times_in(&p);
+    // webdavfs kann nach einem direkten HTTP-Upload noch für einige Sekunden
+    // eine lokale 0-Byte-Cachedatei ausliefern. Die Dateiliste würde dann
+    // fälschlich suggerieren, dass die Kopie fehlgeschlagen ist. Für solche
+    // Werte fragen wir die tatsächliche Größe gezielt beim Server ab.
+    #[cfg(target_os = "macos")]
+    let webdav_listing = webdav_listing_context(&p);
 
     use std::os::unix::fs::MetadataExt;
     let mut out: Vec<Entry> = Vec::new();
@@ -283,12 +344,21 @@ fn list_dir_blocking(path: String, show_hidden: bool) -> Result<Vec<Entry>, Stri
             .map(|m| m.is_dir())
             .or_else(|| ft.map(|t| t.is_dir()))
             .unwrap_or(false);
-        let mtime = meta
+        let reported_mtime = meta
             .as_ref()
             .and_then(|m| m.modified().ok())
             .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
             .map(|d| d.as_secs() as i64)
             .unwrap_or(0);
+        let mtime =
+            if is_object_storage && is_dir && reported_mtime == RCLONE_VIRTUAL_DIRECTORY_TIME {
+                remembered_object_directory_times
+                    .get(&name)
+                    .copied()
+                    .unwrap_or(0)
+            } else {
+                reported_mtime
+            };
         let ext = Path::new(&name)
             .extension()
             .and_then(|s| s.to_str())
@@ -312,11 +382,19 @@ fn list_dir_blocking(path: String, show_hidden: bool) -> Result<Vec<Entry>, Stri
             .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
             .map(|d| d.as_secs() as i64)
             .unwrap_or(0);
-        let size = if is_dir {
+        let mut size = if is_dir {
             0
         } else {
             meta.as_ref().map(|m| m.len()).unwrap_or(0)
         };
+        #[cfg(target_os = "macos")]
+        if size == 0 && !is_dir && !is_symlink {
+            if let Some(context) = webdav_listing.as_ref() {
+                if let Some(server_size) = webdav_server_file_size(context, &path) {
+                    size = server_size;
+                }
+            }
+        }
         let kind = ext_to_kind(&ext, is_dir, is_symlink);
         out.push(Entry {
             name,
@@ -340,6 +418,9 @@ fn list_dir_blocking(path: String, show_hidden: bool) -> Result<Vec<Entry>, Stri
 #[tauri::command]
 fn open_default(path: String) -> Result<(), String> {
     let p = expand_tilde(&path);
+    let p = remote::download_object_storage_file(&p)
+        .transpose()?
+        .unwrap_or(p);
     std::process::Command::new("open")
         .arg(&p)
         .status()
@@ -373,15 +454,34 @@ fn open_privacy_settings() -> Result<(), String> {
 #[tauri::command]
 fn create_dir(path: String) -> Result<(), String> {
     let p = expand_tilde(&path);
+    if let Some(result) = remote::object_storage_path_exists(&p) {
+        if result? {
+            return Err(format!("err.exists\u{1f}{}", p.display()));
+        }
+        remote::create_object_storage_dir(&p)
+            .expect("Objekt-Speicher-Kontext wurde vorab erkannt")?;
+        remote::remember_object_directory(&p);
+        return Ok(());
+    }
     if path_occupied_no_follow(&p) {
         return Err(format!("err.exists\u{1f}{}", p.display()));
     }
-    std::fs::create_dir(&p).map_err(|e| format!("{}: {}", p.display(), e))
+    std::fs::create_dir(&p).map_err(|e| format!("{}: {}", p.display(), e))?;
+    remote::remember_object_directory(&p);
+    Ok(())
 }
 
 #[tauri::command]
 fn create_file(path: String) -> Result<(), String> {
     let p = expand_tilde(&path);
+    if let Some(result) = remote::object_storage_path_exists(&p) {
+        if result? {
+            return Err(format!("err.exists\u{1f}{}", p.display()));
+        }
+        remote::create_object_storage_file(&p)
+            .expect("Objekt-Speicher-Kontext wurde vorab erkannt")?;
+        return Ok(());
+    }
     if path_occupied_no_follow(&p) {
         return Err(format!("err.exists\u{1f}{}", p.display()));
     }
@@ -488,6 +588,18 @@ fn rename_path(old_path: String, new_path: String) -> Result<(), String> {
     if a == b {
         return Ok(());
     }
+    if let Some(result) = remote::object_storage_path_exists(&a) {
+        if !result? {
+            return Err(format!("{}: Quelle nicht gefunden", a.display()));
+        }
+        if remote::object_storage_path_exists(&b)
+            .expect("Quellpfad und Zielpfad liegen im selben Objekt-Speicher")?
+        {
+            return Err(format!("err.exists\u{1f}{}", b.display()));
+        }
+        return remote::rename_object_storage_path(&a, &b)
+            .expect("Objekt-Speicher-Kontext wurde vorab erkannt");
+    }
     match rename_no_clobber(&a, &b) {
         Ok(()) => Ok(()),
         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
@@ -517,20 +629,16 @@ fn is_time_machine_path(full: &Path, tm_mounts: &[std::path::PathBuf]) -> bool {
             return true;
         }
     }
-    // 2) Eindeutige Time-Machine-Pfadbestandteile bzw. -Endungen.
+    // 2) Eindeutige Time-Machine-Pfadbestandteile. Dateiendungen wie
+    //    `.inprogress` sind absichtlich keine Kennzeichnung: DualBeam nutzt
+    //    sie selbst für abgebrochene Netzwerkübertragungen, ebenso können sie
+    //    auf beliebigen Servern vorkommen.
     for comp in full.components() {
         if let std::path::Component::Normal(os) = comp {
             let s = os.to_string_lossy();
             if s.eq_ignore_ascii_case("Backups.backupdb")
                 || s == ".timemachine"
                 || s == ".MobileBackups"
-            {
-                return true;
-            }
-            if s.ends_with(".backupbundle")
-                || s.ends_with(".inprogress")
-                || s.ends_with(".previous")
-                || s.ends_with(".interrupted")
             {
                 return true;
             }
@@ -689,8 +797,17 @@ fn volume_root_of(path: &Path) -> PathBuf {
 /// Ordner auf der Wurzel des jeweiligen Volumes.
 fn undo_staging_dir_for(original: &Path, token: &str) -> Result<PathBuf, String> {
     let default = undo_staging_dir(token)?;
+    // Eigene rclone-Mounts (SFTP, FTP/FTPS, S3, Swift) erlauben keinen
+    // zuverlässigen lokalen Undo-Puffer. Auch wenn die Mount-Tabelle während
+    // eines Übergangs kurz leer ist, darf `.DualBeamUndo` dort nie entstehen.
+    // Der nachfolgende EXDEV-Fallback führt dann kontrolliert zur dauerhaften
+    // Netzlaufwerk-Löschung statt zu einem Berechtigungsfehler.
+    if remote::is_remote_mount(original) {
+        return Ok(default);
+    }
     let parent = original.parent().unwrap_or_else(|| Path::new("/"));
-    let app_base = dirs::data_local_dir().ok_or_else(|| "Undo-Ordner nicht verfügbar".to_string())?;
+    let app_base =
+        dirs::data_local_dir().ok_or_else(|| "Undo-Ordner nicht verfügbar".to_string())?;
     match (device_of(parent), device_of(&app_base)) {
         (Some(a), Some(b)) if a == b => Ok(default),
         (Some(_), _) => Ok(volume_root_of(parent).join(".DualBeamUndo").join(token)),
@@ -1020,7 +1137,32 @@ fn force_delete_admin_blocking(paths: Vec<String>) -> Result<(), String> {
 
 #[tauri::command]
 fn path_exists(path: String) -> bool {
-    expand_tilde(&path).exists()
+    let path = expand_tilde(&path);
+    remote::object_storage_path_exists(&path)
+        .map(|result| result.unwrap_or(false))
+        .unwrap_or_else(|| path.exists())
+}
+
+/// Die oberste sichtbare Ebene eines WebDAV- oder S3-/Swift-Laufwerks.
+/// Systempfade oberhalb dieser Grenze sind nur der lokale Träger des Mounts
+/// bzw. der internen Objekt-Speicherkennung und gehören nicht zur Navigation
+/// eines geöffneten Laufwerks.
+#[tauri::command]
+fn navigation_root(path: String) -> Option<String> {
+    let path = expand_tilde(&path);
+    if let Some(root) = remote::object_storage_mount_root(&path) {
+        return Some(root.to_string_lossy().into_owned());
+    }
+    if let Some(root) = remote::sftp_mount_root(&path) {
+        return Some(root.to_string_lossy().into_owned());
+    }
+    mount_fs_types()
+        .into_iter()
+        .filter(|(mount_path, fstype)| {
+            fstype == "webdav" && (path == Path::new(mount_path) || path.starts_with(mount_path))
+        })
+        .max_by_key(|(mount_path, _)| mount_path.len())
+        .map(|(mount_path, _)| mount_path)
 }
 
 #[derive(Serialize)]
@@ -1068,6 +1210,37 @@ fn is_network_fstype(fstype: &str) -> bool {
     )
 }
 
+/// Löst ein System-Netzlaufwerk ohne Gewalt. Ein nicht aushängbarer Mount
+/// (etwa wegen eines fremden, noch laufenden Zugriffs) darf den App-Ausstieg
+/// nicht verhindern.
+fn unmount_system_network_volume(path: &str) {
+    let diskutil = Command::new("/usr/sbin/diskutil")
+        .args(["unmount", path])
+        .output();
+    if diskutil.as_ref().is_ok_and(|out| out.status.success()) {
+        return;
+    }
+    let _ = Command::new("/sbin/umount").arg(path).output();
+}
+
+/// Beim Beenden gilt eine klare Regel: DualBeam lässt keine Netzverbindung
+/// zurück. Zuerst werden die eigenen rclone-Mounts (SFTP, FTP/FTPS, S3,
+/// Swift) inklusive ihrer Prozesse beendet. Danach folgen alle über macOS
+/// eingehängten Netzwerk-Dateisysteme wie WebDAV und SMB. Lokale Datenträger
+/// werden nie berücksichtigt.
+fn unmount_all_network_volumes() {
+    remote::unmount_all();
+    let mut mounts: Vec<String> = mount_fs_types()
+        .into_iter()
+        .filter_map(|(path, fstype)| is_network_fstype(&fstype).then_some(path))
+        // Bei verschachtelten Mounts erst den tieferen Pfad lösen.
+        .collect();
+    mounts.sort_by_key(|path| std::cmp::Reverse(path.len()));
+    for path in mounts {
+        unmount_system_network_volume(&path);
+    }
+}
+
 fn is_hidrive_webdav_path(path: &Path) -> bool {
     #[cfg(feature = "hidrive")]
     {
@@ -1085,7 +1258,12 @@ fn is_network_path(path: &Path, mounts: &std::collections::HashMap<String, Strin
     // während eines laufenden Finder-Zugriffs keinen passenden Präfix-Treffer.
     // Der bekannte HiDrive-Mount darf dann trotzdem nie in den lokalen
     // Papierkorb/Undo-Ordner verschoben werden.
-    is_hidrive_webdav_path(path)
+    // SFTP/FTP/FTPS werden von DualBeam über rclone unterhalb des eigenen
+    // App-Ordners eingehängt. Sie erscheinen nicht zuverlässig in der
+    // macOS-Mount-Tabelle, sind aber ebenso Netzwerkziele: Für sie darf weder
+    // Papierkorb noch der lokale Undo-Puffer verwendet werden.
+    remote::is_remote_mount(path)
+        || is_hidrive_webdav_path(path)
         || path_fstype(path, mounts)
             .map(|fstype| is_network_fstype(&fstype))
             .unwrap_or(false)
@@ -1121,9 +1299,10 @@ async fn path_is_network(path: String) -> bool {
 }
 
 // IONOS HiDrive WebDAV-Netzwerk-Bookmark (Host, Anzeigename, URL an einer Stelle).
-// Nur in der persönlichen Build-Variante (Feature `hidrive`, standardmäßig aktiv).
-// Die öffentliche Version wird mit `--no-default-features` gebaut; dann existiert
-// diese personenbezogene Voreinstellung nicht im Binary.
+// Nur in der persönlichen Build-Variante (Feature `hidrive`). Die Voreinstellung
+// ist bewusst leer: Wer nichts angibt, erhält die öffentliche Fassung ohne diese
+// personenbezogene Adresse. Die persönliche Variante fordert das Feature
+// ausdrücklich an (`npm run tauri:build`, siehe package.json).
 #[cfg(feature = "hidrive")]
 const HIDRIVE_HOST: &str = "webdav.hidrive.ionos.com";
 #[cfg(feature = "hidrive")]
@@ -1195,7 +1374,7 @@ fn list_volumes_blocking() -> Result<Vec<Volume>, String> {
             kind: "remote".to_string(),
         });
     }
-    out.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    out.sort_by_key(|entry| entry.name.to_lowercase());
     Ok(out)
 }
 
@@ -1875,6 +2054,10 @@ struct RsyncRequest {
     password: String,
     delete_extra: bool,
     exclude_patterns: Vec<String>,
+    /// Obergrenze je Datei in Bytes; `None` oder `0` bedeutet „keine Grenze“.
+    /// `#[serde(default)]`, damit ältere Aufrufer ohne das Feld weiterhin gehen.
+    #[serde(default)]
+    max_file_size: Option<u64>,
 }
 
 fn valid_rsync_username(value: &str) -> bool {
@@ -2011,6 +2194,8 @@ fn emit_rsync_status_line(
                 done: 0,
                 total: 0,
                 files_done: *files_done,
+                transfer_percent: None,
+                indeterminate: false,
                 current: if path.is_empty() {
                     fallback_current.to_string()
                 } else {
@@ -2116,6 +2301,12 @@ fn run_rsync_inner(
         // `node_modules/` und `*.log` ohne Shell-Injection nutzbar.
         command.arg("--exclude").arg(pattern);
     }
+    // Größengrenze: rsync bringt dafür `--max-size` mit. Die Angabe erfolgt in
+    // Bytes ohne Suffix, damit rsync nicht selbst eine Einheit interpretieren
+    // muss. Ohne Grenze entfällt das Argument vollständig.
+    if let Some(limit) = normalize_max_file_size(request.max_file_size) {
+        command.arg(format!("--max-size={limit}"));
+    }
     command.arg(local_arg).arg(&remote);
     let mut child = command.spawn().map_err(|e| {
         if e.kind() == std::io::ErrorKind::NotFound {
@@ -2137,6 +2328,8 @@ fn run_rsync_inner(
             done: 0,
             total: 0,
             files_done: 0,
+            transfer_percent: None,
+            indeterminate: false,
             current: progress_current.clone(),
             finished: false,
             cancelled: false,
@@ -2259,6 +2452,8 @@ async fn run_rsync(app: AppHandle, request: RsyncRequest) -> Result<(), String> 
             done: 0,
             total: 0,
             files_done: 0,
+            transfer_percent: None,
+            indeterminate: false,
             current: String::new(),
             finished: true,
             cancelled: cancel.load(Ordering::SeqCst),
@@ -2275,6 +2470,15 @@ struct JobProgress {
     done: u64,
     total: u64,
     files_done: u64,
+    /// Byte-basierter Fortschritt eines direkten SFTP-Uploads. Die übrigen
+    /// Transferwege bleiben bei ihrer Eintragsanzeige.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    transfer_percent: Option<u8>,
+    /// Eine bekannte, aber noch nicht zählbare Serveroperation (etwa SFTP
+    /// `purge`) zeigt einen animierten Balken statt eines scheinbar hängenden
+    /// 0%-Balkens.
+    #[serde(default)]
+    indeterminate: bool,
     current: String,
     finished: bool,
     cancelled: bool,
@@ -2291,7 +2495,12 @@ pub struct JobManager {
 fn check_conflicts(items: Vec<JobItem>) -> Vec<String> {
     items
         .iter()
-        .filter(|i| path_occupied_no_follow(&expand_tilde(&i.dst)))
+        .filter(|item| {
+            let path = expand_tilde(&item.dst);
+            remote::object_storage_path_exists(&path)
+                .map(|result| result.unwrap_or(false))
+                .unwrap_or_else(|| path_occupied_no_follow(&path))
+        })
         .map(|i| i.dst.clone())
         .collect()
 }
@@ -2309,6 +2518,14 @@ struct JobCtx<'a> {
     /// Verschachtelungstiefe beim Dereferenzieren von Symlinks (Schleifenschutz,
     /// falls das Ziel-Dateisystem keine Symlinks unterstützt).
     deref_depth: u32,
+    /// Der macOS-`copyfile`-Schnellpfad kann auf WebDAV 0-Byte-Dateien als
+    /// Erfolg melden. Für das jeweilige Ziel wird deshalb ein expliziter,
+    /// synchron bestätigter Datenstrom erzwungen.
+    target_is_webdav: bool,
+    /// URL und lokaler Mountpunkt eines WebDAV-Ziels. Ist diese Information
+    /// verfügbar, werden Uploads direkt per HTTP PUT ausgeführt statt durch
+    /// den macOS-webdavfs-Treiber zu gehen.
+    webdav_target: Option<(String, PathBuf)>,
     /// Dateinamen können sich beim rekursiven Kopieren sehr schnell ändern.
     /// Die UI (und insbesondere die Dock-Markierung) darf dadurch nicht mit
     /// hunderten nativen Aktualisierungen pro Sekunde belastet werden.
@@ -2317,6 +2534,10 @@ struct JobCtx<'a> {
 }
 
 impl<'a> JobCtx<'a> {
+    fn force_synchronous_data_copy(&self) -> bool {
+        self.target_is_webdav
+    }
+
     fn emit(&self, current: &str) {
         const MIN_PROGRESS_INTERVAL: Duration = Duration::from_millis(125);
         let now = Instant::now();
@@ -2340,6 +2561,8 @@ impl<'a> JobCtx<'a> {
                 done: self.done,
                 total,
                 files_done: self.files_done,
+                transfer_percent: None,
+                indeterminate: false,
                 current: current.to_string(),
                 finished: false,
                 cancelled: false,
@@ -2387,6 +2610,38 @@ struct DeleteCtx<'a> {
     last_emit: Cell<Instant>,
 }
 
+/// Die Oberfläche übergibt diesen Zusatz ausschließlich für Pfade eines
+/// aktuell eingehängten S3- oder Swift-Profils. Dann kann der Löschauftrag
+/// direkt vom Objekt-Speicher ausgeführt werden, statt jedes Objekt über NFS
+/// einzeln zu entfernen.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ObjectStorageDeleteRequest {
+    profile: object_storage::ObjectStorageProfile,
+    mount_path: String,
+    #[serde(default)]
+    directory_paths: Vec<String>,
+}
+
+/// Bei Kopien liest bzw. schreibt rclone S3/Swift direkt. Der NFS-Mount bleibt
+/// ausschließlich die Benutzeroberfläche für die Dateiansicht.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ObjectStorageTransferRequest {
+    profile: object_storage::ObjectStorageProfile,
+    mount_path: String,
+    source_is_object_storage: bool,
+}
+
+/// Entsprechender Direkt-Löschauftrag für die über rclone eingehängten
+/// FTP-/FTPS-Profile. SFTP wird ausschließlich über SSHFS gelöscht.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RemoteStorageDeleteRequest {
+    spec: remote::RemoteSpec,
+    mount_path: String,
+}
+
 impl<'a> DeleteCtx<'a> {
     fn check_cancelled(&self) -> std::io::Result<()> {
         if self.cancel.load(Ordering::SeqCst) {
@@ -2413,6 +2668,8 @@ impl<'a> DeleteCtx<'a> {
                     done: self.done,
                     total: self.total,
                     files_done: self.done,
+                    transfer_percent: None,
+                    indeterminate: false,
                     current: path.to_string_lossy().into_owned(),
                     finished: false,
                     cancelled: false,
@@ -2435,6 +2692,8 @@ impl<'a> DeleteCtx<'a> {
                 done: self.done,
                 total: self.total,
                 files_done: self.done,
+                transfer_percent: None,
+                indeterminate: false,
                 current: path.to_string_lossy().into_owned(),
                 finished: false,
                 cancelled: false,
@@ -2457,6 +2716,8 @@ impl<'a> DeleteCtx<'a> {
                 done: self.done,
                 total: self.total,
                 files_done: self.done,
+                transfer_percent: None,
+                indeterminate: false,
                 current: path.to_string_lossy().into_owned(),
                 finished: false,
                 cancelled: false,
@@ -2500,17 +2761,14 @@ fn count_delete_entries(
     let mut count = 1; // der Knoten selbst
     if meta.is_dir() && !meta.file_type().is_symlink() {
         let entries = match std::fs::read_dir(p) {
-            Ok(entries) => entries,
+            Ok(entries) => entries
+                .map(|entry| entry.map(|entry| entry.path()))
+                .collect::<Result<Vec<_>, std::io::Error>>()?,
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(count),
             Err(err) => return Err(err),
         };
-        for entry in entries {
-            let entry = match entry {
-                Ok(entry) => entry,
-                Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
-                Err(err) => return Err(err),
-            };
-            match count_delete_entries(&entry.path(), cancel, deadline) {
+        for entry_path in entries {
+            match count_delete_entries(&entry_path, cancel, deadline) {
                 Ok(n) => count += n,
                 Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
                 Err(err) => return Err(err),
@@ -2564,20 +2822,15 @@ fn remove_entry_with_retry(p: &Path, is_dir: bool, ctx: &DeleteCtx<'_>) -> std::
 /// veraltetes WebDAV-Listing beim ersten Mal verschwiegen hat.
 fn remove_dir_children(p: &Path, ctx: &mut DeleteCtx<'_>) -> std::io::Result<()> {
     let entries = match std::fs::read_dir(p) {
-        Ok(entries) => entries,
+        Ok(entries) => entries
+            .map(|entry| entry.map(|entry| entry.path()))
+            .collect::<Result<Vec<_>, std::io::Error>>()?,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
         Err(err) => return Err(err),
     };
-    for entry in entries {
+    for entry_path in entries {
         ctx.check_cancelled()?;
-        let entry = match entry {
-            Ok(entry) => entry,
-            // WebDAV-Listings können gerade gelöschte Einträge noch
-            // enthalten. Der Eintrag ist bereits weg und wird übersprungen.
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(err) => return Err(err),
-        };
-        match remove_path_cancellable(&entry.path(), ctx) {
+        match remove_path_cancellable(&entry_path, ctx) {
             Ok(()) => {}
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
             Err(err) => return Err(err),
@@ -2800,12 +3053,541 @@ fn webdav_credentials(host: &str) -> Option<(String, String)> {
     Some((account, password))
 }
 
+/// Führt einen WebDAV-curl-Aufruf aus, ohne URL oder Kennwort in der
+/// Prozessliste bzw. auf der Platte zu hinterlassen. Die Config wird nur über
+/// stdin übergeben. Der Benutzer kann eine eigene `~/.curlrc` besitzen; sie
+/// darf einen Dateimanager-Upload nicht beeinflussen, daher wird curl mit
+/// `--disable` gestartet.
+#[cfg(target_os = "macos")]
+fn run_webdav_curl(config: String, cancel: &AtomicBool) -> std::io::Result<std::process::Output> {
+    let mut command = Command::new("/usr/bin/curl");
+    command
+        .args(["--disable", "--config", "-"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = command.spawn()?;
+    if let Some(mut stdin) = child.stdin.take() {
+        if let Err(error) = stdin.write_all(config.as_bytes()) {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(error);
+        }
+    }
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => return child.wait_with_output(),
+            Ok(None) if cancel.load(Ordering::SeqCst) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::Interrupted,
+                    "cancelled",
+                ));
+            }
+            Ok(None) => std::thread::sleep(Duration::from_millis(50)),
+            Err(error) => return Err(error),
+        }
+    }
+}
+
+/// Der HTTP-Code wird am Ende jeder curl-Ausgabe mit einem eindeutigen Marker
+/// ausgegeben. Die eigentlichen Header dürfen dann unverändert bleiben und
+/// sicher auf `Content-Length` untersucht werden.
+#[cfg(target_os = "macos")]
+fn webdav_response_code(stdout: &[u8]) -> u16 {
+    String::from_utf8_lossy(stdout)
+        .rsplit("__DUALBEAM_HTTP_CODE__:")
+        .next()
+        .and_then(|part| part.trim().parse().ok())
+        .unwrap_or(0)
+}
+
+/// Liest die vom Server bestätigte Dateigröße aus einer WebDAV-PROPFIND-
+/// Antwort. Die lokale Größe des webdavfs-Mounts genügt nicht: genau dieser
+/// Treiber kann einen leeren Cache-Platzhalter als vollständige Datei anzeigen.
+/// Ein gewöhnliches HTTP-HEAD wird von pCloud für diesen WebDAV-Endpunkt trotz
+/// vorhandener Objekte mit 404 beantwortet und ist daher keine Prüfung.
+fn webdav_propfind_tag_value<'a>(response: &'a str, tag: &str) -> Option<&'a str> {
+    let lower = response.to_ascii_lowercase();
+    let tag_start = lower.find(&tag.to_ascii_lowercase())?;
+    let value_start = response[tag_start..].find('>')? + tag_start + 1;
+    let value_end = response[value_start..].find('<')? + value_start;
+    Some(response[value_start..value_end].trim())
+}
+
+fn webdav_propfind_content_length(response: &str) -> Option<u64> {
+    webdav_propfind_tag_value(response, "getcontentlength")?
+        .parse()
+        .ok()
+}
+
+/// WebDAV verwendet für `getlastmodified` einen HTTP-Tag. Die Umrechnung
+/// erfolgt absichtlich ohne zusätzliche Bibliothek; gültig sind die von
+/// RFC 7231 definierten GMT-Werte (z. B. `Wed, 21 Oct 2015 07:28:00 GMT`).
+fn webdav_http_date_epoch(value: &str) -> Option<i64> {
+    let parts: Vec<_> = value.split_whitespace().collect();
+    if parts.len() != 6 || parts[5] != "GMT" {
+        return None;
+    }
+    let day: i64 = parts[1].parse().ok()?;
+    let month: i64 = match parts[2] {
+        "Jan" => 1,
+        "Feb" => 2,
+        "Mar" => 3,
+        "Apr" => 4,
+        "May" => 5,
+        "Jun" => 6,
+        "Jul" => 7,
+        "Aug" => 8,
+        "Sep" => 9,
+        "Oct" => 10,
+        "Nov" => 11,
+        "Dec" => 12,
+        _ => return None,
+    };
+    let year: i64 = parts[3].parse().ok()?;
+    let mut time = parts[4].split(':');
+    let hour: i64 = time.next()?.parse().ok()?;
+    let minute: i64 = time.next()?.parse().ok()?;
+    let second: i64 = time.next()?.parse().ok()?;
+    if time.next().is_some()
+        || !(1..=31).contains(&day)
+        || !(0..=23).contains(&hour)
+        || !(0..=59).contains(&minute)
+        || !(0..=60).contains(&second)
+    {
+        return None;
+    }
+    // Tage seit 1970-01-01 (proleptischer gregorianischer Kalender).
+    let adjusted_year = year - i64::from(month <= 2);
+    let era = if adjusted_year >= 0 {
+        adjusted_year
+    } else {
+        adjusted_year - 399
+    } / 400;
+    let year_of_era = adjusted_year - era * 400;
+    let month_of_year = month + if month > 2 { -3 } else { 9 };
+    let day_of_year = (153 * month_of_year + 2) / 5 + day - 1;
+    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
+    Some((era * 146_097 + day_of_era - 719_468) * 86_400 + hour * 3_600 + minute * 60 + second)
+}
+
+fn webdav_propfind_last_modified(response: &str) -> Option<i64> {
+    webdav_http_date_epoch(webdav_propfind_tag_value(response, "getlastmodified")?)
+}
+
+#[derive(Clone, Copy)]
+struct WebDavFileMetadata {
+    size: u64,
+    modified: Option<i64>,
+}
+
+#[cfg(target_os = "macos")]
+fn webdav_propfind_response(
+    url: &str,
+    user: &str,
+    password: &str,
+    cancel: &AtomicBool,
+) -> std::io::Result<(Vec<u8>, u16)> {
+    let config = format!(
+        "silent\nshow-error\nrequest = \"PROPFIND\"\nheader = \"Depth: 0\"\noutput = \"-\"\nwrite-out = \"\\n__DUALBEAM_HTTP_CODE__:%{{http_code}}\\n\"\nurl = \"{}\"\nuser = \"{}:{}\"\n",
+        escape_curl_value(url),
+        escape_curl_value(user),
+        escape_curl_value(password),
+    );
+    let output = run_webdav_curl(config, cancel)?;
+    let code = webdav_response_code(&output.stdout);
+    if !output.status.success() {
+        let detail = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(std::io::Error::other(if detail.is_empty() {
+            format!("WebDAV-Serverabfrage fehlgeschlagen (HTTP {code})")
+        } else {
+            format!("WebDAV-Serverabfrage fehlgeschlagen: {detail}")
+        }));
+    }
+    Ok((output.stdout, code))
+}
+
+#[cfg(target_os = "macos")]
+fn webdav_file_metadata_optional(
+    url: &str,
+    user: &str,
+    password: &str,
+    cancel: &AtomicBool,
+) -> std::io::Result<Option<WebDavFileMetadata>> {
+    let (stdout, code) = webdav_propfind_response(url, user, password, cancel)?;
+    if code == 404 {
+        return Ok(None);
+    }
+    if code != 207 {
+        return Err(std::io::Error::other(format!(
+            "WebDAV-Serverabfrage fehlgeschlagen (HTTP {code})"
+        )));
+    }
+    let body = String::from_utf8_lossy(&stdout);
+    let body = body
+        .rsplit_once("__DUALBEAM_HTTP_CODE__:")
+        .map(|(body, _)| body)
+        .unwrap_or(&body);
+    let size = webdav_propfind_content_length(body)
+        .ok_or_else(|| std::io::Error::other("WebDAV-Server hat keine Dateigröße bestätigt"))?;
+    Ok(Some(WebDavFileMetadata {
+        size,
+        modified: webdav_propfind_last_modified(body),
+    }))
+}
+
+#[cfg(target_os = "macos")]
+fn webdav_file_metadata(
+    url: &str,
+    user: &str,
+    password: &str,
+    cancel: &AtomicBool,
+) -> std::io::Result<WebDavFileMetadata> {
+    webdav_file_metadata_optional(url, user, password, cancel)?.ok_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::NotFound, "WebDAV-Datei nicht gefunden")
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn webdav_path_exists(
+    url: &str,
+    user: &str,
+    password: &str,
+    cancel: &AtomicBool,
+) -> std::io::Result<bool> {
+    let (_, code) = webdav_propfind_response(url, user, password, cancel)?;
+    match code {
+        207 => Ok(true),
+        404 => Ok(false),
+        _ => Err(std::io::Error::other(format!(
+            "WebDAV-Serverabfrage fehlgeschlagen (HTTP {code})"
+        ))),
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn webdav_file_size(
+    url: &str,
+    user: &str,
+    password: &str,
+    cancel: &AtomicBool,
+) -> std::io::Result<u64> {
+    webdav_file_metadata(url, user, password, cancel).map(|metadata| metadata.size)
+}
+
+/// Zugangsdaten und Zielzuordnung für eine Verzeichnisanzeige. Die Daten
+/// werden einmal je Listing gelesen; einzelne Cache-Platzhalter können dann
+/// ohne erneuten Schlüsselbundzugriff direkt am Server geprüft werden.
+struct WebDavListingContext {
+    source_url: String,
+    mountpoint: PathBuf,
+    user: String,
+    password: String,
+}
+
+#[cfg(target_os = "macos")]
+fn webdav_listing_context(directory: &Path) -> Option<WebDavListingContext> {
+    let (source_url, mountpoint) = best_webdav_mount(&webdav_mounts(), directory)?;
+    let host = webdav_host_from_url(&source_url)?;
+    let (user, password) = webdav_credentials(&host)?;
+    Some(WebDavListingContext {
+        source_url,
+        mountpoint,
+        user,
+        password,
+    })
+}
+
+#[cfg(not(target_os = "macos"))]
+fn webdav_listing_context(_directory: &Path) -> Option<WebDavListingContext> {
+    None
+}
+
+/// Ermittelt die Länge einer als 0 Byte gemeldeten Datei am WebDAV-Server.
+/// Ein Fehler bleibt bewusst unsichtbar: die Pane kann dann weiterhin den
+/// vom Betriebssystem gelieferten Wert zeigen, ohne dass ein einzelner
+/// vorübergehend nicht erreichbarer Eintrag die ganze Ansicht blockiert.
+#[cfg(target_os = "macos")]
+fn webdav_server_file_size(context: &WebDavListingContext, path: &Path) -> Option<u64> {
+    let url = webdav_remote_url(&context.source_url, &context.mountpoint, path, false)?;
+    let cancel = AtomicBool::new(false);
+    webdav_file_size(&url, &context.user, &context.password, &cancel).ok()
+}
+
+#[cfg(target_os = "macos")]
+fn webdav_server_file_metadata_result(
+    context: &WebDavListingContext,
+    path: &Path,
+) -> std::io::Result<Option<WebDavFileMetadata>> {
+    let url = webdav_remote_url(&context.source_url, &context.mountpoint, path, false).ok_or_else(
+        || std::io::Error::new(std::io::ErrorKind::InvalidInput, "ungültiger WebDAV-Pfad"),
+    )?;
+    let cancel = AtomicBool::new(false);
+    webdav_file_metadata_optional(&url, &context.user, &context.password, &cancel)
+}
+
+#[cfg(target_os = "macos")]
+fn webdav_server_path_exists(context: &WebDavListingContext, path: &Path) -> std::io::Result<bool> {
+    let url = webdav_remote_url(&context.source_url, &context.mountpoint, path, true).ok_or_else(
+        || std::io::Error::new(std::io::ErrorKind::InvalidInput, "ungültiger WebDAV-Pfad"),
+    )?;
+    let cancel = AtomicBool::new(false);
+    webdav_path_exists(&url, &context.user, &context.password, &cancel)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn webdav_server_file_metadata_result(
+    _context: &WebDavListingContext,
+    _path: &Path,
+) -> std::io::Result<Option<WebDavFileMetadata>> {
+    Ok(None)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn webdav_server_path_exists(
+    _context: &WebDavListingContext,
+    _path: &Path,
+) -> std::io::Result<bool> {
+    Ok(false)
+}
+
+/// Legt eine WebDAV-Collection unmittelbar auf dem Server an. Auch dies darf
+/// nicht über `webdavfs` laufen: Der macOS-Mount bestätigt ein `mkdir` teils
+/// nur in seinem lokalen Cache. Beim anschließenden Upload eines kompletten
+/// Verzeichnisses entstanden so leere Platzhalterdateien.
+///
+/// `405 Method Not Allowed` bedeutet bei MKCOL üblicherweise, dass die
+/// Collection bereits existiert. Das ist für den rekursiven Kopierer genau der
+/// gewünschte Zustand und daher kein Fehler.
+#[cfg(target_os = "macos")]
+fn webdav_create_collection(
+    source_url: &str,
+    mountpoint: &Path,
+    destination: &Path,
+    cancel: &AtomicBool,
+) -> Option<std::io::Result<()>> {
+    let host = webdav_host_from_url(source_url)?;
+    let url = webdav_remote_url(source_url, mountpoint, destination, true)?;
+    let (user, password) = webdav_credentials(&host)?;
+    if cancel.load(Ordering::SeqCst) {
+        return Some(Err(std::io::Error::new(
+            std::io::ErrorKind::Interrupted,
+            "cancelled",
+        )));
+    }
+    let config = format!(
+        "silent\nshow-error\nrequest = \"MKCOL\"\noutput = \"/dev/null\"\nwrite-out = \"__DUALBEAM_HTTP_CODE__:%{{http_code}}\"\nurl = \"{}\"\nuser = \"{}:{}\"\n",
+        escape_curl_value(&url),
+        escape_curl_value(&user),
+        escape_curl_value(&password),
+    );
+    Some((|| -> std::io::Result<()> {
+        let output = run_webdav_curl(config, cancel)?;
+        let code = webdav_response_code(&output.stdout);
+        if output.status.success() && matches!(code, 200 | 201 | 204 | 405) {
+            return Ok(());
+        }
+        let detail = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        Err(std::io::Error::other(if detail.is_empty() {
+            format!("WebDAV-Ordner konnte nicht angelegt werden (HTTP {code})")
+        } else {
+            format!("WebDAV-Ordner konnte nicht angelegt werden: {detail}")
+        }))
+    })())
+}
+
+/// Stellt die gesamte Collection-Kette bis zum Elternordner einer Datei
+/// serverseitig bereit. Die Synchronisierung übergibt häufig nur einzelne
+/// geänderte Dateien (`Desktop/datei.pdf`), nicht deren Ordner. Ein PUT darf
+/// dann nicht mit HTTP 409 scheitern, nur weil `Desktop` noch nicht existiert.
+#[cfg(target_os = "macos")]
+fn webdav_create_parent_collections(
+    source_url: &str,
+    mountpoint: &Path,
+    destination: &Path,
+    cancel: &AtomicBool,
+) -> Option<std::io::Result<()>> {
+    let parent = destination.parent()?;
+    let relative_parent = parent.strip_prefix(mountpoint).ok()?;
+    let mut current = mountpoint.to_path_buf();
+    for component in relative_parent.components() {
+        current.push(component.as_os_str());
+        match webdav_create_collection(source_url, mountpoint, &current, cancel) {
+            Some(Ok(())) => {}
+            Some(Err(error)) => return Some(Err(error)),
+            None => return None,
+        }
+    }
+    Some(Ok(()))
+}
+
+/// Überträgt eine einzelne lokale Datei unmittelbar per WebDAV-PUT. Der
+/// Mount-Treiber wird bewusst umgangen: `webdavfs` kann auf macOS ENFILE
+/// melden, obwohl der aufrufende Prozess kaum Dateideskriptoren besitzt.
+///
+/// Die Datei wird unmittelbar unter ihrem endgültigen Namen hochgeladen und
+/// der Server bestätigt die Größe danach per HEAD. Ein serverseitiges MOVE
+/// wird absichtlich nicht verwendet: Zusammen mit einer über webdavfs
+/// angelegten Collection konnte pCloud dabei Inhalte auf die falsche Ebene
+/// verschieben und im Ziel leere Platzhalter zurücklassen.
+/// `None` bedeutet, dass URL oder Schlüsselbundzugang nicht ermittelt werden
+/// konnten; der Aufrufer darf dann auf den Dateisystemweg zurückfallen.
+#[cfg(target_os = "macos")]
+fn webdav_upload_file(
+    source: &Path,
+    destination: &Path,
+    source_url: &str,
+    mountpoint: &Path,
+    cancel: &AtomicBool,
+) -> Option<std::io::Result<()>> {
+    let host = webdav_host_from_url(source_url)?;
+    let target_url = webdav_remote_url(source_url, mountpoint, destination, false)?;
+    let (user, password) = webdav_credentials(&host)?;
+    let expected_size = match std::fs::metadata(source) {
+        Ok(metadata) => metadata.len(),
+        Err(error) => return Some(Err(error)),
+    };
+    if cancel.load(Ordering::SeqCst) {
+        return Some(Err(std::io::Error::new(
+            std::io::ErrorKind::Interrupted,
+            "cancelled",
+        )));
+    }
+
+    // Alles Sensible (URL mit möglichem Benutzeranteil und Kennwort) wird nur
+    // über stdin an curl übergeben. In der Prozessliste steht lediglich
+    // `curl --config -`.
+    let config = format!(
+        "silent\nshow-error\nfail\nupload-file = \"{}\"\nconnect-timeout = \"30\"\nmax-time = \"1800\"\noutput = \"/dev/null\"\nwrite-out = \"__DUALBEAM_HTTP_CODE__:%{{http_code}}\"\nurl = \"{}\"\nuser = \"{}:{}\"\n",
+        escape_curl_value(&source.to_string_lossy()),
+        escape_curl_value(&target_url),
+        escape_curl_value(&user),
+        escape_curl_value(&password),
+    );
+    let output = match run_webdav_curl(config, cancel) {
+        Ok(output) => output,
+        Err(error) => return Some(Err(error)),
+    };
+    let code = webdav_response_code(&output.stdout);
+    if !output.status.success() || !matches!(code, 200 | 201 | 204) {
+        let detail = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Some(Err(std::io::Error::other(if detail.is_empty() {
+            format!("WebDAV-Upload wurde mit HTTP {code} abgelehnt")
+        } else {
+            format!("WebDAV-Upload fehlgeschlagen: {detail}")
+        })));
+    }
+    let result = webdav_file_size(&target_url, &user, &password, cancel).and_then(|uploaded_size| {
+        if uploaded_size == expected_size {
+            Ok(())
+        } else {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::WriteZero,
+                format!("WebDAV-Upload unvollständig: erwartet {expected_size} Byte, Server meldet {uploaded_size} Byte"),
+            ))
+        }
+    });
+    // Nur nach einem erfolgreichen PUT entfernen wir ein unvollständiges
+    // Ziel. Bei einer abgelehnten Anfrage bleibt eine eventuell vorhandene
+    // frühere Datei dadurch unangetastet.
+    if result.is_err() && !cancel.load(Ordering::SeqCst) {
+        let cleanup = format!(
+            "silent\nshow-error\nrequest = \"DELETE\"\noutput = \"/dev/null\"\nurl = \"{}\"\nuser = \"{}:{}\"\n",
+            escape_curl_value(&target_url),
+            escape_curl_value(&user),
+            escape_curl_value(&password),
+        );
+        let _ = run_webdav_curl(cleanup, cancel);
+    }
+    Some(result)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn webdav_upload_file(
+    _source: &Path,
+    _destination: &Path,
+    _source_url: &str,
+    _mountpoint: &Path,
+    _cancel: &AtomicBool,
+) -> Option<std::io::Result<()>> {
+    None
+}
+
 /// Löscht einen Ordner auf einem WebDAV-Laufwerk mit einer einzigen
 /// `DELETE`-Anfrage auf die Collection. Der Server entfernt den gesamten
 /// Unterbaum in einem Schritt (RFC 4918), statt tausende Einzel-Requests über
 /// das gemountete Dateisystem zu senden. Gibt `true` zurück, wenn der Ordner
 /// dadurch vollständig entfernt wurde; andernfalls `false`, damit der Aufrufer
 /// auf das rekursive Einzel-Löschen zurückfällt.
+///
+/// Dateien und Ordner auf WebDAV dürfen niemals über den macOS-Mount gelöscht
+/// werden: webdavfs kann einen gelöschten Eintrag noch minutenlang cachen oder
+/// „Resource busy“ liefern. Der direkte Serverweg ist deshalb der verbindliche
+/// Löschweg für jedes Element auf einem erkannten WebDAV-Laufwerk.
+#[cfg(target_os = "macos")]
+fn webdav_delete_path(
+    path: &Path,
+    mounts: &[(String, PathBuf)],
+    creds_cache: &mut HashMap<String, Option<(String, String)>>,
+    cancel: &AtomicBool,
+) -> Option<std::io::Result<()>> {
+    let (source_url, mountpoint) = best_webdav_mount(mounts, path)?;
+    if path.strip_prefix(&mountpoint).ok()?.as_os_str().is_empty() {
+        return Some(Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "Das Stammverzeichnis des WebDAV-Laufwerks kann nicht gelöscht werden",
+        )));
+    }
+    let host = webdav_host_from_url(&source_url)?;
+    let is_dir = std::fs::symlink_metadata(path)
+        .map(|metadata| metadata.is_dir() && !metadata.file_type().is_symlink())
+        .unwrap_or(false);
+    let url = webdav_remote_url(&source_url, &mountpoint, path, is_dir)?;
+    let creds = creds_cache
+        .entry(host.clone())
+        .or_insert_with(|| webdav_credentials(&host))
+        .clone()?;
+    if cancel.load(Ordering::SeqCst) {
+        return Some(Err(std::io::Error::new(
+            std::io::ErrorKind::Interrupted,
+            "cancelled",
+        )));
+    }
+    let (user, password) = creds;
+    let config = format!(
+        "silent\nshow-error\nrequest = \"DELETE\"\nconnect-timeout = \"30\"\nmax-time = \"1800\"\noutput = \"/dev/null\"\nwrite-out = \"__DUALBEAM_HTTP_CODE__:%{{http_code}}\"\nurl = \"{}\"\nuser = \"{}:{}\"\n",
+        escape_curl_value(&url),
+        escape_curl_value(&user),
+        escape_curl_value(&password),
+    );
+    let output = match run_webdav_curl(config, cancel) {
+        Ok(output) => output,
+        Err(error) => return Some(Err(error)),
+    };
+    let code = webdav_response_code(&output.stdout);
+    if output.status.success() && matches!(code, 200 | 202 | 204 | 404) {
+        return Some(Ok(()));
+    }
+    let detail = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    Some(Err(std::io::Error::other(if detail.is_empty() {
+        format!("WebDAV-Löschen wurde mit HTTP {code} abgelehnt")
+    } else {
+        format!("WebDAV-Löschen fehlgeschlagen: {detail}")
+    })))
+}
+
+#[cfg(not(target_os = "macos"))]
+fn webdav_delete_path(
+    _path: &Path,
+    _mounts: &[(String, PathBuf)],
+    _creds_cache: &mut HashMap<String, Option<(String, String)>>,
+    _cancel: &AtomicBool,
+) -> Option<std::io::Result<()>> {
+    None
+}
+
 #[cfg(target_os = "macos")]
 fn webdav_collection_delete(
     path: &Path,
@@ -2923,6 +3705,8 @@ async fn run_network_delete(
     app: AppHandle,
     job_id: String,
     paths: Vec<String>,
+    object_storage: Option<ObjectStorageDeleteRequest>,
+    remote_storage: Option<RemoteStorageDeleteRequest>,
 ) -> Result<(), String> {
     if job_id.is_empty() || paths.is_empty() {
         return Err("Ungültiger Löschauftrag".into());
@@ -2969,12 +3753,91 @@ async fn run_network_delete(
                 done: 0,
                 total: 0,
                 files_done: 0,
+                transfer_percent: None,
+                indeterminate: false,
                 current: String::new(),
                 finished: false,
                 cancelled: false,
                 error: None,
             },
         );
+        let object_paths: Vec<PathBuf> = paths.iter().map(|path| expand_tilde(path)).collect();
+        // Die Löschzuordnung wird primär aus den aktiven Backend-Mounts
+        // abgeleitet. Das verhindert, dass ein nach macOS-Pfadnormalisierung
+        // nicht mehr exakt passender WebView-Wert in den generischen
+        // Dateisystem-Löschpfad fällt.
+        if let Some(context) = remote::object_storage_delete_context(&object_paths) {
+            ctx.working_on(&context.mount_path);
+            let directory_paths = object_storage
+                .as_ref()
+                .map(|request| {
+                    request
+                        .directory_paths
+                        .iter()
+                        .map(|path| expand_tilde(path))
+                        .collect::<Vec<PathBuf>>()
+                })
+                .unwrap_or_default();
+            remote::purge_object_storage(
+                &context.profile,
+                &context.mount_path,
+                &object_paths,
+                &directory_paths,
+                &cancel_for_worker,
+            )?;
+            if !cancel_for_worker.load(Ordering::SeqCst) {
+                remote::refresh_mount_after_direct_delete(&context.mount_path, &object_paths);
+                ctx.removed_bulk(&context.mount_path, object_paths.len() as u64);
+            }
+            return Ok(());
+        }
+        if let Some(request) = object_storage {
+            let mount_path = PathBuf::from(&request.mount_path);
+            ctx.working_on(&mount_path);
+            let directory_paths = request
+                .directory_paths
+                .iter()
+                .map(|path| expand_tilde(path))
+                .collect::<Vec<_>>();
+            remote::purge_object_storage(
+                &request.profile,
+                &mount_path,
+                &object_paths,
+                &directory_paths,
+                &cancel_for_worker,
+            )?;
+            if !cancel_for_worker.load(Ordering::SeqCst) {
+                remote::refresh_mount_after_direct_delete(&mount_path, &object_paths);
+                ctx.removed_bulk(&mount_path, object_paths.len() as u64);
+            }
+            return Ok(());
+        }
+        if let Some(request) = remote_storage {
+            // SFTP ist ein SSHFS-Dateisystem. Ein zusätzlicher rclone-Purge
+            // wäre ein zweiter, widersprüchlicher Zugriff auf dieselben
+            // Dateien und ist deshalb selbst bei einer manipulierten IPC-
+            // Anfrage ausgeschlossen.
+            if request.spec.protocol == remote::RemoteProtocol::Sftp {
+                return Err("SFTP-Löschvorgänge laufen über das eingehängte SSHFS-Dateisystem".into());
+            }
+            let mount_path = PathBuf::from(&request.mount_path);
+            ctx.working_on(&mount_path);
+            let remote_paths: Vec<PathBuf> = paths.iter().map(|path| expand_tilde(path)).collect();
+            remote::purge_remote_storage(
+                &request.spec,
+                &mount_path,
+                &remote_paths,
+                &cancel_for_worker,
+                None,
+            )?;
+            if !cancel_for_worker.load(Ordering::SeqCst) {
+                remote::refresh_mount_after_direct_delete(&mount_path, &remote_paths);
+                // Die FTP/FTPS-Wege liefern keine Einzelmeldungen; mindestens
+                // der gewählte Eintrag zählt deshalb als abgeschlossen.
+                ctx.removed_bulk(&mount_path, remote_paths.len() as u64);
+            }
+            return Ok(());
+        }
         // Vorab die Gesamtzahl der Einträge ermitteln – wie die Vorschau beim
         // Kopieren. Damit zeigen Statusleiste, Fortschrittsbalken und Dock-
         // Badge einen echten Wert statt „?". Die Vorschau ist aber nur ein
@@ -2991,15 +3854,10 @@ async fn run_network_delete(
                 break;
             }
             let path = expand_tilde(raw);
-            // Ordner auf einem WebDAV-Laufwerk werden gleich mit einer einzigen
-            // Collection-DELETE-Anfrage entfernt. Sie vorher rekursiv
-            // aufzulisten würde genau die tausenden Einzelanfragen kosten, die
-            // der Schnellpfad einspart – deshalb hier gar nicht erst zählen.
-            let is_webdav_dir = best_webdav_mount(&mount_list, &path).is_some()
-                && std::fs::symlink_metadata(&path)
-                    .map(|m| m.is_dir() && !m.file_type().is_symlink())
-                    .unwrap_or(false);
-            if is_webdav_dir {
+            // WebDAV wird unabhängig vom Mount direkt auf dem Server gelöscht.
+            // Die lokale Cache-Anzeige ist keine zuverlässige Quelle für eine
+            // rekursive Zählung und darf den DELETE-Auftrag nicht verzögern.
+            if best_webdav_mount(&mount_list, &path).is_some() {
                 count_ok = false;
                 planned.push((path, 0));
                 continue;
@@ -3028,6 +3886,8 @@ async fn run_network_delete(
                     done: 0,
                     total: ctx.total,
                     files_done: 0,
+                    transfer_percent: None,
+                    indeterminate: false,
                     current: String::new(),
                     finished: false,
                     cancelled: false,
@@ -3043,6 +3903,43 @@ async fn run_network_delete(
         for (path, count) in planned {
             if cancel_for_worker.load(Ordering::SeqCst) {
                 break;
+            }
+            // Verbindlicher, vom Objekt-Speicher vollständig getrennter
+            // WebDAV-Weg: genau ein serverseitiger DELETE für Datei oder
+            // Collection. Kein rclone, kein webdavfs-Fallback und daher keine
+            // Wiederholungen wegen dessen veraltetem Mount-Cache.
+            if best_webdav_mount(&mount_list, &path).is_some() {
+                ctx.working_on(&path);
+                match webdav_delete_path(
+                    &path,
+                    &mount_list,
+                    &mut webdav_creds,
+                    &cancel_for_worker,
+                ) {
+                    Some(Ok(())) => {
+                        ctx.removed_bulk(&path, count);
+                        if let Some(parent) = path.parent() {
+                            stale_parents.push(parent.to_path_buf());
+                        }
+                        continue;
+                    }
+                    Some(Err(error)) if cancel_for_worker.load(Ordering::SeqCst)
+                        && error.kind() == std::io::ErrorKind::Interrupted =>
+                    {
+                        break;
+                    }
+                    Some(Err(error)) => {
+                        outcome = Err(delete_error_message(&path, &error));
+                        break;
+                    }
+                    None => {
+                        outcome = Err(format!(
+                            "{}: WebDAV-Zugangsdaten konnten nicht aus dem macOS-Schlüsselbund gelesen werden. Bitte das Laufwerk neu verbinden.",
+                            path.display()
+                        ));
+                        break;
+                    }
+                }
             }
             // Schnellpfad: Ordner auf einem WebDAV-Laufwerk werden mit einer
             // einzigen Collection-DELETE-Anfrage serverseitig rekursiv gelöscht.
@@ -3132,6 +4029,8 @@ async fn run_network_delete(
             done: 0,
             total: 0,
             files_done: 0,
+            transfer_percent: None,
+            indeterminate: false,
             current: String::new(),
             finished: true,
             cancelled,
@@ -3253,8 +4152,10 @@ fn copy_file_with_metadata(src: &Path, dst: &Path) -> std::io::Result<()> {
 
     // Manche Ziele unterstützen ACLs oder erweiterte Attribute nicht. Zudem
     // verweigert macOS für bestimmte, aus Downloads stammende Metadaten (etwa
-    // `com.apple.provenance`) das Setzen mit EPERM. In beiden Fällen bleiben
-    // die Nutzdaten kopierbar, nur die Metadaten müssen ausgelassen werden.
+    // `com.apple.provenance`) das Setzen mit EPERM. Manche Downloads enthalten
+    // außerdem inzwischen nicht mehr vorhandene Attribute; `copyfile` meldet
+    // dafür ENOATTR (macOS os error 93). In allen Fällen bleiben die
+    // Nutzdaten kopierbar, nur die Metadaten müssen ausgelassen werden.
     // Wir degradieren deshalb schrittweise: erst ACL/xattr weglassen (Daten +
     // Zeitstempel/Rechte), zuletzt reine Datenkopie. Ein echter Lese- oder
     // Schreibfehler wird dabei nicht verschluckt: `std::fs::copy` schlägt dann
@@ -3262,12 +4163,22 @@ fn copy_file_with_metadata(src: &Path, dst: &Path) -> std::io::Result<()> {
     let is_metadata_unsupported = |e: &std::io::Error| -> bool {
         matches!(
             e.raw_os_error(),
-            Some(libc::ENOTSUP) | Some(libc::EOPNOTSUPP) | Some(libc::EPERM)
+            Some(libc::ENOTSUP) | Some(libc::EOPNOTSUPP) | Some(libc::EPERM) | Some(libc::ENOATTR)
         )
     };
 
+    // `copyfile(3)` meldet auf einigen WebDAV-Implementierungen Erfolg, obwohl
+    // nur die leere Zieldatei angelegt wurde. Der Finder bemerkt das später
+    // ebenfalls erst am Server. Deshalb ist ein erfolgreicher Rückgabewert
+    // allein nicht ausreichend: Die Nutzdatenlänge wird stets geprüft und bei
+    // Abweichung mit einem synchronen, regulären Schreibvorgang wiederholt.
+    let copied_payload = || -> std::io::Result<bool> {
+        Ok(std::fs::metadata(dst)?.len() == std::fs::metadata(src)?.len())
+    };
+
     match call(COPYFILE_ALL) {
-        Ok(()) => return Ok(()),
+        Ok(()) if copied_payload()? => return Ok(()),
+        Ok(()) => return copy_file_data_synchronously(src, dst),
         Err(e) if is_metadata_unsupported(&e) => {}
         Err(e) => return Err(e),
     }
@@ -3276,14 +4187,55 @@ fn copy_file_with_metadata(src: &Path, dst: &Path) -> std::io::Result<()> {
     // damit copyfile frisch schreiben kann.
     let _ = std::fs::remove_file(dst);
     match call(COPYFILE_DATA | COPYFILE_STAT) {
-        Ok(()) => return Ok(()),
+        Ok(()) if copied_payload()? => return Ok(()),
+        Ok(()) => return copy_file_data_synchronously(src, dst),
         Err(e) if is_metadata_unsupported(&e) => {}
         Err(e) => return Err(e),
     }
 
-    // Letzter Fallback: reine Datenkopie (kopiert auch die Rechte-Bits).
+    // Letzter Fallback: reine, synchron bestätigte Datenkopie.
     let _ = std::fs::remove_file(dst);
-    std::fs::copy(src, dst).map(|_| ())
+    copy_file_data_synchronously(src, dst)
+}
+
+/// Schreibt Nutzdaten ohne den macOS-`copyfile`-Schnellpfad. Besonders
+/// `webdavfs` benötigt diesen Weg: Erst `sync_all` bestätigt, dass der Upload
+/// zum Server übergeben wurde. Die Größenprüfung verhindert, dass ein Server
+/// eine nur angelegte 0-Byte-Datei als erfolgreiche Kopie erscheinen lässt.
+fn copy_file_data_synchronously(src: &Path, dst: &Path) -> std::io::Result<()> {
+    use std::io::{BufReader, BufWriter, Write};
+
+    let expected_len = std::fs::metadata(src)?.len();
+    let input = std::fs::File::open(src)?;
+    let output = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(dst)?;
+    let mut reader = BufReader::with_capacity(1024 * 1024, input);
+    let mut writer = BufWriter::with_capacity(1024 * 1024, output);
+    let written = std::io::copy(&mut reader, &mut writer)?;
+    writer.flush()?;
+    let output = writer.into_inner().map_err(|e| e.into_error())?;
+    // macOS' `webdavfs` schreibt die Daten korrekt zum Server, unterstützt
+    // aber kein fsync und meldet dafür ENOTTY (os error 25). Die unmittelbar
+    // folgende Größenprüfung bestätigt trotzdem den vollständigen Upload.
+    // Andere Sync-Fehler bleiben echte Fehler und werden nicht verschluckt.
+    match output.sync_all() {
+        Ok(()) => {}
+        Err(error) if error.raw_os_error() == Some(libc::ENOTTY) => {}
+        Err(error) => return Err(error),
+    }
+    let actual_len = output.metadata()?.len();
+    if written != expected_len || actual_len != expected_len {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::WriteZero,
+            format!(
+                "unvollständiger Schreibvorgang: erwartet {expected_len} Byte, geschrieben {written} Byte, Ziel {actual_len} Byte"
+            ),
+        ));
+    }
+    Ok(())
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -3332,11 +4284,41 @@ fn is_transient(_e: &std::io::Error) -> bool {
 /// fehlern (z. B. os error 60 „Operation timed out" auf HiDrive/WebDAV) mit
 /// exponentiellem Backoff. Bricht sofort ab, wenn der Job abgebrochen wurde
 /// oder ein nicht-transienter Fehler auftritt.
-fn copy_file_retry(src: &Path, dst: &Path, cancel: &AtomicBool) -> std::io::Result<()> {
+fn copy_file_retry(
+    src: &Path,
+    dst: &Path,
+    cancel: &AtomicBool,
+    force_synchronous_data_copy: bool,
+    webdav_target: Option<&(String, PathBuf)>,
+) -> std::io::Result<()> {
+    // `webdavfs` kann unter Last ENFILE („Too many open files in system“)
+    // melden, obwohl der DualBeam-Prozess selbst kaum Deskriptoren hält. Ein
+    // direkter WebDAV-PUT umgeht den Kernel-Mount und schreibt die lokale
+    // Quelle mit genau einem curl-Prozess zum Server.
+    //
+    // Wichtig: Bei einem erkannten WebDAV-Ziel darf es keinen stillen
+    // Dateisystem-Fallback geben. Der macOS-Mount kann eine angelegte
+    // 0-Byte-Cachedatei als Erfolg melden. Können URL oder Schlüsselbunddaten
+    // nicht ermittelt werden, wird deshalb bewusst ein verständlicher Fehler
+    // zurückgegeben, statt dem Benutzer eine scheinbar gelungene Kopie zu
+    // zeigen.
+    if let Some((source_url, mountpoint)) = webdav_target {
+        return webdav_upload_file(src, dst, source_url, mountpoint, cancel).unwrap_or_else(|| {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "WebDAV-Zugangsdaten konnten nicht aus dem macOS-Schlüsselbund gelesen werden. Bitte das Laufwerk neu verbinden.",
+            ))
+        });
+    }
     const MAX_ATTEMPTS: u32 = 5;
     let mut attempt: u32 = 0;
     loop {
-        match copy_file_with_metadata(src, dst) {
+        let result = if force_synchronous_data_copy {
+            copy_file_data_synchronously(src, dst)
+        } else {
+            copy_file_with_metadata(src, dst)
+        };
+        match result {
             Ok(()) => return Ok(()),
             Err(e) => {
                 attempt += 1;
@@ -3372,7 +4354,12 @@ fn copy_file_retry(src: &Path, dst: &Path, cancel: &AtomicBool) -> std::io::Resu
 /// gelegentlich mit EPERM, obwohl das Hochladen einer neuen Datei erlaubt ist.
 /// Ein Rename innerhalb desselben Verzeichnisses entspricht einem WebDAV MOVE
 /// und vermeidet diesen fehleranfälligen Zwischenzustand.
-fn replace_file_after_copy(src: &Path, dst: &Path, cancel: &AtomicBool) -> std::io::Result<()> {
+fn replace_file_after_copy(
+    src: &Path,
+    dst: &Path,
+    cancel: &AtomicBool,
+    force_synchronous_data_copy: bool,
+) -> std::io::Result<()> {
     static NEXT_TEMP_FILE_ID: AtomicU64 = AtomicU64::new(0);
     let parent = dst.parent().ok_or_else(|| {
         std::io::Error::new(
@@ -3409,7 +4396,12 @@ fn replace_file_after_copy(src: &Path, dst: &Path, cancel: &AtomicBool) -> std::
         )
     })?;
 
-    copy_file_retry(src, &temp, cancel)?;
+    if let Err(error) = copy_file_retry(src, &temp, cancel, force_synchronous_data_copy, None) {
+        // Eine fehlgeschlagene Kopie darf nicht in der nächsten Sync-Vorschau
+        // als vermeintliche Nutzdatei auftauchen.
+        let _ = std::fs::remove_file(&temp);
+        return Err(error);
+    }
     match std::fs::rename(&temp, dst) {
         Ok(()) => Ok(()),
         Err(rename_error) => {
@@ -3484,6 +4476,51 @@ fn ensure_dir_no_follow(dst: &Path, overwrite: bool) -> std::io::Result<bool> {
     }
 }
 
+/// Für ein aktives WebDAV-Ziel darf der rekursive Kopierer keinen schreibenden
+/// Systemaufruf auf dem `/Volumes`-Mount ausführen. Sonst erzeugt webdavfs
+/// zusätzliche AppleDouble- bzw. 0-Byte-Platzhalter neben den direkten HTTP-
+/// Uploads. Fehlen die Keychain-Zugangsdaten ausnahmsweise, bleibt der normale
+/// Dateisystem-Fallback verfügbar.
+fn ensure_copy_target_directory(
+    dst: &Path,
+    overwrite: bool,
+    ctx: &JobCtx<'_>,
+) -> std::io::Result<bool> {
+    if let Some((source_url, mountpoint)) = ctx.webdav_target.as_ref() {
+        match webdav_create_collection(source_url, mountpoint, dst, ctx.cancel) {
+            Some(result) => result.map(|_| true),
+            None => ensure_dir_no_follow(dst, overwrite),
+        }
+    } else {
+        ensure_dir_no_follow(dst, overwrite)
+    }
+}
+
+/// Vor einem direkten WebDAV-PUT werden fehlende Elternordner direkt auf dem
+/// Server angelegt. Ein lokales `create_dir_all` auf dem webdavfs-Mount wäre
+/// nur ein Cache-Eintrag und ist genau die Ursache für HTTP-409-Fehler bei
+/// Synchronisationen einzelner Dateien.
+fn ensure_copy_target_file_parent(dst: &Path, ctx: &JobCtx<'_>) -> std::io::Result<()> {
+    if let Some((source_url, mountpoint)) = ctx.webdav_target.as_ref() {
+        return webdav_create_parent_collections(source_url, mountpoint, dst, ctx.cancel)
+            .unwrap_or_else(|| {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "WebDAV-Zugangsdaten konnten nicht aus dem macOS-Schlüsselbund gelesen werden. Bitte das Laufwerk neu verbinden.",
+                ))
+            });
+    }
+    let parent = dst.parent().ok_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::InvalidInput, "ungültiger Zielpfad")
+    })?;
+    std::fs::create_dir_all(parent)
+}
+
+/// Ein Verzeichnis-Scan und das spätere Öffnen einer Datei sind nicht atomar.
+/// Besonders Finder, Screenshot-Tools und Browser-Downloads können eine Datei
+/// dazwischen entfernen. Nur wenn die Quelle inzwischen wirklich nicht mehr
+/// existiert, wird ENOENT als überspringbarer Eintrag behandelt; Fehler des
+/// Zielpfads bleiben damit weiterhin sichtbar.
 fn copy_recursive(
     src: &Path,
     dst: &Path,
@@ -3495,6 +4532,20 @@ fn copy_recursive(
             std::io::ErrorKind::Interrupted,
             "cancelled",
         ));
+    }
+    // Ein früherer Fehler kann einen internen Undo-Puffer auf einem
+    // Objekt-Speicher hinterlassen haben. Er gehört nie zu Nutzdaten und darf
+    // weder kopiert noch beim Verschieben als fehlende Nutzdatei gewertet
+    // werden.
+    if src.file_name().and_then(|name| name.to_str()) == Some(".DualBeamUndo") {
+        return Ok(CopyOutcome::Copied);
+    }
+    if src
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(is_dualbeam_inprogress_name)
+    {
+        return Ok(CopyOutcome::Skipped);
     }
     let meta = match std::fs::symlink_metadata(src) {
         Ok(meta) => meta,
@@ -3544,14 +4595,23 @@ fn copy_recursive(
                                 // read_dir folgt dem Symlink und liest das Zielverzeichnis.
                                 // Fortschritt zählen die Kind-Kopien selbst.
                                 (|| {
-                                    if !ensure_dir_no_follow(dst, overwrite)? {
+                                    if !ensure_copy_target_directory(dst, overwrite, ctx)? {
                                         return Ok(CopyOutcome::Skipped);
                                     }
                                     let mut outcome = CopyOutcome::Copied;
-                                    for entry in std::fs::read_dir(src)? {
-                                        let entry = entry?;
-                                        let from = entry.path();
-                                        let to = dst.join(entry.file_name());
+                                    // `ReadDir` hält auf NFS-/rclone-Mounts einen
+                                    // Datei-Handle offen. Erst komplett einlesen
+                                    // und den Iterator schließen, bevor rekursiv
+                                    // weiterkopiert wird – sonst bleibt pro Ebene
+                                    // ein Handle offen und tiefe Swift-Bäume enden
+                                    // mit EMFILE ("Too many open files").
+                                    let entries = std::fs::read_dir(src)?
+                                        .map(|entry| {
+                                            entry.map(|entry| (entry.path(), entry.file_name()))
+                                        })
+                                        .collect::<Result<Vec<_>, std::io::Error>>()?;
+                                    for (from, name) in entries {
+                                        let to = dst.join(name);
                                         if copy_recursive(&from, &to, overwrite, ctx)?
                                             == CopyOutcome::Skipped
                                         {
@@ -3561,8 +4621,18 @@ fn copy_recursive(
                                     Ok(outcome)
                                 })()
                             } else {
-                                // copyfile folgt dem Symlink und kopiert die Zieldaten.
-                                copy_file_retry(src, dst, ctx.cancel).map(|_| {
+                                // WebDAV und SSHFS erhalten keinen
+                                // `copyfile`-Schnellpfad, sondern einen
+                                // synchron bestätigten Datenstrom.
+                                ensure_copy_target_file_parent(dst, ctx)?;
+                                copy_file_retry(
+                                    src,
+                                    dst,
+                                    ctx.cancel,
+                                    ctx.force_synchronous_data_copy(),
+                                    ctx.webdav_target.as_ref(),
+                                )
+                                .map(|_| {
                                     ctx.files_done += 1;
                                     ctx.emit(&src.to_string_lossy());
                                     CopyOutcome::Copied
@@ -3589,14 +4659,18 @@ fn copy_recursive(
             Ok(CopyOutcome::Copied)
         }
     } else if meta.is_dir() {
-        if !ensure_dir_no_follow(dst, overwrite)? {
+        let destination_ready = ensure_copy_target_directory(dst, overwrite, ctx)?;
+        if !destination_ready {
             return Ok(CopyOutcome::Skipped);
         }
         let mut outcome = CopyOutcome::Copied;
-        for entry in std::fs::read_dir(src)? {
-            let entry = entry?;
-            let from = entry.path();
-            let to = dst.join(entry.file_name());
+        // Siehe oben: Den Verzeichnis-Handle vor dem rekursiven Abstieg
+        // schließen. Das ist besonders wichtig für große Objekt-Speicherbäume.
+        let entries = std::fs::read_dir(src)?
+            .map(|entry| entry.map(|entry| (entry.path(), entry.file_name())))
+            .collect::<Result<Vec<_>, std::io::Error>>()?;
+        for (from, name) in entries {
+            let to = dst.join(name);
             let child_outcome = copy_recursive(&from, &to, overwrite, ctx)
                 .map_err(|e| std::io::Error::new(e.kind(), format!("{}: {e}", from.display())))?;
             if child_outcome == CopyOutcome::Skipped {
@@ -3609,18 +4683,107 @@ fn copy_recursive(
         if replacing && !overwrite {
             return Ok(CopyOutcome::Skipped);
         }
-        if let Some(parent) = dst.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        if replacing {
-            replace_file_after_copy(src, dst, ctx.cancel)?;
+        ensure_copy_target_file_parent(dst, ctx)?;
+        if ctx.webdav_target.is_some() {
+            copy_file_retry(
+                src,
+                dst,
+                ctx.cancel,
+                ctx.force_synchronous_data_copy(),
+                ctx.webdav_target.as_ref(),
+            )
+        } else if replacing {
+            replace_file_after_copy(src, dst, ctx.cancel, ctx.force_synchronous_data_copy())
         } else {
-            copy_file_retry(src, dst, ctx.cancel)?;
-        }
+            copy_file_retry(
+                src,
+                dst,
+                ctx.cancel,
+                ctx.force_synchronous_data_copy(),
+                None,
+            )
+        }?;
         ctx.files_done += 1;
         ctx.emit(&src.to_string_lossy());
         Ok(CopyOutcome::Copied)
     }
+}
+
+/// SFTP-Dateien werden nicht durch den SSHFS-Mount geschrieben. Der Mount
+/// bleibt ausschließlich die Navigationsebene; der macOS-OpenSSH-Client
+/// überträgt die Inhalte direkt per SFTP und umgeht damit FUSE-Dateihandles.
+fn copy_to_sftp_mount_with_native_client(
+    ctx: &mut JobCtx<'_>,
+    src: &Path,
+    dst: &Path,
+    overwrite: bool,
+) -> Result<CopyOutcome, String> {
+    if src
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(is_dualbeam_inprogress_name)
+    {
+        return Ok(CopyOutcome::Skipped);
+    }
+    let _ = ctx.app.emit(
+        "job-progress",
+        JobProgress {
+            job_id: ctx.job_id.to_string(),
+            done: ctx.done,
+            total: ctx.total,
+            files_done: ctx.files_done,
+            transfer_percent: None,
+            indeterminate: true,
+            current: src.to_string_lossy().into_owned(),
+            finished: false,
+            cancelled: false,
+            error: None,
+        },
+    );
+    let mut transfer_percent = 0;
+    let current = src.to_string_lossy().into_owned();
+    let cancel = ctx.cancel.clone();
+    let mut report = |event: remote::SftpCopyProgress| {
+        match event {
+            remote::SftpCopyProgress::Percent(percent) => transfer_percent = percent,
+            remote::SftpCopyProgress::FileCopied(path) => {
+                ctx.files_done += 1;
+                let _ = ctx.app.emit(
+                    "job-progress",
+                    JobProgress {
+                        job_id: ctx.job_id.to_string(),
+                        done: ctx.done,
+                        total: ctx.total,
+                        files_done: ctx.files_done,
+                        transfer_percent: Some(transfer_percent),
+                        indeterminate: false,
+                        current: path,
+                        finished: false,
+                        cancelled: false,
+                        error: None,
+                    },
+                );
+                return;
+            }
+        }
+        let _ = ctx.app.emit(
+            "job-progress",
+            JobProgress {
+                job_id: ctx.job_id.to_string(),
+                done: ctx.done,
+                total: ctx.total,
+                files_done: ctx.files_done,
+                transfer_percent: Some(transfer_percent),
+                indeterminate: false,
+                current: current.clone(),
+                finished: false,
+                cancelled: false,
+                error: None,
+            },
+        );
+    };
+    remote::upload_to_sftp_mount(src, dst, overwrite, &cancel, &mut report)?;
+    Ok(CopyOutcome::Copied)
 }
 
 #[tauri::command]
@@ -3629,7 +4792,13 @@ async fn run_job(
     job_id: String,
     kind: String,
     items: Vec<JobItem>,
+    object_storage: Option<ObjectStorageTransferRequest>,
+    remote_storage: Option<serde_json::Value>,
 ) -> Result<(), String> {
+    // SFTP läuft über SSHFS. Das Feld bleibt nur für ältere WebView-Aufrufe
+    // kompatibel und wird bewusst nicht mehr als alternativer Transferweg
+    // ausgewertet.
+    let _ = remote_storage;
     let cancel = Arc::new(AtomicBool::new(false));
     {
         let mgr: State<JobManager> = app.state();
@@ -3649,6 +4818,10 @@ async fn run_job(
         // Eintrag wird `done` daher genau einmal erhöht; der aktuelle Dateiname
         // wird zur Rückmeldung weiter pro Datei ausgegeben.
         let total: u64 = items.len() as u64;
+        // Nur einmal je Auftrag die Mount-Tabelle abfragen. Der Wert bleibt
+        // während des Kopierens gültig, da DualBeam Netzlaufwerke erst beim
+        // App-Ende aushängt.
+        let mounted_webdav = webdav_mounts();
         let mut ctx = JobCtx {
             app: &app2,
             job_id: &job_id2,
@@ -3657,16 +4830,133 @@ async fn run_job(
             total,
             files_done: 0,
             deref_depth: 0,
+            target_is_webdav: false,
+            webdav_target: None,
             last_emit: Cell::new(Instant::now()),
             last_reported_done: Cell::new(u64::MAX),
         };
         ctx.emit("");
+        if kind == "copy" {
+            // Die Oberfläche liefert die Objekt-Speicher-Zuordnung aus
+            // Komfortgründen mit. Verbindlich ist jedoch die aktive
+            // Backend-Registrierung: virtuelle S3-/Swift-Pfade können nach
+            // Refresh, Alias oder Symlink anders formatiert sein und wurden
+            // dadurch bislang gelegentlich als gewöhnliche leere Ordner
+            // kopiert. Erkennen wir für alle Elemente genau denselben aktiven
+            // Objekt-Speicher, hat diese Zuordnung Vorrang.
+            let inferred_object_storage = if items.is_empty() {
+                None
+            } else {
+                let contexts: Option<Vec<_>> = items
+                    .iter()
+                    .map(|item| {
+                        let source = expand_tilde(&item.src);
+                        let destination = expand_tilde(&item.dst);
+                        remote::object_storage_transfer_context(&source, &destination)
+                    })
+                    .collect();
+                contexts.and_then(|contexts| {
+                    let first = contexts.first()?;
+                    contexts
+                        .iter()
+                        .all(|context| {
+                            context.profile.id == first.profile.id
+                                && context.mount_path == first.mount_path
+                                && context.source_is_object_storage
+                                    == first.source_is_object_storage
+                        })
+                        .then(|| ObjectStorageTransferRequest {
+                            profile: first.profile.clone(),
+                            mount_path: first.mount_path.to_string_lossy().into_owned(),
+                            source_is_object_storage: first.source_is_object_storage,
+                        })
+                })
+            };
+            let object_storage = inferred_object_storage.or(object_storage);
+            if let Some(request) = object_storage {
+                let ObjectStorageTransferRequest {
+                    profile,
+                    mount_path,
+                    source_is_object_storage,
+                } = request;
+                let mount_path = PathBuf::from(mount_path);
+                for it in &items {
+                    if cancel2.load(Ordering::SeqCst) {
+                        break;
+                    }
+                    let src = expand_tilde(&it.src);
+                    let dst = expand_tilde(&it.dst);
+                    // Ein Objekt-Speicher darf nicht mittels rclone in einen
+                    // macOS-WebDAV-Mount schreiben. Der Mount-Treiber erzeugt
+                    // dabei unter Last 0-Byte-Platzhalter bzw. EMFILE. Für
+                    // genau diese Richtung materialisieren wir das Objekt
+                    // kurz lokal und lassen den bewährten WebDAV-PUT den
+                    // zweiten, vollständig getrennten Übertragungsabschnitt
+                    // übernehmen.
+                    let webdav_target = source_is_object_storage
+                        .then(|| best_webdav_mount(&mounted_webdav, &dst))
+                        .flatten();
+                    let transfer = if let Some(webdav_target) = webdav_target {
+                        ctx.target_is_webdav = true;
+                        ctx.webdav_target = Some(webdav_target);
+                        let staged = remote::materialize_object_storage_path(&src)
+                            .ok_or_else(|| "Objekt-Speicherquelle ist nicht aktiv".to_string())?;
+                        let transfer = match staged {
+                            Ok(staged) => {
+                                let result = copy_recursive(&staged, &dst, it.overwrite, &mut ctx)
+                                    .map(|_| ())
+                                    .map_err(|error| format!("{}: {error}", src.display()));
+                                remote::cleanup_object_storage_materialization(&staged);
+                                result
+                            }
+                            Err(error) => Err(error),
+                        };
+                        ctx.target_is_webdav = false;
+                        ctx.webdav_target = None;
+                        transfer
+                    } else {
+                        remote::copy_object_storage(
+                            &profile,
+                            &mount_path,
+                            source_is_object_storage,
+                            &src,
+                            &dst,
+                            it.overwrite,
+                            &cancel2,
+                        )
+                    };
+                    if let Err(error) = transfer {
+                        remote::log_object_storage_operation(&format!(
+                            "job failed after direct transfer request: {error}"
+                        ));
+                        return Err(error);
+                    }
+                    if !cancel2.load(Ordering::SeqCst) {
+                        ctx.done += 1;
+                        // Der lokale WebDAV-Zwischenschritt zählt seine
+                        // tatsächlichen Dateien bereits in `copy_recursive`.
+                        if !source_is_object_storage
+                            || best_webdav_mount(&mounted_webdav, &dst).is_none()
+                        {
+                            ctx.files_done += 1;
+                        }
+                        ctx.emit(&it.src);
+                    }
+                }
+                remote::log_object_storage_operation(
+                    "run_job completed direct object-storage copy",
+                );
+                return Ok(());
+            }
+        }
         for it in &items {
             if cancel2.load(Ordering::SeqCst) {
                 break;
             }
             let src = expand_tilde(&it.src);
             let dst = expand_tilde(&it.dst);
+            ctx.webdav_target = best_webdav_mount(&mounted_webdav, &dst);
+            ctx.target_is_webdav = ctx.webdav_target.is_some();
             if destination_is_within_source(&src, &dst)
                 .map_err(|e| format!("{}: Zielpfad prüfen fehlgeschlagen: {}", src.display(), e))?
             {
@@ -3677,6 +4967,17 @@ async fn run_job(
                 ));
             }
             let is_move = kind == "move";
+            if remote::sftp_mount_root(&dst).is_some() {
+                let outcome =
+                    copy_to_sftp_mount_with_native_client(&mut ctx, &src, &dst, it.overwrite)
+                        .map_err(|error| format!("{}: {error}", src.display()))?;
+                if is_move {
+                    remove_source_after_move(&src, outcome)?;
+                }
+                ctx.done += 1;
+                ctx.emit(&it.src);
+                continue;
+            }
             let mut handled = false;
             if is_move && !path_occupied_no_follow(&dst) {
                 if let Some(parent) = dst.parent() {
@@ -3722,6 +5023,8 @@ async fn run_job(
             done: 0,
             total: 0,
             files_done: 0,
+            transfer_percent: None,
+            indeterminate: false,
             current: String::new(),
             finished: true,
             cancelled,
@@ -3814,30 +5117,48 @@ fn files_match_sha256(left: &Path, right: &Path) -> bool {
     }
 }
 
-/// AppleDouble-Begleitdatei (`._X`)? Auf Dateisystemen ohne nativen xattr-
-/// Support (WebDAV/HiDrive, SMB, FAT) legt macOS für jede Datei `X` mit
-/// erweiterten Attributen/Resource-Fork eine sichtbare Datei `._X` an.
-fn is_apple_double_name(name: &str) -> bool {
-    name.starts_with("._")
+/// Von DualBeam selbst erzeugte, unvollständige Ersetzungsdatei. Die genaue
+/// PID-/Sequenzform verhindert, dass gewöhnliche Nutzdateien mit der Endung
+/// `.inprogress` versehentlich ausgeblendet werden.
+pub(crate) fn is_dualbeam_inprogress_name(name: &str) -> bool {
+    let Some(body) = name.strip_suffix(".inprogress") else {
+        return false;
+    };
+    let parsed = body
+        .strip_prefix('.')
+        .and_then(|body| body.rsplit_once(".dualbeam-"))
+        .or_else(|| body.rsplit_once(".dualbeam-sftp-"));
+    let Some((original, ids)) = parsed else {
+        return false;
+    };
+    let Some((pid, sequence)) = ids.split_once('-') else {
+        return false;
+    };
+    !original.is_empty() && pid.parse::<u32>().is_ok() && sequence.parse::<u64>().is_ok()
 }
 
-/// macOS-Metadaten-Artefakt (`._X` oder `.DS_Store`)? Diese Dateien werden vom
-/// System erzeugt/verwaltet und erscheinen nur auf Netzlaufwerken als sichtbare
-/// Dateien. Auf der lokalen APFS-Quelle existieren sie nicht (xattrs liegen
-/// inline). Sie dürfen in der Sync-Vorschau daher weder als „neu"/„geändert"
-/// noch – für sich allein – als „zu löschen" gewertet werden; sonst entstehen
-/// massenhaft falsche Einträge (z. B. 1000+ `._`-Dateien in .app-Bundles).
-fn is_os_metadata_name(name: &str) -> bool {
-    name == ".DS_Store" || is_apple_double_name(name)
-}
-
-/// Trunk legt diese Unterordner als kurzlebigen Tool-Cache und Laufzeitstatus
-/// an. Sie enthalten keine Projektquellen und ändern sich fortlaufend. Alle
-/// anderen versteckten Dateien (auch `.git` und `.trunk`-Konfigurationen)
-/// bleiben ausdrücklich Teil der Synchronisation.
+/// Kurzlebige Ordner von DualBeam und Trunk enthalten keine Nutzdaten und
+/// dürfen nicht in eine Synchronisation geraten. Insbesondere kann ein früher
+/// abgebrochener Löschvorgang `.DualBeamUndo` auf einem Netzlaufwerk
+/// hinterlassen. Alle anderen versteckten Dateien (auch `.git` und
+/// `.trunk`-Konfigurationen) bleiben ausdrücklich Teil der Synchronisation.
 fn is_transient_trunk_path(rel: &Path) -> bool {
+    if rel.components().any(|component| {
+        component
+            .as_os_str()
+            .to_str()
+            .is_some_and(is_dualbeam_inprogress_name)
+    }) {
+        return true;
+    }
     let mut components = rel.components();
-    if components.next().and_then(|part| part.as_os_str().to_str()) != Some(".trunk") {
+    let Some(first) = components.next().and_then(|part| part.as_os_str().to_str()) else {
+        return false;
+    };
+    if first == ".DualBeamUndo" {
+        return true;
+    }
+    if first != ".trunk" {
         return false;
     }
     matches!(
@@ -3950,6 +5271,7 @@ fn preview_compare_file(
     src_path: &Path,
     dst_path: &Path,
     link_meta: &std::fs::Metadata,
+    webdav_target: Option<&WebDavListingContext>,
     verify_checksums: bool,
     out: &mut Vec<SyncEntry>,
 ) -> Result<(), String> {
@@ -3962,6 +5284,48 @@ fn preview_compare_file(
     } else {
         Some(link_meta.clone())
     };
+
+    // Bei einem WebDAV-Ziel ist der Server die maßgebliche Quelle. Der
+    // webdavfs-Mount kann eine vorhandene Datei noch als „nicht vorhanden"
+    // melden; dann würde die Vorschau sie fälschlich bei jedem Lauf erneut
+    // kopieren. Reguläre Dateien werden deshalb vor jedem lokalen `stat`
+    // direkt per PROPFIND geprüft.
+    let server_lookup = match (followed.as_ref(), webdav_target) {
+        (Some(source), Some(context)) if !source.is_dir() => Some(
+            webdav_server_file_metadata_result(context, dst_path)
+                .map_err(|error| format!("WebDAV-Ziel am Server prüfen fehlgeschlagen: {error}"))?,
+        ),
+        _ => None,
+    };
+    if let (Some(source), Some(server_metadata)) = (followed.as_ref(), server_lookup) {
+        match server_metadata {
+            Some(target) => {
+                let mtime_differs = target
+                    .modified
+                    .map(|mtime| effective_src_mtime_secs(source) > mtime + MTIME_TOLERANCE_SECS)
+                    .unwrap_or(false);
+                let metadata_differs = source.len() != target.size || mtime_differs;
+                let checksum_differs = verify_checksums
+                    && !metadata_differs
+                    && !files_match_sha256(src_path, dst_path);
+                if metadata_differs || checksum_differs {
+                    out.push(SyncEntry {
+                        rel: rel_str,
+                        action: "update".into(),
+                        is_dir: false,
+                        size: source.len(),
+                    });
+                }
+            }
+            None => out.push(SyncEntry {
+                rel: rel_str,
+                action: "copy".into(),
+                is_dir: false,
+                size: source.len(),
+            }),
+        }
+        return Ok(());
+    }
 
     let dmeta = match symlink_metadata_retry(dst_path) {
         Ok(m) => Some(m),
@@ -4016,6 +5380,8 @@ fn preview_compare_file(
                 // Datei-Vergleich: Größe oder (deutlich) neuere Quelle. Die
                 // Quell-mtime wird auf „jetzt" gekappt, damit zukunftsdatierte
                 // Dateien nicht bei jedem Sync als „geändert" erscheinen.
+                // Dieser Zweig ist der Fallback für lokale Ziele bzw. eine
+                // nicht erreichbare WebDAV-Serverabfrage.
                 let metadata_differs = f.len() != d.len()
                     || effective_src_mtime_secs(&f) > file_mtime_secs(&d) + MTIME_TOLERANCE_SECS;
                 // Die Prüfsummenprüfung ist nur für Dateien nötig, die der
@@ -4045,12 +5411,33 @@ fn preview_compare_file(
 
 /// Läuft die Quelle rekursiv ab und sammelt copy/update-Einträge. Folgt keinen
 /// Symlink-Verzeichnissen (deren Inhalte liegen unter den realen Pfaden).
+/// Normalisiert die vom Frontend gelieferte Größengrenze. `None` und `0`
+/// bedeuten beide „keine Grenze“ – so bleibt ein leeres bzw. abgeschaltetes
+/// Eingabefeld wirkungslos, statt versehentlich alles auszuschließen.
+fn normalize_max_file_size(value: Option<u64>) -> Option<u64> {
+    value.filter(|v| *v > 0)
+}
+
+/// Prüft, ob ein Verzeichnis keinerlei Einträge enthält. Lesefehler gelten als
+/// „nicht leer“, damit im Zweifel der bisherige Weg (Teilbaum als Einheit)
+/// gewählt wird und nichts stillschweigend unter den Tisch fällt.
+fn dir_is_empty(dir: &Path) -> bool {
+    match std::fs::read_dir(dir) {
+        Ok(mut it) => it.next().is_none(),
+        Err(_) => false,
+    }
+}
+
+// Acht Parameter: Pfade, Zaehler und Abbruchsignal des Vorschaudurchlaufs.
+#[allow(clippy::too_many_arguments)]
 fn preview_walk_src(
     src_root: &Path,
     dst_root: &Path,
     cur: &Path,
     ignore_patterns: &[String],
+    webdav_target: Option<&WebDavListingContext>,
     verify_checksums: bool,
+    max_file_size: Option<u64>,
     out: &mut Vec<SyncEntry>,
 ) -> Result<(), String> {
     check_sync_preview_cancelled()?;
@@ -4062,13 +5449,7 @@ fn preview_walk_src(
             Ok(r) => r,
             Err(_) => continue,
         };
-        let name = entry.file_name().to_string_lossy().into_owned();
         if is_transient_trunk_path(rel) || is_ignored_sync_path(rel, ignore_patterns) {
-            continue;
-        }
-        // macOS-Metadaten (._X, .DS_Store) nicht kopieren – sie werden auf dem
-        // Ziel (falls nötig) vom System selbst erzeugt.
-        if is_os_metadata_name(&name) {
             continue;
         }
         let rel_str = rel.to_string_lossy().into_owned();
@@ -4085,23 +5466,49 @@ fn preview_walk_src(
         }
 
         if link_meta.file_type().is_symlink() {
-            preview_compare_file(rel_str, &p, &dst_path, &link_meta, verify_checksums, out)?;
+            preview_compare_file(
+                rel_str,
+                &p,
+                &dst_path,
+                &link_meta,
+                webdav_target,
+                verify_checksums,
+                out,
+            )?;
             continue;
         }
         if link_meta.is_dir() {
-            match symlink_metadata_retry(&dst_path) {
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound && is_trunk_root(rel) => {
+            if let Some(context) = webdav_target {
+                let target_exists =
+                    webdav_server_path_exists(context, &dst_path).map_err(|error| {
+                        format!("WebDAV-Ziel am Server prüfen fehlgeschlagen: {error}")
+                    })?;
+                if target_exists {
+                    // Der Server kennt den Ordner, auch wenn der lokale
+                    // webdavfs-Cache ihn noch nicht aufgelistet hat. Die
+                    // Kinder werden ihrerseits direkt am Server verglichen.
                     preview_walk_src(
                         src_root,
                         dst_root,
                         &p,
                         ignore_patterns,
+                        webdav_target,
                         verify_checksums,
+                        max_file_size,
                         out,
                     )?;
-                }
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                    // Ganzer Teilbaum ist neu → als Einheit melden, nicht rekursieren.
+                } else if is_trunk_root(rel) || (max_file_size.is_some() && !dir_is_empty(&p)) {
+                    preview_walk_src(
+                        src_root,
+                        dst_root,
+                        &p,
+                        ignore_patterns,
+                        webdav_target,
+                        verify_checksums,
+                        max_file_size,
+                        out,
+                    )?;
+                } else {
                     out.push(SyncEntry {
                         rel: rel_str,
                         action: "copy".into(),
@@ -4109,13 +5516,59 @@ fn preview_walk_src(
                         size: 0,
                     });
                 }
+                continue;
+            }
+            match symlink_metadata_retry(&dst_path) {
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound && is_trunk_root(rel) => {
+                    preview_walk_src(
+                        src_root,
+                        dst_root,
+                        &p,
+                        ignore_patterns,
+                        webdav_target,
+                        verify_checksums,
+                        max_file_size,
+                        out,
+                    )?;
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    // Ganzer Teilbaum ist neu → als Einheit melden, nicht rekursieren.
+                    //
+                    // Ausnahme bei aktiver Größengrenze: Ein Verzeichniseintrag wird
+                    // vom Kopierjob rekursiv übertragen – übergroße Dateien darin
+                    // kämen also trotz Grenze mit. Deshalb wird hier einzeln
+                    // aufgelöst. Ein leeres Quellverzeichnis hat keine Dateien, die
+                    // der Rekursion Einträge liefern könnten; es wird weiterhin als
+                    // Einheit gemeldet, damit es am Ziel angelegt wird.
+                    if max_file_size.is_some() && !dir_is_empty(&p) {
+                        preview_walk_src(
+                            src_root,
+                            dst_root,
+                            &p,
+                            ignore_patterns,
+                            webdav_target,
+                            verify_checksums,
+                            max_file_size,
+                            out,
+                        )?;
+                    } else {
+                        out.push(SyncEntry {
+                            rel: rel_str,
+                            action: "copy".into(),
+                            is_dir: true,
+                            size: 0,
+                        });
+                    }
+                }
                 Err(e) => return Err(format!("Ziel-Metadaten lesen fehlgeschlagen: {e}")),
                 Ok(d) if d.is_dir() => preview_walk_src(
                     src_root,
                     dst_root,
                     &p,
                     ignore_patterns,
+                    webdav_target,
                     verify_checksums,
+                    max_file_size,
                     out,
                 )?,
                 Ok(_) => {
@@ -4131,8 +5584,24 @@ fn preview_walk_src(
             }
             continue;
         }
-        // Reguläre Datei.
-        preview_compare_file(rel_str, &p, &dst_path, &link_meta, verify_checksums, out)?;
+        // Reguläre Datei. Übergroße Dateien werden auf Wunsch ausgelassen: Bei
+        // langsamen Zielen (WebDAV, SMB) blockiert eine einzelne Riesendatei den
+        // gesamten Abgleich. Die Grenze wirkt nur auf reguläre Dateien – Symlinks
+        // tragen keine sinnvolle Größe.
+        if let Some(limit) = max_file_size {
+            if link_meta.len() > limit {
+                continue;
+            }
+        }
+        preview_compare_file(
+            rel_str,
+            &p,
+            &dst_path,
+            &link_meta,
+            webdav_target,
+            verify_checksums,
+            out,
+        )?;
     }
     Ok(())
 }
@@ -4157,27 +5626,7 @@ fn preview_walk_dst(
             Ok(r) => r,
             Err(_) => continue,
         };
-        let name = entry.file_name().to_string_lossy().into_owned();
-
         if is_transient_trunk_path(rel) || is_ignored_sync_path(rel, ignore_patterns) {
-            continue;
-        }
-
-        // `.DS_Store` ist reines Finder-Artefakt – nie löschen (wird neu erzeugt).
-        if name == ".DS_Store" {
-            continue;
-        }
-        // AppleDouble `._X` sind reine macOS-Metadaten-Sidecars (Ressourcen-Fork/
-        // xattrs zur Datei `X`). Auf Netzlaufwerken ohne native xattrs legt macOS
-        // sie selbst an. Sie werden NIE zum Löschen vorgeschlagen:
-        //  * Existiert `X`, gehört `._X` dazu und darf nicht entfernt werden.
-        //  * Ist `X` (z. B. über die IONOS Web-GUI) gelöscht, bleibt `._X` als
-        //    verwaistes Sidecar auf dem Server. macOS virtualisiert `._X` aber
-        //    über die AppleDouble-Schicht und liefert beim Löschen ENOENT
-        //    (os error 2), sobald der Partner `X` fehlt – der Eintrag ließe sich
-        //    über den Mount gar nicht entfernen und tauchte bei jedem Sync erneut
-        //    als „Zu löschen" auf. Wie `.DS_Store` daher grundsätzlich überspringen.
-        if is_apple_double_name(&name) {
             continue;
         }
 
@@ -4213,11 +5662,200 @@ fn preview_walk_dst(
     Ok(())
 }
 
+#[derive(Clone)]
+struct DirectSyncPathInfo {
+    is_dir: bool,
+    size: u64,
+    mtime: i64,
+}
+
+fn should_skip_direct_sync_path(rel: &Path, ignore_patterns: &[String]) -> bool {
+    is_transient_trunk_path(rel)
+        || is_ignored_sync_path(rel, ignore_patterns)
+        || rel
+            .components()
+            .any(|component| component.as_os_str() == ".DualBeamUndo")
+}
+
+fn collect_filesystem_sync_tree(
+    root: &Path,
+    ignore_patterns: &[String],
+) -> Result<HashMap<String, DirectSyncPathInfo>, String> {
+    let mut entries = HashMap::new();
+    for entry in walkdir::WalkDir::new(root).follow_links(false) {
+        check_sync_preview_cancelled()?;
+        let entry = entry.map_err(|error| format!("Verzeichnis lesen fehlgeschlagen: {error}"))?;
+        let path = entry.path();
+        if path == root {
+            continue;
+        }
+        let relative = match path.strip_prefix(root) {
+            Ok(relative) => relative,
+            Err(_) => continue,
+        };
+        if should_skip_direct_sync_path(relative, ignore_patterns) {
+            if entry.file_type().is_dir() {
+                continue;
+            }
+            continue;
+        }
+        let metadata = entry
+            .metadata()
+            .map_err(|error| format!("Metadaten lesen fehlgeschlagen: {error}"))?;
+        if is_untransferable_file(&metadata) {
+            continue;
+        }
+        entries.insert(
+            relative.to_string_lossy().into_owned(),
+            DirectSyncPathInfo {
+                is_dir: metadata.is_dir() && !metadata.file_type().is_symlink(),
+                size: if metadata.is_dir() { 0 } else { metadata.len() },
+                mtime: file_mtime_secs(&metadata),
+            },
+        );
+    }
+    Ok(entries)
+}
+
+fn collect_direct_sync_tree(
+    root: &Path,
+    ignore_patterns: &[String],
+) -> Result<HashMap<String, DirectSyncPathInfo>, String> {
+    if let Some(result) = remote::list_object_storage_tree(root) {
+        let mut entries = HashMap::new();
+        for entry in result? {
+            check_sync_preview_cancelled()?;
+            let relative = PathBuf::from(&entry.name);
+            if relative.as_os_str().is_empty()
+                || should_skip_direct_sync_path(&relative, ignore_patterns)
+            {
+                continue;
+            }
+            entries.insert(
+                entry.name,
+                DirectSyncPathInfo {
+                    is_dir: entry.is_dir,
+                    size: if entry.is_dir { 0 } else { entry.size },
+                    mtime: entry.mtime,
+                },
+            );
+        }
+        return Ok(entries);
+    }
+    collect_filesystem_sync_tree(root, ignore_patterns)
+}
+
+/// Direkte Einweg-Sync-Vorschau, sobald mindestens eine Seite S3 oder Swift
+/// ist. Die Objektseite wird ausschließlich mit `rclone lsjson` erfasst; kein
+/// NFS-Mount und keine Dateiübertragung werden für die Vorschau benötigt.
+fn direct_object_storage_sync_preview(
+    src_root: &Path,
+    dst_root: &Path,
+    delete_extra: bool,
+    ignore_patterns: &[String],
+    max_file_size: Option<u64>,
+) -> Result<Vec<SyncEntry>, String> {
+    let source = collect_direct_sync_tree(src_root, ignore_patterns)?;
+    let destination = collect_direct_sync_tree(dst_root, ignore_patterns)?;
+    let mut out = Vec::new();
+    let mut source_paths: Vec<_> = source.keys().cloned().collect();
+    source_paths.sort_by_key(|path| (path.matches('/').count(), path.clone()));
+    let mut copied_directories: Vec<String> = Vec::new();
+    for relative in source_paths {
+        check_sync_preview_cancelled()?;
+        if copied_directories.iter().any(|directory| {
+            relative.starts_with(directory)
+                && relative.as_bytes().get(directory.len()) == Some(&b'/')
+        }) {
+            continue;
+        }
+        let source_info = &source[&relative];
+        let target = destination.get(&relative);
+        if source_info.is_dir {
+            match target {
+                None => {
+                    // Ein fehlender Teilbaum wird als ein Kopierauftrag gezeigt.
+                    // Bei einer Dateigröße-Grenze lösen wir ihn einzeln auf,
+                    // damit große Dateien nicht versehentlich mitkommen.
+                    if max_file_size.is_none() {
+                        copied_directories.push(relative.clone());
+                        out.push(SyncEntry {
+                            rel: relative,
+                            action: "copy".into(),
+                            is_dir: true,
+                            size: 0,
+                        });
+                    }
+                }
+                Some(target) if !target.is_dir => out.push(SyncEntry {
+                    rel: relative,
+                    action: "update".into(),
+                    is_dir: true,
+                    size: 0,
+                }),
+                Some(_) => {}
+            }
+            continue;
+        }
+        if max_file_size.is_some_and(|limit| source_info.size > limit) {
+            continue;
+        }
+        let action = match target {
+            None => Some("copy"),
+            Some(target)
+                if target.is_dir
+                    || source_info.size != target.size
+                    || source_info.mtime > target.mtime + MTIME_TOLERANCE_SECS =>
+            {
+                Some("update")
+            }
+            Some(_) => None,
+        };
+        if let Some(action) = action {
+            out.push(SyncEntry {
+                rel: relative,
+                action: action.into(),
+                is_dir: false,
+                size: source_info.size,
+            });
+        }
+    }
+    if delete_extra {
+        let mut destination_paths: Vec<_> = destination.keys().cloned().collect();
+        destination_paths.sort_by_key(|path| (path.matches('/').count(), path.clone()));
+        let mut deleted_directories: Vec<String> = Vec::new();
+        for relative in destination_paths {
+            check_sync_preview_cancelled()?;
+            if source.contains_key(&relative)
+                || deleted_directories.iter().any(|directory| {
+                    relative.starts_with(directory)
+                        && relative.as_bytes().get(directory.len()) == Some(&b'/')
+                })
+            {
+                continue;
+            }
+            let info = &destination[&relative];
+            if info.is_dir {
+                deleted_directories.push(relative.clone());
+            }
+            out.push(SyncEntry {
+                rel: relative,
+                action: "delete".into(),
+                is_dir: info.is_dir,
+                size: info.size,
+            });
+        }
+    }
+    Ok(out)
+}
+
 /// Berechnet die Unterschiede zwischen `src` und `dst` (einweg: src → dst).
 /// Vergleich über Größe + Änderungszeit (mit Toleranz). Symlinks werden
 /// dereferenziert verglichen; transiente Netzwerkfehler werden wiederholt und
 /// führen im Ernstfall zum Abbruch statt zu falschen Zahlen.
 #[tauri::command]
+// Acht Parameter: beide Seiten der Synchronisation samt Optionen und Fenstergriff.
+#[allow(clippy::too_many_arguments)]
 async fn sync_preview(
     app: AppHandle,
     preview_id: String,
@@ -4226,6 +5864,7 @@ async fn sync_preview(
     delete_extra: bool,
     ignore_patterns: Vec<String>,
     verify_checksums: bool,
+    max_file_size: Option<u64>,
 ) -> Result<Vec<SyncEntry>, String> {
     if preview_id.is_empty() {
         return Err("Ungültige Vorschaukennung".into());
@@ -4243,7 +5882,14 @@ async fn sync_preview(
     // sodass die UI weiterhin reagiert und den Hinweis anzeigt.
     let result = tauri::async_runtime::spawn_blocking(move || {
         run_cancellable_preview(cancel, || {
-            sync_preview_inner(&src, &dst, delete_extra, ignore_patterns, verify_checksums)
+            sync_preview_inner(
+                &src,
+                &dst,
+                delete_extra,
+                ignore_patterns,
+                verify_checksums,
+                normalize_max_file_size(max_file_size),
+            )
         })
     })
     .await;
@@ -4260,10 +5906,21 @@ fn sync_preview_inner(
     delete_extra: bool,
     extra_ignore_patterns: Vec<String>,
     verify_checksums: bool,
+    max_file_size: Option<u64>,
 ) -> Result<Vec<SyncEntry>, String> {
     check_sync_preview_cancelled()?;
     let src_root = expand_tilde(src);
     let dst_root = expand_tilde(dst);
+    if remote::is_object_storage_mount(&src_root) || remote::is_object_storage_mount(&dst_root) {
+        let ignore_patterns = sync_ignore_patterns(&src_root, extra_ignore_patterns);
+        return direct_object_storage_sync_preview(
+            &src_root,
+            &dst_root,
+            delete_extra,
+            &ignore_patterns,
+            max_file_size,
+        );
+    }
     if !src_root.is_dir() {
         return Err(format!(
             "Quelle ist kein Verzeichnis: {}",
@@ -4284,6 +5941,7 @@ fn sync_preview_inner(
     }
     let mut out: Vec<SyncEntry> = Vec::new();
     let ignore_patterns = sync_ignore_patterns(&src_root, extra_ignore_patterns);
+    let webdav_target = webdav_listing_context(&dst_root);
 
     // Quelle durchlaufen → copy/update (robust gegen transiente Netzwerkfehler).
     preview_walk_src(
@@ -4291,7 +5949,9 @@ fn sync_preview_inner(
         &dst_root,
         &src_root,
         &ignore_patterns,
+        webdav_target.as_ref(),
         verify_checksums,
+        max_file_size,
         &mut out,
     )?;
 
@@ -4315,6 +5975,7 @@ async fn sync_two_way_preview(
     right: String,
     ignore_patterns: Vec<String>,
     verify_checksums: bool,
+    max_file_size: Option<u64>,
 ) -> Result<Vec<SyncEntry>, String> {
     if preview_id.is_empty() {
         return Err("Ungültige Vorschaukennung".into());
@@ -4326,7 +5987,13 @@ async fn sync_two_way_preview(
     }
     let result = tauri::async_runtime::spawn_blocking(move || {
         run_cancellable_preview(cancel, || {
-            sync_two_way_preview_inner(&left, &right, ignore_patterns, verify_checksums)
+            sync_two_way_preview_inner(
+                &left,
+                &right,
+                ignore_patterns,
+                verify_checksums,
+                normalize_max_file_size(max_file_size),
+            )
         })
     })
     .await;
@@ -4338,13 +6005,19 @@ async fn sync_two_way_preview(
 }
 
 fn newer_sync_side(left_root: &Path, right_root: &Path, rel: &str) -> Option<&'static str> {
-    let left = std::fs::metadata(left_root.join(rel)).ok()?;
-    let right = std::fs::metadata(right_root.join(rel)).ok()?;
-    if left.is_dir() || right.is_dir() {
+    let mtime = |path: PathBuf| -> Option<(bool, i64)> {
+        if let Some(result) = remote::object_storage_entry(&path) {
+            let entry = result.ok()??;
+            return Some((entry.is_dir, entry.mtime));
+        }
+        let meta = std::fs::metadata(path).ok()?;
+        Some((meta.is_dir(), file_mtime_secs(&meta)))
+    };
+    let (left_is_dir, left_mtime) = mtime(left_root.join(rel))?;
+    let (right_is_dir, right_mtime) = mtime(right_root.join(rel))?;
+    if left_is_dir || right_is_dir {
         return None;
     }
-    let left_mtime = file_mtime_secs(&left);
-    let right_mtime = file_mtime_secs(&right);
     if left_mtime > right_mtime + MTIME_TOLERANCE_SECS {
         Some("left_to_right")
     } else if right_mtime > left_mtime + MTIME_TOLERANCE_SECS {
@@ -4359,6 +6032,7 @@ fn sync_two_way_preview_inner(
     right: &str,
     ignore_patterns: Vec<String>,
     verify_checksums: bool,
+    max_file_size: Option<u64>,
 ) -> Result<Vec<SyncEntry>, String> {
     check_sync_preview_cancelled()?;
     let left_root = expand_tilde(left);
@@ -4369,8 +6043,16 @@ fn sync_two_way_preview_inner(
         false,
         ignore_patterns.clone(),
         verify_checksums,
+        max_file_size,
     )?;
-    let right_to_left = sync_preview_inner(right, left, false, ignore_patterns, verify_checksums)?;
+    let right_to_left = sync_preview_inner(
+        right,
+        left,
+        false,
+        ignore_patterns,
+        verify_checksums,
+        max_file_size,
+    )?;
     check_sync_preview_cancelled()?;
     let mut combined: HashMap<String, (Option<SyncEntry>, Option<SyncEntry>)> = HashMap::new();
     for entry in left_to_right {
@@ -5046,9 +6728,12 @@ struct Properties {
     is_dir: bool,
     is_symlink: bool,
     symlink_target: Option<String>,
-    size: u64,
-    file_count: u64,
-    dir_count: u64,
+    /// Bei Netzordnern wäre eine rekursive Summierung eine unbeschränkte
+    /// Folge von Serveranfragen. `None` bedeutet daher bewusst „nicht
+    /// ermittelt", nicht „leer".
+    size: Option<u64>,
+    file_count: Option<u64>,
+    dir_count: Option<u64>,
     mtime: i64,
     btime: i64,
     atime: i64,
@@ -5109,7 +6794,13 @@ async fn get_properties(path: String) -> Result<Properties, String> {
         let owner = uid_to_name(meta.uid());
         let group = gid_to_name(meta.gid());
 
-        let (size, file_count, dir_count) = if meta.is_dir() {
+        let (size, file_count, dir_count) = if meta.is_dir() && remote::is_remote_mount(&p) {
+            // SSHFS, WebDAV, FTP/FTPS und die virtuellen Objekt-Speicher
+            // müssen für jede Unterebene den Server abfragen. Eigenschaften
+            // bleiben deshalb sofort verfügbar und zeigen nur verlässliche
+            // Metadaten der gewählten Ebene an.
+            (None, None, None)
+        } else if meta.is_dir() {
             let mut s: u64 = 0;
             let mut fc: u64 = 0;
             let mut dc: u64 = 0;
@@ -5130,9 +6821,9 @@ async fn get_properties(path: String) -> Result<Properties, String> {
                     }
                 }
             }
-            (s, fc, dc)
+            (Some(s), Some(fc), Some(dc))
         } else {
-            (meta.len(), 0, 0)
+            (Some(meta.len()), Some(0), Some(0))
         };
 
         Ok(Properties {
@@ -5491,6 +7182,7 @@ pub fn run() {
             cleanup_expired_undo,
             force_delete_admin,
             path_exists,
+            navigation_root,
             path_is_network,
             list_volumes,
             list_network_bookmarks,
@@ -5538,8 +7230,20 @@ pub fn run() {
             remote::mount_remote,
             remote::unmount_remote,
             remote::remote_mounts,
+            object_storage::save_object_storage_secret,
+            object_storage::has_object_storage_secret,
+            object_storage::forget_object_storage_secret,
+            object_storage::import_remotedesk_object_storage_profiles,
+            object_storage::mount_object_storage,
             promise_drag::start_promise_drag,
             promise_drag::resolve_promise_drop,
+            promise_drag::list_open_with_apps,
+            promise_drag::open_with_app,
+            promise_drag::choose_application_dialog,
+            promise_drag::set_default_application_for,
+            rdp::rdp_available,
+            rdp::rdp_profiles,
+            rdp::rdp_connect,
         ])
         .build(tauri::generate_context!())
         .expect("error while running tauri application")
@@ -5554,11 +7258,11 @@ pub fn run() {
                     open_new_window(_app_handle);
                 }
             }
-            // Beim Beenden alle selbst eingehängten Netzlaufwerke lösen. Sonst
-            // bliebe im Finder eine tote Freigabe stehen, die sich nur noch von
-            // Hand aushängen ließe.
+            // Beim Beenden konsequent alle Netzwerk-Laufwerke lösen. Die
+            // gespeicherten Lesezeichen und Schlüsselbund-Zugänge bleiben
+            // dabei erhalten, lokale Laufwerke sind nicht betroffen.
             if matches!(_event, tauri::RunEvent::Exit) {
-                remote::unmount_all();
+                unmount_all_network_volumes();
             }
         });
 }
@@ -5567,16 +7271,19 @@ pub fn run() {
 mod copy_tests {
     use super::{
         bookmark_url_from_mount_source, copy_file_with_metadata, count_delete_entries,
-        delete_error_message, destination_is_within_source, is_protected_admin_root,
-        is_retryable_remove_error, is_untransferable_file,
-        parse_mount_url, percent_encode_segment, preview_walk_src, remove_source_after_move,
-        replace_file_after_copy, search_in_dir_blocking, sync_preview_inner, sync_two_way_preview_inner,
-        webdav_host_from_url, webdav_remote_url, zip_extract_inner, CopyOutcome,
+        delete_error_message, destination_is_within_source, is_dualbeam_inprogress_name,
+        is_protected_admin_root, is_retryable_remove_error, is_time_machine_path,
+        is_transient_trunk_path, is_untransferable_file, normalize_max_file_size, parse_mount_url,
+        percent_encode_segment, preview_walk_src, remove_source_after_move,
+        replace_file_after_copy, search_in_dir_blocking, should_skip_direct_sync_path,
+        sync_preview_inner, sync_two_way_preview_inner, webdav_host_from_url,
+        webdav_http_date_epoch, webdav_propfind_content_length, webdav_propfind_last_modified,
+        webdav_remote_url, zip_extract_inner, CopyOutcome,
     };
     use std::ffi::CString;
     use std::os::unix::ffi::OsStrExt;
     use std::os::unix::net::UnixDatagram;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
     use std::time::{Duration, Instant};
 
@@ -5628,6 +7335,31 @@ mod copy_tests {
     }
 
     #[test]
+    fn ordinary_inprogress_file_is_not_a_time_machine_backup() {
+        assert!(!is_time_machine_path(
+            Path::new("/tmp/upload.dualbeam-40316-0.inprogress"),
+            &[]
+        ));
+        assert!(is_dualbeam_inprogress_name(
+            ".upload.zip.dualbeam-40316-0.inprogress"
+        ));
+        assert!(is_dualbeam_inprogress_name(
+            "upload.zip.dualbeam-sftp-40316-0.inprogress"
+        ));
+        assert!(is_transient_trunk_path(Path::new(
+            "nested/.upload.zip.dualbeam-40316-0.inprogress"
+        )));
+        assert!(!is_dualbeam_inprogress_name("upload.inprogress"));
+        assert!(!is_dualbeam_inprogress_name(
+            ".upload.zip.dualbeam-user-copy.inprogress"
+        ));
+        assert!(is_time_machine_path(
+            Path::new("/Volumes/Backup/Backups.backupdb/Mac/Latest"),
+            &[]
+        ));
+    }
+
+    #[test]
     fn webdav_url_translates_directory_with_trailing_slash() {
         let url = webdav_remote_url(
             "https://webdav.example.com/",
@@ -5649,6 +7381,22 @@ mod copy_tests {
         )
         .unwrap();
         assert_eq!(url, "https://webdav.example.com/a/b.txt");
+    }
+
+    #[test]
+    fn webdav_propfind_reads_file_length() {
+        let response = r#"<?xml version="1.0"?><d:multistatus xmlns:d="DAV:"><d:response><d:propstat><d:prop><d:getcontentlength>4871923</d:getcontentlength></d:prop></d:propstat></d:response></d:multistatus>"#;
+        assert_eq!(webdav_propfind_content_length(response), Some(4_871_923));
+    }
+
+    #[test]
+    fn webdav_propfind_reads_server_modified_time() {
+        let response = r#"<d:prop xmlns:d="DAV:"><d:getlastmodified>Thu, 01 Jan 1970 00:00:00 GMT</d:getlastmodified></d:prop>"#;
+        assert_eq!(webdav_propfind_last_modified(response), Some(0));
+        assert_eq!(
+            webdav_http_date_epoch("Wed, 21 Oct 2015 07:28:00 GMT"),
+            Some(1_445_412_480)
+        );
     }
 
     #[test]
@@ -5809,7 +7557,7 @@ mod copy_tests {
         std::fs::write(&src, b"new version").unwrap();
         std::fs::write(&dst, b"old version").unwrap();
 
-        replace_file_after_copy(&src, &dst, &AtomicBool::new(false))
+        replace_file_after_copy(&src, &dst, &AtomicBool::new(false), false)
             .expect("bestehende Datei sollte ersetzt werden");
 
         assert_eq!(std::fs::read(&dst).unwrap(), b"new version");
@@ -5861,7 +7609,7 @@ mod copy_tests {
         let socket = UnixDatagram::bind(src.join("fsmonitor--daemon.ipc")).unwrap();
 
         let mut entries = Vec::new();
-        preview_walk_src(&src, &dst, &src, &[], false, &mut entries).unwrap();
+        preview_walk_src(&src, &dst, &src, &[], None, false, None, &mut entries).unwrap();
         assert!(entries.is_empty());
 
         drop(socket);
@@ -5877,8 +7625,16 @@ mod copy_tests {
         std::fs::create_dir_all(src.join(".trunk").join("logs")).unwrap();
         std::fs::create_dir_all(&dst).unwrap();
         std::fs::write(src.join(".hidden").join("config"), b"keep me").unwrap();
+        std::fs::write(src.join(".DS_Store"), b"finder metadata").unwrap();
+        std::fs::write(src.join("._Urlaub.pdf"), b"apple double").unwrap();
         std::fs::write(src.join(".trunk").join("trunk.yaml"), b"keep config").unwrap();
         std::fs::write(src.join(".trunk").join("logs").join("active"), b"ephemeral").unwrap();
+        std::fs::write(src.join("upload.inprogress"), b"user content").unwrap();
+        std::fs::write(
+            src.join(".upload.zip.dualbeam-40316-0.inprogress"),
+            b"partial internal copy",
+        )
+        .unwrap();
 
         let entries = sync_preview_inner(
             &src.to_string_lossy(),
@@ -5886,15 +7642,36 @@ mod copy_tests {
             true,
             vec![],
             false,
+            None,
         )
         .unwrap();
         assert!(entries.iter().any(|entry| entry.rel == ".hidden"));
+        assert!(entries.iter().any(|entry| entry.rel == ".DS_Store"));
+        assert!(entries.iter().any(|entry| entry.rel == "._Urlaub.pdf"));
         assert!(entries.iter().any(|entry| entry.rel == ".trunk/trunk.yaml"));
+        assert!(entries.iter().any(|entry| entry.rel == "upload.inprogress"));
+        assert!(!entries
+            .iter()
+            .any(|entry| entry.rel == ".upload.zip.dualbeam-40316-0.inprogress"));
         assert!(!entries
             .iter()
             .any(|entry| entry.rel.starts_with(".trunk/logs")));
 
         let _ = std::fs::remove_dir_all(root.parent().unwrap());
+    }
+
+    #[test]
+    fn direct_object_storage_sync_includes_hidden_files() {
+        assert!(!should_skip_direct_sync_path(Path::new(".env"), &[]));
+        assert!(!should_skip_direct_sync_path(Path::new(".DS_Store"), &[]));
+        assert!(!should_skip_direct_sync_path(
+            Path::new("._Urlaub.pdf"),
+            &[]
+        ));
+        assert!(should_skip_direct_sync_path(
+            Path::new(".DualBeamUndo/backup"),
+            &[]
+        ));
     }
 
     #[test]
@@ -5917,6 +7694,7 @@ mod copy_tests {
             true,
             vec!["build/".into()],
             false,
+            None,
         )
         .unwrap();
         assert!(entries.iter().any(|entry| entry.rel == "keep.txt"));
@@ -5943,6 +7721,7 @@ mod copy_tests {
             &right.to_string_lossy(),
             vec![],
             false,
+            None,
         )
         .unwrap();
         assert!(entries
@@ -5974,6 +7753,7 @@ mod copy_tests {
             false,
             vec![],
             false,
+            None,
         )
         .unwrap();
         assert!(without_checksums.is_empty());
@@ -5984,6 +7764,7 @@ mod copy_tests {
             false,
             vec![],
             true,
+            None,
         )
         .unwrap();
         assert!(with_checksums
@@ -5991,6 +7772,109 @@ mod copy_tests {
             .any(|entry| entry.rel == "same-size.txt"));
 
         let _ = std::fs::remove_dir_all(root.parent().unwrap());
+    }
+
+    #[test]
+    fn skips_files_above_the_size_limit() {
+        let root = tmp_path("size-limit-root");
+        let src = root.join("src");
+        let dst = root.join("dst");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::create_dir_all(&dst).unwrap();
+        std::fs::write(src.join("small.txt"), vec![b'a'; 10]).unwrap();
+        std::fs::write(src.join("huge.bin"), vec![b'b'; 5000]).unwrap();
+
+        let entries = sync_preview_inner(
+            &src.to_string_lossy(),
+            &dst.to_string_lossy(),
+            true,
+            vec![],
+            false,
+            Some(1000),
+        )
+        .unwrap();
+        assert!(entries.iter().any(|entry| entry.rel == "small.txt"));
+        assert!(!entries.iter().any(|entry| entry.rel == "huge.bin"));
+
+        // Ohne Grenze muss dieselbe Datei wieder auftauchen – sonst wäre die
+        // Filterung nicht an die Einstellung gebunden.
+        let all = sync_preview_inner(
+            &src.to_string_lossy(),
+            &dst.to_string_lossy(),
+            true,
+            vec![],
+            false,
+            None,
+        )
+        .unwrap();
+        assert!(all.iter().any(|entry| entry.rel == "huge.bin"));
+
+        let _ = std::fs::remove_dir_all(root.parent().unwrap());
+    }
+
+    #[test]
+    fn size_limit_resolves_new_subtrees_file_by_file() {
+        // Ein neuer Unterbaum wird sonst als ein einziger Verzeichniseintrag
+        // gemeldet und vom Kopierjob rekursiv übertragen – die Grenze bliebe
+        // wirkungslos. Mit Grenze muss er einzeln aufgelöst werden.
+        let root = tmp_path("size-limit-subtree");
+        let src = root.join("src");
+        let dst = root.join("dst");
+        std::fs::create_dir_all(src.join("neu")).unwrap();
+        std::fs::create_dir_all(&dst).unwrap();
+        std::fs::write(src.join("neu").join("klein.txt"), vec![b'a'; 10]).unwrap();
+        std::fs::write(src.join("neu").join("gross.bin"), vec![b'b'; 5000]).unwrap();
+
+        let entries = sync_preview_inner(
+            &src.to_string_lossy(),
+            &dst.to_string_lossy(),
+            true,
+            vec![],
+            false,
+            Some(1000),
+        )
+        .unwrap();
+        assert!(entries.iter().any(|entry| entry.rel == "neu/klein.txt"));
+        assert!(!entries.iter().any(|entry| entry.rel == "neu/gross.bin"));
+        // Kein gebündelter Verzeichniseintrag, der die große Datei mitnähme.
+        assert!(!entries
+            .iter()
+            .any(|entry| entry.rel == "neu" && entry.is_dir));
+
+        let _ = std::fs::remove_dir_all(root.parent().unwrap());
+    }
+
+    #[test]
+    fn size_limit_still_creates_empty_directories() {
+        let root = tmp_path("size-limit-empty-dir");
+        let src = root.join("src");
+        let dst = root.join("dst");
+        std::fs::create_dir_all(src.join("leer")).unwrap();
+        std::fs::create_dir_all(&dst).unwrap();
+
+        let entries = sync_preview_inner(
+            &src.to_string_lossy(),
+            &dst.to_string_lossy(),
+            true,
+            vec![],
+            false,
+            Some(1000),
+        )
+        .unwrap();
+        assert!(entries
+            .iter()
+            .any(|entry| entry.rel == "leer" && entry.is_dir));
+
+        let _ = std::fs::remove_dir_all(root.parent().unwrap());
+    }
+
+    #[test]
+    fn treats_zero_size_limit_as_no_limit() {
+        // Ein leeres bzw. abgeschaltetes Eingabefeld darf nicht dazu führen,
+        // dass jede Datei als „zu groß" gilt.
+        assert_eq!(normalize_max_file_size(None), None);
+        assert_eq!(normalize_max_file_size(Some(0)), None);
+        assert_eq!(normalize_max_file_size(Some(42)), Some(42));
     }
 
     #[test]
@@ -6016,6 +7900,7 @@ mod copy_tests {
             false,
             vec![],
             true,
+            None,
         );
         assert!(matches!(
             result,

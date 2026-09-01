@@ -1,6 +1,6 @@
 import { Show, createSignal, createResource, createEffect } from "solid-js";
 import { getProperties, setPermissions } from "../ipc";
-import { t, intlLocale } from "../i18n";
+import { t, intlLocale, errMsg } from "../i18n";
 
 const [openPath, setOpenPath] = createSignal<string | null>(null);
 let resolver: (() => void) | null = null;
@@ -96,7 +96,7 @@ export function PropertiesDialog() {
         >
           <Show
             when={props()}
-            fallback={<div class="props-loading">{t("common.loading")}</div>}
+            fallback={<div class="props-loading">{props.error ? errMsg(props.error) : t("common.loading")}</div>}
           >
             {(pAcc) => {
               const p = pAcc();
@@ -111,9 +111,9 @@ export function PropertiesDialog() {
                       <Show when={p.isSymlink && p.symlinkTarget}>
                         <tr><th>{t("props.symlinkTarget")}</th><td class="mono">{p.symlinkTarget}</td></tr>
                       </Show>
-                      <tr><th>{t("props.size")}</th><td>{fmtSize(p.size)}</td></tr>
+                      <tr><th>{t("props.size")}</th><td>{p.size === null ? "—" : fmtSize(p.size)}</td></tr>
                       <Show when={p.isDir}>
-                        <tr><th>{t("props.content")}</th><td>{t("props.contentCounts", { files: p.fileCount, dirs: p.dirCount })}</td></tr>
+                        <tr><th>{t("props.content")}</th><td>{p.fileCount === null || p.dirCount === null ? "—" : t("props.contentCounts", { files: p.fileCount, dirs: p.dirCount })}</td></tr>
                       </Show>
                       <tr><th>{t("props.created")}</th><td class="mono">{fmtDate(p.btime)}</td></tr>
                       <tr><th>{t("props.modified")}</th><td class="mono">{fmtDate(p.mtime)}</td></tr>

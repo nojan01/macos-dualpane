@@ -271,6 +271,35 @@ Festlegungen für den rclone-Weg:
 - Beim Beenden der App werden alle eigenen Einhängungen gelöst, beim Start
   werden Reste eines abgestürzten Laufs weggeräumt.
 
+### Remote-Desktop (Brücke zu RemoteDeskRDP)
+
+Unterhalb der Sync-Profile erscheint der Abschnitt **Remote-Desktop**, sobald
+RemoteDeskRDP installiert ist *und* dort mindestens eine Verbindung eingerichtet
+wurde. Fehlt eines von beidem, bleibt der Abschnitt unsichtbar.
+
+| Was | Wie |
+|-----|-----|
+| App finden | `/Applications`, dann `~/Applications`, erst danach Spotlight (`mdfind`) als Rückfall; Ergebnis 30 s zwischengespeichert |
+| Profile lesen | `~/Library/Application Support/RemoteDesk/profiles.json`, nur `id`, `name`, `host` |
+| Verbinden | `open "remotedesk://connect?id=<uuid>"` |
+
+Festlegungen:
+
+- **DualBeam spricht kein RDP.** Es startet weder FreeRDP noch baut es dessen
+  Argumente. Die gesamte Sitzungslogik bleibt in RemoteDeskRDP.
+- **Keine Geheimnisse.** Kennwörter stehen nicht in der Profildatei; sie liegen
+  im Schlüsselbund von RemoteDeskRDP und werden hier nie gelesen.
+- **URL-Schema statt Startargumenten.** `open -a … --args` erreicht eine bereits
+  laufende App nicht — macOS aktiviert dann nur ihr Fenster. Der Deep-Link wirkt
+  bei Kalt- und Warmstart und erzeugt nie eine zweite Instanz.
+- **Die ID wird prozentkodiert** und zusätzlich gegen die gelesene Liste geprüft.
+  Sonst könnte ein `&` oder `#` im Bezeichner die URL zerlegen und eine *andere*
+  Verbindung öffnen.
+- **Fremde Datei, defensiv gelesen.** Kaputtes JSON, ein Objekt statt eines
+  Arrays oder Einträge ohne `id`/`name` ergeben eine leere Liste bzw. werden
+  übersprungen — nie ein Fehler.
+- Die Liste wird beim Start und bei jedem Wechsel in den Vordergrund erneuert.
+
 ---
 
 ## 9. Architektur
@@ -420,6 +449,11 @@ type RenameRule =
 
 #[tauri::command] fn watch_start(pane: String, path: String) -> Result<()>;
 #[tauri::command] fn watch_stop(pane: String) -> Result<()>;
+
+// Brücke zu RemoteDeskRDP (siehe 8. Sidebar)
+#[tauri::command] fn rdp_available() -> bool;
+#[tauri::command] fn rdp_profiles() -> Vec<RdpProfile>;   // nur id, name, host
+#[tauri::command] fn rdp_connect(id: String) -> Result<(), String>;
 ```
 
 **Events (Backend → Frontend):**

@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import type { Entry } from "./types";
+import type { ObjectStorageProfile } from "./objectStorageProfiles";
 
 export async function listDir(
   path: string,
@@ -53,11 +54,37 @@ export async function moveToTrash(paths: string[]): Promise<void> {
   return invoke<void>("move_to_trash", { paths });
 }
 
+export type ObjectStorageDeleteTarget = {
+  profile: ObjectStorageProfile;
+  mountPath: string;
+  /** Pfade, die in der Dateiansicht als Verzeichnisse erkannt wurden. */
+  directoryPaths?: string[];
+};
+
+export type ObjectStorageTransferTarget = ObjectStorageDeleteTarget & {
+  sourceIsObjectStorage: boolean;
+};
+
+export type RemoteStorageDeleteTarget = {
+  spec: RemoteSpec;
+  mountPath: string;
+};
+
+/** Direkter SFTP-Transfer. Ausschließlich SFTP verwendet diesen Weg; FTP und
+ * FTPS behalten ihren bisherigen Dateisystem-Transfer. */
+export type RemoteStorageTransferTarget = RemoteStorageDeleteTarget & {
+  sourceIsRemote: boolean;
+};
+
 export async function runNetworkDelete(
   jobId: string,
   paths: string[],
+  objectStorage?: ObjectStorageDeleteTarget,
+  remoteStorage?: RemoteStorageDeleteTarget,
 ): Promise<void> {
-  return invoke<void>("run_network_delete", { jobId, paths });
+  return invoke<void>("run_network_delete", {
+    jobId, paths, objectStorage, remoteStorage,
+  });
 }
 
 export type UndoDeleteItem = { original: string; staged: string };
@@ -89,6 +116,11 @@ export async function forceDeleteAdmin(paths: string[]): Promise<void> {
 
 export async function pathExists(path: string): Promise<boolean> {
   return invoke<boolean>("path_exists", { path });
+}
+
+/** Sichtbare Obergrenze eines WebDAV-, S3/Swift- bzw. SFTP-Laufwerks. */
+export async function navigationRoot(path: string): Promise<string | null> {
+  return invoke<string | null>("navigation_root", { path });
 }
 
 export async function pathIsNetwork(path: string): Promise<boolean> {
@@ -136,6 +168,28 @@ export async function mountNetworkUrl(
   return invoke<string>("mount_network_url", { url, allowInsecureLocal });
 }
 
+export async function saveObjectStorageSecret(profileId: string, secret: string): Promise<void> {
+  return invoke<void>("save_object_storage_secret", { profileId, secret });
+}
+
+export async function hasObjectStorageSecret(profileId: string): Promise<boolean> {
+  return invoke<boolean>("has_object_storage_secret", { profileId });
+}
+
+export async function forgetObjectStorageSecret(profileId: string): Promise<void> {
+  return invoke<void>("forget_object_storage_secret", { profileId });
+}
+
+/** Hängt ein S3-Bucket bzw. einen Swift-Container über das mitgelieferte
+ * rclone ein. Danach ist er ein normaler Dateisystempfad für Sync-Profile. */
+export async function mountObjectStorage(profile: ObjectStorageProfile): Promise<string> {
+  return invoke<string>("mount_object_storage", { profile });
+}
+
+export async function importRemoteDeskObjectStorageProfiles(): Promise<ObjectStorageProfile[]> {
+  return invoke<ObjectStorageProfile[]>("import_remotedesk_object_storage_profiles");
+}
+
 /** Protokolle, die DualBeam über das mitgelieferte rclone einhängt. */
 export type RemoteProtocol = "sftp" | "ftp" | "ftpsExplicit" | "ftpsImplicit";
 
@@ -161,6 +215,7 @@ export type HostKeyReport = {
 
 export type RemoteMount = {
   path: string;
+  homePath?: string | null;
   label: string;
   descriptor: string;
 };
@@ -244,8 +299,12 @@ export async function runJob(
   jobId: string,
   kind: JobKind,
   items: JobItem[],
+  objectStorage?: ObjectStorageTransferTarget,
+  remoteStorage?: RemoteStorageTransferTarget,
 ): Promise<void> {
-  return invoke<void>("run_job", { jobId, kind, items });
+  return invoke<void>("run_job", {
+    jobId, kind, items, objectStorage, remoteStorage,
+  });
 }
 
 export async function cancelJob(jobId: string): Promise<void> {
@@ -261,6 +320,8 @@ export type RsyncRequest = {
   password: string;
   deleteExtra: boolean;
   excludePatterns: string[];
+  /** Obergrenze je Datei in Bytes; 0 bedeutet „keine Grenze". */
+  maxFileSize: number;
 };
 
 /** Synchronisiert direkt mit einem rsync-over-SSH-Endpunkt. Das Passwort wird
@@ -300,6 +361,7 @@ export async function syncPreview(
   deleteExtra: boolean,
   ignorePatterns: string[] = [],
   verifyChecksums = false,
+  maxFileSize = 0,
 ): Promise<SyncEntry[]> {
   return invoke<SyncEntry[]>("sync_preview", {
     previewId,
@@ -308,6 +370,7 @@ export async function syncPreview(
     deleteExtra,
     ignorePatterns,
     verifyChecksums,
+    maxFileSize,
   });
 }
 
@@ -317,6 +380,7 @@ export async function syncTwoWayPreview(
   right: string,
   ignorePatterns: string[] = [],
   verifyChecksums = false,
+  maxFileSize = 0,
 ): Promise<SyncEntry[]> {
   return invoke<SyncEntry[]>("sync_two_way_preview", {
     previewId,
@@ -324,6 +388,7 @@ export async function syncTwoWayPreview(
     right,
     ignorePatterns,
     verifyChecksums,
+    maxFileSize,
   });
 }
 
@@ -332,6 +397,10 @@ export type JobProgress = {
   done: number;
   total: number;
   filesDone: number;
+  /** Reeller Byte-Fortschritt eines direkten SFTP-Uploads (0…100). */
+  transferPercent?: number;
+  /** Serveroperation läuft, ihre Einzelobjekte sind jedoch nicht zählbar. */
+  indeterminate: boolean;
   current: string;
   finished: boolean;
   cancelled: boolean;
@@ -423,6 +492,37 @@ export async function openInEditor(path: string): Promise<void> {
   return invoke<void>("open_in_editor", { path });
 }
 
+/** Ein Programm, das macOS für eine bestimmte Datei anbietet. */
+export type OpenWithApp = {
+  name: string;
+  path: string;
+  isDefault: boolean;
+};
+
+export async function listOpenWithApps(path: string): Promise<OpenWithApp[]> {
+  return invoke<OpenWithApp[]>("list_open_with_apps", { path });
+}
+
+export async function openWithApp(
+  paths: string[],
+  appPath: string,
+): Promise<void> {
+  return invoke<void>("open_with_app", { paths, appPath });
+}
+
+/** Systemdialog zur Programmauswahl. `null`, wenn der Nutzer abbricht. */
+export async function chooseApplication(): Promise<string | null> {
+  return invoke<string | null>("choose_application_dialog");
+}
+
+/** Macht das Programm zum systemweiten Standard für Dateien dieses Typs. */
+export async function setDefaultApplicationFor(
+  appPath: string,
+  filePath: string,
+): Promise<void> {
+  return invoke<void>("set_default_application_for", { appPath, filePath });
+}
+
 export async function setDockBadge(label: string | null): Promise<void> {
   return invoke<void>("set_dock_badge", { label });
 }
@@ -434,9 +534,9 @@ export type Properties = {
   isDir: boolean;
   isSymlink: boolean;
   symlinkTarget: string | null;
-  size: number;
-  fileCount: number;
-  dirCount: number;
+  size: number | null;
+  fileCount: number | null;
+  dirCount: number | null;
   mtime: number;
   btime: number;
   atime: number;
@@ -483,3 +583,15 @@ export async function resolvePromiseDrop(
 }
 
 export type PaneChanged = { paneId: string; path: string };
+
+/** Eine in RemoteDeskRDP eingerichtete RDP-Verbindung. */
+export type RdpProfile = { id: string; name: string; host: string };
+
+export async function rdpProfiles(): Promise<RdpProfile[]> {
+  return invoke<RdpProfile[]>("rdp_profiles");
+}
+
+/** Reicht die Verbindung an RemoteDeskRDP weiter; die Sitzung baut jene App auf. */
+export async function rdpConnect(id: string): Promise<void> {
+  return invoke<void>("rdp_connect", { id });
+}

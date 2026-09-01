@@ -6,7 +6,7 @@ import {
   onMount,
   onCleanup,
 } from "solid-js";
-import { state, loadPane, volumesTick, handleVolumeGone } from "../state";
+import { state, loadPane, volumesTick, handleVolumeGone, bumpVolumes } from "../state";
 import {
   homeDir,
   listVolumes,
@@ -17,15 +17,35 @@ import {
   removeNetworkBookmark,
   rememberNetworkVolume,
   mountNetworkUrl,
+  mountObjectStorage,
+  loadRemotePassword,
+  mountRemote,
+  remoteMounts,
+  unmountRemote,
+  forgetObjectStorageSecret,
+  importRemoteDeskObjectStorageProfiles,
+  rdpProfiles,
+  rdpConnect,
   type Volume,
   type Favorite,
   type NetworkBookmark,
+  type RemoteMount,
+  type RdpProfile,
 } from "../ipc";
 import { askConfirm, notify, notifyError } from "./Dialogs";
-import { connectToServer } from "../network";
+import { openNetworkStorageDialog } from "./NetworkStorageDialog";
 import { t, errMsg } from "../i18n";
 import { runSyncProfile } from "../sync";
 import { syncProfiles } from "../syncProfiles";
+import {
+  mergeObjectStorageProfiles,
+  objectStorageProfiles,
+  removeObjectStorageProfile,
+  type ObjectStorageProfile,
+} from "../objectStorageProfiles";
+import { openObjectStorageDialog } from "./ObjectStorageDialog";
+import { openRemoteDialog } from "./RemoteDialog";
+import { remoteProfiles, removeRemoteProfile, type RemoteProfile } from "../remoteProfiles";
 
 function basename(p: string): string {
   const trimmed = p.endsWith("/") ? p.slice(0, -1) : p;
@@ -39,6 +59,12 @@ function isLocalVolume(vol: Volume): boolean {
   return vol.kind !== "network" && vol.kind !== "remote";
 }
 
+function remoteDescriptor(profile: RemoteProfile): string {
+  const port = profile.port ?? (profile.protocol === "sftp" ? 22 : profile.protocol === "ftpsImplicit" ? 990 : 21);
+  const scheme = profile.protocol === "sftp" ? "sftp" : profile.protocol === "ftp" ? "ftp" : "ftps";
+  return `${scheme}://${profile.username}@${profile.host}:${port}`;
+}
+
 type Menu = { idx: number; x: number; y: number } | null;
 type VolMenu = { vol: Volume; x: number; y: number } | null;
 
@@ -46,6 +72,7 @@ export function Sidebar() {
   const [favs, setFavs] = createSignal<Favorite[]>([]);
   const [vols, setVols] = createSignal<Volume[]>([]);
   const [bookmarks, setBookmarks] = createSignal<NetworkBookmark[]>([]);
+  const [remoteMountList, setRemoteMountList] = createSignal<RemoteMount[]>([]);
   const [mounting, setMounting] = createSignal<string | null>(null);
   const [editIdx, setEditIdx] = createSignal<number | null>(null);
   const [editValue, setEditValue] = createSignal("");
@@ -53,6 +80,43 @@ export function Sidebar() {
   const [volMenu, setVolMenu] = createSignal<VolMenu>(null);
   const [dragIdx, setDragIdx] = createSignal<number | null>(null);
   const [overIdx, setOverIdx] = createSignal<number | null>(null);
+  const [rdp, setRdp] = createSignal<RdpProfile[]>([]);
+  /** Läuft gerade ein Verbindungsaufbau? Dann ist die Liste gesperrt. */
+  const [connectingRdp, setConnectingRdp] = createSignal<string | null>(null);
+  let rdpUnlock: number | undefined;
+  onCleanup(() => window.clearTimeout(rdpUnlock));
+
+  /** Liest die in RemoteDeskRDP eingerichteten Verbindungen. Fehlt die App,
+   *  kommt eine leere Liste und der Abschnitt bleibt unsichtbar. */
+  async function refreshRdp() {
+    try {
+      setRdp(await rdpProfiles());
+    } catch {
+      setRdp([]);
+    }
+  }
+
+  const refreshRdpOnFocus = () => void refreshRdp();
+
+  /** Startet die Sitzung in RemoteDeskRDP. DualBeam selbst spricht kein RDP. */
+  async function openRdp(profile: RdpProfile) {
+    // Sperre gegen den zweiten Klick. RemoteDeskRDP braucht einige Sekunden,
+    // bis das Sitzungsfenster steht; ohne Rückmeldung klickt man erneut. Eine
+    // zweite Sitzung zum selben Ziel ist aber schädlich: Der RDP-Server lässt
+    // je Benutzer nur eine zu und trennt die ältere ohne jede Meldung – das
+    // Fenster verschwindet dann einfach. Im Systemprotokoll nachgewiesen.
+    if (connectingRdp()) return;
+    setConnectingRdp(profile.id);
+    try {
+      await rdpConnect(profile.id);
+      // Die Sperre läuft bewusst nach: `rdpConnect` kehrt bereits zurück,
+      // sobald macOS den Start angenommen hat – lange bevor die Sitzung steht.
+      rdpUnlock = window.setTimeout(() => setConnectingRdp(null), 4000);
+    } catch (err) {
+      setConnectingRdp(null);
+      await notifyError(errMsg(err));
+    }
+  }
 
   async function refreshVols() {
     try {
@@ -64,6 +128,251 @@ export function Sidebar() {
       setBookmarks(await listNetworkBookmarks());
     } catch {
       setBookmarks([]);
+    }
+    try {
+      setRemoteMountList(await remoteMounts());
+    } catch {
+      setRemoteMountList([]);
+    }
+  }
+
+  /** Übernimmt beim Start die bisher in RemoteDeskRDP gespeicherten S3- und
+   * Swift-Verbindungen. Die Profil-ID bleibt gleich, damit das Geheimnis aus
+   * dem Schlüsselbund ohne erneute Eingabe weiterverwendet werden kann. */
+  async function importRemoteDeskProfiles() {
+    try {
+      mergeObjectStorageProfiles(await importRemoteDeskObjectStorageProfiles());
+    } catch {
+      // RemoteDeskRDP ist optional. Ein fehlendes oder altes Profil stört
+      // DualBeam nicht und darf den Start der Seitenleiste nicht blockieren.
+    }
+  }
+
+  async function mountObjectProfile(profile: ObjectStorageProfile) {
+    if (mounting()) return;
+    const existing = objectMount(profile);
+    if (existing) {
+      await openObjectHome(profile, existing);
+      return;
+    }
+    setMounting(profile.id);
+    try {
+      const mountPath = await mountObjectStorage(profile);
+      await refreshVols();
+      const mount = objectMount(profile);
+      if (mount) await openObjectHome(profile, mount);
+      else await loadPane(state.active, mountPath, { navigationRoot: mountPath });
+    } catch (err) {
+      await askConfirm({
+        title: t("sidebar.mountFailed"),
+        message: errMsg(err),
+        okLabel: t("common.ok"),
+        cancelLabel: t("common.close"),
+      });
+    } finally {
+      setMounting(null);
+    }
+  }
+
+  /** Der Descriptor ist eine stabile Profil-ID. Über den Namen zuzuordnen
+   * würde bei zwei gleich benannten S3-Buckets wieder Doppelungen erzeugen. */
+  const objectMount = (profile: ObjectStorageProfile) =>
+    remoteMountList().find(
+      (mount) => mount.descriptor === `${profile.protocol}://${profile.id}`,
+    );
+
+  /** Der Backend-Mount meldet den tatsächlichen sichtbaren Einstieg: einen
+   * explizit konfigurierten Container oder bei einem Konto-Profil den
+   * vorhandenen Standardcontainer `default`. */
+  function objectHomePath(_profile: ObjectStorageProfile, mount: RemoteMount): string {
+    return mount.homePath ?? mount.path;
+  }
+
+  async function openObjectHome(profile: ObjectStorageProfile, mount: RemoteMount) {
+    const path = objectHomePath(profile, mount);
+    await loadPane(state.active, path, { navigationRoot: path });
+  }
+
+  /** Macht die nicht-sensitive rclone-Kennung wieder als Vorbelegung für den
+   * SFTP/FTPS-Dialog nutzbar. Das Kennwort bleibt im Schlüsselbund. */
+  function editRemoteMount(mount: RemoteMount) {
+    // Gespeicherte Profile enthalten zusätzlich den gewünschten Remote-
+    // Startordner (z. B. `default`). Der technische Mount-Descriptor enthält
+    // diesen Pfad absichtlich nicht. Deshalb zuerst immer das vollständige
+    // Lesezeichen verwenden, damit der Dialog den tatsächlich gespeicherten
+    // Pfad zeigt und beim erneuten Verbinden auch genau dort einhängt.
+    const profile = remoteProfiles().find(
+      (item) => remoteDescriptor(item) === mount.descriptor,
+    );
+    if (profile) {
+      openRemoteDialog({ ...profile, port: profile.port?.toString() ?? "" });
+      return;
+    }
+    const found = /^(sftp|ftp|ftps):\/\/([^@]+)@(.+):(\d+)$/.exec(mount.descriptor);
+    if (!found) return;
+    const protocol = found[1] === "sftp" ? "sftp" : "ftpsExplicit";
+    openRemoteDialog({
+      protocol,
+      username: found[2],
+      host: found[3],
+      port: found[4],
+      label: mount.label,
+    });
+  }
+
+  const savedRemoteMount = (profile: RemoteProfile) =>
+    remoteMountList().find((mount) => mount.descriptor === remoteDescriptor(profile));
+
+  async function openSavedRemoteProfile(profile: RemoteProfile) {
+    if (mounting()) return;
+    // Ein bereits verbundenes SFTP-Lesezeichen öffnet immer dessen sichtbare
+    // Wurzel. Nur den technischen Sidebar-Eintrag als „verbunden“ zu zeigen,
+    // während die Pane auf dem vorherigen lokalen Ordner bleibt, ist für den
+    // Benutzer nicht nachvollziehbar und war die Ursache des falschen
+    // Eindrucks eines Home-Verzeichnis-Mounts.
+    const activeMount = savedRemoteMount(profile);
+    if (activeMount) {
+      await loadPane(
+        state.active,
+        activeMount.path,
+        profile.protocol === "sftp" ? { navigationRoot: activeMount.path } : {},
+      );
+      return;
+    }
+    setMounting(profile.id);
+    try {
+      const password = await loadRemotePassword(profile);
+      if (!password) {
+        openRemoteDialog({ ...profile, port: profile.port?.toString() ?? "" });
+        return;
+      }
+      // „Wiederverbinden“ muss den alten rclone-Prozess ersetzen. Andernfalls
+      // bliebe dessen beim Start festgelegter Remote-Pfad aktiv und ein
+      // geändertes `default` würde nie sichtbar.
+      const previous = savedRemoteMount(profile);
+      if (previous) await unmountRemote(previous.path);
+      const mountPath = await mountRemote(
+        profile,
+        password,
+        profile.protocol === "ftp",
+      );
+      bumpVolumes();
+      await refreshVols();
+      await loadPane(
+        state.active,
+        mountPath,
+        profile.protocol === "sftp" ? { navigationRoot: mountPath } : {},
+      );
+    } catch (error) {
+      // Der Dialog bleibt der sichere Ausweichweg, z. B. für einen geänderten
+      // Hostschlüssel oder ein abgelaufenes Kennwort.
+      openRemoteDialog({ ...profile, port: profile.port?.toString() ?? "" });
+      await notifyError(errMsg(error));
+    } finally {
+      setMounting(null);
+    }
+  }
+
+  /** Ein bewusstes Wiederverbinden ersetzt den rclone-Mount; ein normaler
+   * Klick auf den verbundenen Eintrag navigiert dagegen nur in dessen Wurzel. */
+  async function reconnectSavedRemoteProfile(profile: RemoteProfile) {
+    if (mounting()) return;
+    const activeMount = savedRemoteMount(profile);
+    if (activeMount) {
+      setMounting(profile.id);
+      try {
+        await unmountRemote(activeMount.path);
+        bumpVolumes();
+        await refreshVols();
+      } finally {
+        setMounting(null);
+      }
+    }
+    await openSavedRemoteProfile(profile);
+  }
+
+  async function removeSavedRemote(profile: RemoteProfile) {
+    const mount = savedRemoteMount(profile);
+    if (mount) await ejectVolume(mount.path);
+    removeRemoteProfile(profile.id);
+    await refreshVols();
+  }
+
+  /** Stufe 1 wie bei WebDAV: nur aushängen, das Profil bleibt erhalten. */
+  async function ejectObjectProfile(profile: ObjectStorageProfile) {
+    const mount = objectMount(profile);
+    if (!mount || mounting()) return;
+    const confirmed = await askConfirm({
+      title: t("sidebar.unmount"),
+      message: t("sidebar.unmountConfirm", { name: profile.name }),
+      okLabel: t("sidebar.unmount"),
+      danger: true,
+    });
+    if (!confirmed) return;
+    setMounting(profile.id);
+    try {
+      await ejectVolume(mount.path);
+      await handleVolumeGone(mount.path);
+      await refreshVols();
+    } catch (err) {
+      await askConfirm({
+        title: t("sidebar.ejectFailed"),
+        message: errMsg(err),
+        okLabel: t("common.ok"),
+        cancelLabel: t("common.close"),
+      });
+    } finally {
+      setMounting(null);
+    }
+  }
+
+  async function reconnectObjectProfile(profile: ObjectStorageProfile) {
+    const mount = objectMount(profile);
+    if (!mount || mounting()) return;
+    setMounting(profile.id);
+    try {
+      await ejectVolume(mount.path);
+      await handleVolumeGone(mount.path);
+      await refreshVols();
+    } catch {
+      // Das Wiederverbinden darf auch nach einem bereits verlorenen Mount
+      // funktionieren; der anschließende Verbindungsaufbau entscheidet.
+    } finally {
+      setMounting(null);
+    }
+    await mountObjectProfile(profile);
+  }
+
+  /** Stufe 2 wie bei WebDAV: aushängen und das Profil samt Keychain-Secret
+   * dauerhaft entfernen. */
+  async function removeObjectProfile(profile: ObjectStorageProfile) {
+    if (mounting()) return;
+    const confirmed = await askConfirm({
+      title: t("object.removeFullTitle"),
+      message: t("object.removeFullMessage", { name: profile.name }),
+      okLabel: t("sidebar.removeNetwork"),
+      danger: true,
+    });
+    if (!confirmed) return;
+    setMounting(profile.id);
+    try {
+      const mount = objectMount(profile);
+      if (mount) {
+        await ejectVolume(mount.path);
+        await handleVolumeGone(mount.path);
+      }
+      await forgetObjectStorageSecret(profile.id);
+      removeObjectStorageProfile(profile.id);
+      await refreshVols();
+    } catch (err) {
+      await askConfirm({
+        title: t("sidebar.ejectFailed"),
+        message: errMsg(err),
+        okLabel: t("common.ok"),
+        cancelLabel: t("common.close"),
+      });
+    } finally {
+      setMounting(null);
     }
   }
 
@@ -333,11 +642,16 @@ export function Sidebar() {
       window.removeEventListener("click", onGlobalClick);
       window.removeEventListener("keydown", onGlobalKey);
       window.removeEventListener("dualbeam:open-favorite", onOpenFavorite);
+      window.removeEventListener("focus", refreshRdpOnFocus);
     });
     window.addEventListener("click", onGlobalClick);
     window.addEventListener("keydown", onGlobalKey);
     window.addEventListener("dualbeam:open-favorite", onOpenFavorite);
+    // Legt der Nutzer in RemoteDeskRDP eine Verbindung an und kommt zurueck,
+    // soll sie ohne Neustart erscheinen.
+    window.addEventListener("focus", refreshRdpOnFocus);
     void (async () => {
+      await importRemoteDeskProfiles();
       try {
         setFavs(await loadFavorites());
       } catch {
@@ -345,6 +659,7 @@ export function Sidebar() {
         if (!disposed) setFavs([{ name: "Home", icon: "🏠", path: home }]);
       }
       await refreshVols();
+      await refreshRdp();
       if (!disposed) volTimer = window.setInterval(refreshVols, 5000);
     })();
   });
@@ -443,16 +758,102 @@ export function Sidebar() {
             )}
           </For>
         </Show>
-        <div class="sb-section sb-section-spaced">
+        <div class="sb-section">
           <span>{t("sidebar.network")}</span>
           <button
             class="sb-add"
-            title={t("network.connectServer")}
-            onClick={() => void connectToServer()}
+            title={t("network.addDrive")}
+            onClick={() => openNetworkStorageDialog()}
           >
             ＋
           </button>
         </div>
+        <For each={objectStorageProfiles()}>
+          {(profile) => {
+            const mount = () => objectMount(profile);
+            const home = () => {
+              const current = mount();
+              return current ? objectHomePath(profile, current) : undefined;
+            };
+            return (
+            <div
+              class={`sb-item ${home() && (state[state.active].cwd === home() || state[state.active].cwd.startsWith(`${home()}/`)) ? "active" : ""} ${mount() ? "" : "disconnected"}`}
+              onClick={() => {
+                const current = mount();
+                if (current) void openObjectHome(profile, current);
+                else void mountObjectProfile(profile);
+              }}
+              title={home() ?? `${profile.protocol.toUpperCase()} — ${profile.endpoint}`}
+            >
+              <span class="sb-icon">{mount() ? "🌐" : "☁"}</span>
+              <span class="sb-label">{profile.name}</span>
+              <Show when={mounting() === profile.id}>
+                <span class="sb-spin">…</span>
+              </Show>
+              <span class="sb-actions">
+                <button
+                  class="sb-eject"
+                  title={t("object.edit")}
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    openObjectStorageDialog(profile);
+                  }}
+                >
+                  ⚙
+                </button>
+                <Show when={mount() && mounting() !== profile.id}>
+                  <button
+                    class="sb-eject"
+                    title={t("sidebar.reconnect")}
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      void reconnectObjectProfile(profile);
+                    }}
+                  >
+                    ↻
+                  </button>
+                  <button
+                    class="sb-eject"
+                    title={t("sidebar.unmount")}
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      void ejectObjectProfile(profile);
+                    }}
+                  >
+                    ⏏
+                  </button>
+                </Show>
+                <Show when={mounting() !== profile.id}>
+                  <button
+                    class="sb-eject sb-remove"
+                    title={t("sidebar.removeNetwork")}
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      void removeObjectProfile(profile);
+                    }}
+                  >
+                    ×
+                  </button>
+                </Show>
+              </span>
+            </div>
+            );
+          }}
+        </For>
+        <For each={remoteProfiles()}>
+          {(profile) => {
+            const mount = () => savedRemoteMount(profile);
+            return <div class={`sb-item ${mount() ? "" : "disconnected"}`} onClick={() => void openSavedRemoteProfile(profile)} title={mount() ? mount()!.path : `${profile.host} — ${t("sidebar.clickToMount")}`}>
+              <span class="sb-icon">{mount() ? "🌐" : "🔌"}</span>
+              <span class="sb-label">{profile.label || profile.host}</span>
+              <span class="sb-actions">
+                <button class="sb-eject" title={t("network.connectionSettings")} onClick={(event) => { event.stopPropagation(); openRemoteDialog({ ...profile, port: profile.port?.toString() ?? "" }); }}>⚙</button>
+                <Show when={mount()}><button class="sb-eject" title={t("sidebar.reconnect")} onClick={(event) => { event.stopPropagation(); void reconnectSavedRemoteProfile(profile); }}>↻</button><button class="sb-eject" title={t("sidebar.unmount")} onClick={(event) => { event.stopPropagation(); void doEject({ name: profile.label || profile.host, path: mount()!.path, kind: "remote" }); }}>⏏</button></Show>
+                <button class="sb-eject sb-remove" title={t("sidebar.removeNetwork")} onClick={(event) => { event.stopPropagation(); void removeSavedRemote(profile); }}>×</button>
+              </span>
+            </div>;
+          }}
+        </For>
         <For each={bookmarks()}>
           {(b) => (
             <div
@@ -469,8 +870,20 @@ export function Sidebar() {
               <Show when={mounting() === b.url}>
                 <span class="sb-spin">…</span>
               </Show>
-              <Show when={b.connected && mounting() !== b.url}>
+              <Show when={mounting() !== b.url}>
+                <span class="sb-actions">
                 <button
+                  class="sb-eject"
+                  title={t("network.connectionSettings")}
+                  onClick={(ev) => {
+                    ev.stopPropagation();
+                    openNetworkStorageDialog(b.url);
+                  }}
+                >
+                  ⚙
+                </button>
+                <Show when={b.connected}>
+                  <button
                   class="sb-eject"
                   title={t("sidebar.reconnect")}
                   onClick={(ev) => {
@@ -490,8 +903,7 @@ export function Sidebar() {
                 >
                   ⏏
                 </button>
-              </Show>
-              <Show when={mounting() !== b.url}>
+                </Show>
                 <button
                   class="sb-eject sb-remove"
                   title={t("sidebar.removeNetwork")}
@@ -502,15 +914,25 @@ export function Sidebar() {
                 >
                   ×
                 </button>
+                </span>
               </Show>
             </div>
           )}
         </For>
         <For
           each={vols().filter(
-            (v) =>
+              (v) =>
               (v.kind === "network" || v.kind === "remote") &&
-              !bookmarks().some((b) => b.mountPath === v.path),
+              !bookmarks().some((b) => b.mountPath === v.path) &&
+              !remoteMountList().some(
+                (mount) =>
+                  mount.path === v.path &&
+                  objectStorageProfiles().some(
+                    (profile) => mount.descriptor === `${profile.protocol}://${profile.id}`,
+                  ),
+              ) && !remoteMountList().some(
+                (mount) => mount.path === v.path && remoteProfiles().some((profile) => mount.descriptor === remoteDescriptor(profile)),
+              ),
           )}
         >
           {(v) => (
@@ -522,16 +944,21 @@ export function Sidebar() {
             >
               <span class="sb-icon">🌐</span>
               <span class="sb-label">{v.name}</span>
-                <button
+              <Show when={remoteMountList().find((mount) => mount.path === v.path)}>{(mount) =>
+                <span class="sb-actions">
+                  <button class="sb-eject" title={t("network.connectionSettings")} onClick={(ev) => { ev.stopPropagation(); editRemoteMount(mount()); }}>⚙</button>
+                  <button class="sb-eject" title={t("sidebar.reconnect")} onClick={(ev) => { ev.stopPropagation(); editRemoteMount(mount()); }}>↻</button>
+                  <button
                   class="sb-eject"
                   title={t("sidebar.unmount")}
-                onClick={(ev) => {
-                  ev.stopPropagation();
-                  void doEject(v);
-                }}
-              >
-                ⏏
-              </button>
+                    onClick={(ev) => { ev.stopPropagation(); void doEject(v); }}
+                  >⏏</button>
+                  <button class="sb-eject sb-remove" title={t("sidebar.removeNetwork")} onClick={(ev) => { ev.stopPropagation(); void doEject(v); }}>×</button>
+                </span>
+              }</Show>
+              <Show when={!remoteMountList().some((mount) => mount.path === v.path)}>
+                <button class="sb-eject" title={t("sidebar.unmount")} onClick={(ev) => { ev.stopPropagation(); void doEject(v); }}>⏏</button>
+              </Show>
             </div>
             )}
           </For>
@@ -549,6 +976,32 @@ export function Sidebar() {
                 title={`${profile.src} → ${profile.dst}`}
               >
                 <span class="sb-icon">⇄</span>
+                <span class="sb-label">{profile.name}</span>
+              </button>
+            )}
+          </For>
+        </Show>
+        <Show when={rdp().length > 0}>
+          <div class="sb-section">
+            {t("sidebar.remoteDesktop")}
+          </div>
+          <For each={rdp()}>
+            {(profile) => (
+              <button
+                class="sb-item sb-rdp"
+                onClick={() => void openRdp(profile)}
+                disabled={connectingRdp() !== null}
+                title={
+                  connectingRdp() === profile.id
+                    ? t("rdp.connecting")
+                    : t("rdp.connectTitle", {
+                        target: profile.host || profile.name,
+                      })
+                }
+              >
+                <span class="sb-icon">
+                  {connectingRdp() === profile.id ? "⏳" : "🖥"}
+                </span>
                 <span class="sb-label">{profile.name}</span>
               </button>
             )}

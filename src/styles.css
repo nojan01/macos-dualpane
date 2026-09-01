@@ -233,6 +233,10 @@
   color: var(--text);
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.18);
 }
+:root[data-theme="light"] .ctx-submenu {
+  background: #ffffff;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.18);
+}
 :root[data-theme="light"] .ctx-item:hover {
   background: var(--row-selected);
   color: var(--text);
@@ -820,7 +824,12 @@ body.col-resizing * {
 .jobbar .bar-fill {
   height: 100%;
   background: #4a90e2;
-  transition: width 80ms linear;
+  /* Bewusst `transform` statt `width`: Eine Breitenänderung erzwingt bei jedem
+     Fortschrittsschritt Layout und Neuzeichnen im Hauptthread – genau dort, wo
+     während eines Kopierjobs ohnehin die Arbeit liegt. Die Skalierung
+     übernimmt der Compositor. */
+  transform-origin: left center;
+  transition: transform 80ms linear;
 }
 .jobbar .prog {
   font-variant-numeric: tabular-nums;
@@ -952,6 +961,21 @@ body.col-resizing * {
 }
 .about-grid a:hover {
   text-decoration: underline;
+}
+/* Die Lizenz ist anklickbar und oeffnet den Lizenzdialog. Ein Button statt
+   eines Links, weil kein Ziel aufgerufen wird - sieht aber aus wie ein Link. */
+.about-grid .link-like {
+  all: unset;
+  color: #5aa6ec;
+  cursor: pointer;
+}
+.about-grid .link-like:hover {
+  text-decoration: underline;
+}
+.about-grid .link-like:focus-visible {
+  outline: 2px solid #5aa6ec;
+  outline-offset: 2px;
+  border-radius: 2px;
 }
 .about-status {
   font-size: 12px;
@@ -1191,6 +1215,39 @@ body.col-resizing * {
   gap: 6px;
   margin: 0 0 12px;
 }
+.object-profile-modal {
+  width: min(720px, calc(100vw - 32px));
+  max-height: calc(100vh - 40px);
+  overflow: auto;
+}
+.network-storage-modal { width: min(540px, calc(100vw - 32px)); }
+.network-storage-modal > label { display: grid; gap: 6px; margin: 16px 0; color: var(--text-secondary); font-size: 12px; }
+.network-storage-modal input, .network-storage-modal select { width: 100%; }
+.network-storage-note { color: var(--text-secondary); margin: 18px 0; }
+.object-profile-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  margin: 16px 0;
+}
+.object-profile-grid label {
+  display: grid;
+  gap: 5px;
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+.object-profile-grid label.wide { grid-column: span 2; }
+.object-profile-grid input,
+.object-profile-grid select { width: 100%; min-width: 0; }
+.object-secret-status { color: #74d7a8; font-size: 11px; }
+.object-secret-status.missing { color: #e6b36a; }
+.object-profile-toggle { align-items: center; grid-template-columns: auto 1fr; }
+.sb-muted { margin-left: auto; color: var(--text-muted); font-size: 10px; }
+@media (max-width: 600px) {
+  .object-profile-grid { grid-template-columns: 1fr; }
+  .object-profile-grid label.wide { grid-column: span 1; }
+}
+
 .sync-profiles select,
 .sync-ignore textarea {
   background: #1e1e1e;
@@ -1270,6 +1327,17 @@ body.col-resizing * {
   resize: vertical;
   margin: 0 0 6px;
   padding: 6px;
+}
+.sync-max-size {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0 0 6px;
+}
+.sync-max-size input {
+  width: 90px;
+  box-sizing: border-box;
+  padding: 4px 6px;
 }
 .modal-actions button {
   background: #4a90e2;
@@ -1547,6 +1615,12 @@ body.dragging * {
   cursor: pointer;
   opacity: 0.65;
 }
+.sb-actions {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+}
+.sb-actions .sb-eject { margin-left: 0; }
 .sb-item:hover .sb-eject {
   opacity: 1;
 }
@@ -1572,6 +1646,14 @@ body.dragging * {
 .sb-sync-profile:disabled {
   cursor: default;
   opacity: 0.55;
+}
+.sb-rdp {
+  width: 100%;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
 }
 .sb-empty {
   padding: 2px 14px;
@@ -1821,6 +1903,57 @@ body.dragging * {
 .ctx-item.danger:hover {
   background: #6a2222;
   color: #fff;
+}
+
+/* "Öffnen mit": Untermenü, das beim Überfahren des Eintrags aufklappt. */
+.ctx-sub {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.ctx-sub-arrow {
+  opacity: 0.6;
+}
+.ctx-submenu {
+  display: none;
+  position: absolute;
+  top: -5px;
+  left: 100%;
+  width: 240px;
+  max-height: 320px;
+  overflow-y: auto;
+  background: var(--panel, #2a2a2a);
+  /* Ohne diese Angabe erbte das Untermenü die weisse Schriftfarbe, die der
+     übergeordnete Eintrag beim Überfahren annimmt. */
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+  padding: 4px 0;
+}
+/* An der rechten Fensterkante nach links aufklappen. */
+.ctx-submenu.flip {
+  left: auto;
+  right: 100%;
+}
+.ctx-sub:hover > .ctx-submenu {
+  display: block;
+}
+.ctx-app {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.ctx-app-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.ctx-hint {
+  padding: 6px 12px;
+  color: var(--muted, #999);
+  white-space: nowrap;
 }
 
 .preview-pane {
@@ -2252,15 +2385,19 @@ body.dragging * {
   white-space: nowrap;
 }
 .jobbar-fill {
-  width: var(--pct, 0%);
+  /* Volle Breite, sichtbarer Anteil über die Skalierung (0…1). */
+  width: 100%;
+  transform: scaleX(var(--progress, 0));
 }
 .jobbar-fill.indeterminate {
-  width: 32% !important;
   animation: jobbar-indeterminate 1.15s ease-in-out infinite;
 }
 @keyframes jobbar-indeterminate {
-  from { transform: translateX(-120%); }
-  to { transform: translateX(420%); }
+  /* scaleX(0.32) ersetzt die frühere feste Breite von 32 %. Weil die
+     Verschiebung mitskaliert wird, bleiben die Prozentwerte dieselben wie
+     zuvor – der Lauf sieht unverändert aus. */
+  from { transform: scaleX(0.32) translateX(-120%); }
+  to { transform: scaleX(0.32) translateX(420%); }
 }
 .sidebar-ctx {
   left: var(--cx, 0px);

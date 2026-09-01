@@ -6,8 +6,22 @@ Macs läuft.
 
 ## Aktueller Stand
 
-- Code-Signing-Zertifikate im Schlüsselbund: **keine** (`security find-identity -v -p codesigning` → 0 valid identities).
-- Es muss also zuerst ein Zertifikat beschafft werden.
+Signierung und Notarisierung sind eingerichtet und laufen ueber ein Skript:
+
+```bash
+scripts/release-macos.sh              # persoenliche Variante (mit HiDrive)
+scripts/release-macos.sh --public     # oeffentliche Variante (ohne HiDrive)
+scripts/release-macos.sh --reset      # hinterlegte Zugangsdaten loeschen
+```
+
+Das Skript holt Signaturkennung und Team-ID aus `src-tauri/tauri.conf.json`,
+fragt die Zugangsdaten fuer die Notarisierung beim ersten Lauf einmalig ab und
+hinterlegt sie im Schluesselbund. Danach laeuft es ohne Eingabe. Am Ende prueft
+es Signatur, Ticket, das mitgelieferte `rclone` und das Gatekeeper-Urteil nach
+und bricht ab, wenn eine dieser Pruefungen fehlschlaegt.
+
+Die Abschnitte 1 bis 5 beschreiben, was dahinter steckt und was bei einem
+Zertifikatswechsel oder auf einem neuen Rechner zu tun ist.
 
 ---
 
@@ -103,6 +117,23 @@ npm run tauri:build
 Tauri signiert → notarisiert → „stapelt" (staplet) das Ticket automatisch in
 DMG/App.
 
+> Genau das erledigt `scripts/release-macos.sh`. Es setzt Variante A, zieht das
+> Passwort aber aus dem Schlüsselbund statt aus der Umgebung. Werden die
+> Variablen nur im Terminal gesetzt, sind sie nach dessen Ende weg — bei 0.3.0
+> war das der Fall, für 0.4.0 mussten sie deshalb neu beschafft werden.
+
+**Wichtig: Tauri notarisiert nur die `.app`** und stapelt das Ticket auch nur
+dort. Das DMG wird zwar signiert, bleibt aber ohne Ticket. Beim Öffnen einer
+geladenen Datei prüft Gatekeeper jedoch zuerst das DMG. Es muss deshalb getrennt
+eingereicht werden — `scripts/release-macos.sh` tut das im Anschluss an den
+Build:
+
+```bash
+xcrun notarytool submit DualBeam_0.4.0_aarch64.dmg \
+  --apple-id "…" --password "…" --team-id "TXF2V79Z6N" --wait
+xcrun stapler staple DualBeam_0.4.0_aarch64.dmg
+```
+
 ## 6. Verifizieren
 
 ```bash
@@ -113,19 +144,19 @@ spctl -a -vvv -t install \
   src-tauri/target/release/bundle/macos/DualBeam.app
 
 xcrun stapler validate \
-  src-tauri/target/release/bundle/dmg/DualBeam_0.2.0_aarch64.dmg
+  src-tauri/target/release/bundle/dmg/DualBeam_0.4.0_aarch64.dmg
 ```
 
 ---
 
 ## Kurzfassung der To-dos
 
-1. Apple Developer Program beitreten (99 USD/Jahr).
-2. „Developer ID Application"-Zertifikat erstellen & installieren.
-3. `APPLE_SIGNING_IDENTITY` setzen (oder in `tauri.conf.json`).
-4. `entitlements.plist` mit Hardened-Runtime-Rechten anlegen und verlinken.
-5. Notarisierungs-Credentials (`APPLE_ID` / `APPLE_PASSWORD` / `APPLE_TEAM_ID`) setzen.
-6. `npm run tauri:build` → fertig signiert & notarisiert.
+1. ~~Apple Developer Program beitreten (99 USD/Jahr).~~ **erledigt**
+2. ~~„Developer ID Application"-Zertifikat erstellen & installieren.~~ **erledigt**
+3. ~~`APPLE_SIGNING_IDENTITY` setzen (oder in `tauri.conf.json`).~~ **erledigt**
+4. ~~`entitlements.plist` mit Hardened-Runtime-Rechten anlegen und verlinken.~~ **erledigt**
+5. ~~Notarisierungs-Credentials setzen.~~ **erledigt** (im Schlüsselbund, siehe oben)
+6. `scripts/release-macos.sh` aufrufen → fertig signiert & notarisiert.
 
 ---
 
@@ -135,12 +166,15 @@ Es gibt zwei Build-Varianten, gesteuert über das Cargo-Feature `hidrive`:
 
 | Variante | Befehl | IONOS-HiDrive-Voreinstellung |
 | --- | --- | --- |
-| **Persönlich** (Standard) | `npm run tauri:build` | enthalten |
-| **Öffentlich** (Release) | `npm run tauri:build:public` | entfernt |
+| **Persönlich** | `npm run tauri:build` | enthalten |
+| **Öffentlich** (Release, Standard) | `npm run tauri:build:public` | entfernt |
 
-- Die öffentliche Version wird mit `tauri build --no-default-features` gebaut.
-  Dadurch wird der HiDrive-Code per `#[cfg(feature = "hidrive")]` gar nicht erst
-  einkompiliert – es landet **keine** personenbezogene Voreinstellung im Binary.
+- Das Cargo-Feature `hidrive` ist **nicht** voreingestellt (`default = []`). Ein Bau
+  ohne ausdrückliche Angabe liefert also immer die öffentliche Fassung – wer den
+  Schalter vergisst, veröffentlicht keine personenbezogene Adresse.
+- Die persönliche Variante fordert das Feature ausdrücklich an
+  (`tauri build --features hidrive`). Nur dann wird der HiDrive-Code per
+  `#[cfg(feature = "hidrive")]` überhaupt einkompiliert.
 - Die generische Netzwerk-Funktion (beliebige WebDAV/SMB-URL verbinden, mounten,
   trennen) bleibt in beiden Varianten erhalten; nur das fest vorkonfigurierte
   HiDrive-Lesezeichen entfällt in der öffentlichen Version.

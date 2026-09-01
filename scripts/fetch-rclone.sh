@@ -78,6 +78,16 @@ for arch in $arches; do
   mv "$work/rclone-$RCLONE_VERSION-osx-$arch/rclone" "$dest"
   chmod +x "$dest"
 
+  # Die MIT-Lizenz verlangt, dass Urhebervermerk und Lizenztext der Weitergabe
+  # beiliegen. Das Binaerarchiv von downloads.rclone.org enthaelt keinen
+  # Lizenztext (geprueft fuer v1.74.4: nur rclone, Handbuch, README, git-log).
+  # Er kommt deshalb aus dem Quellrepository am selben Versionsschild.
+  license_dir="$repo_root/src-tauri/resources/licenses"
+  mkdir -p "$license_dir"
+  curl --fail --silent --show-error --location \
+    --output "$license_dir/RCLONE-LICENSE.txt" \
+    "https://raw.githubusercontent.com/rclone/rclone/$RCLONE_VERSION/COPYING"
+
   rm -rf "$work"
   trap - EXIT
   echo "Abgelegt: ${dest#"$repo_root"/}"

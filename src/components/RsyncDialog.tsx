@@ -64,6 +64,9 @@ export function RsyncDialog() {
         password: current.password,
         deleteExtra: current.deleteExtra,
         excludePatterns: [],
+        // Dieser direkte rsync-Dialog kennt keine Ausschlüsse; die Größengrenze
+        // gehört zum Sync-Profil. 0 bedeutet „keine Grenze".
+        maxFileSize: 0,
       });
       setDialog(null);
     } catch (error) {

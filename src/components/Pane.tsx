@@ -50,10 +50,15 @@ import {
   dragIconPath,
   openTerminal,
   openInEditor,
+  listOpenWithApps,
+  openWithApp,
+  chooseApplication,
+  setDefaultApplicationFor,
+  type OpenWithApp,
 } from "../ipc";
 import { openSearch } from "./SearchDialog";
 import { startDrag } from "@crabnebula/tauri-plugin-drag";
-import { askConfirm } from "./Dialogs";
+import { askConfirm, notifyError } from "./Dialogs";
 import { openProperties } from "./PropertiesDialog";
 import { syncToOther } from "../sync";
 import { openRenameDialog } from "../rename";
@@ -62,6 +67,10 @@ import { PathBar } from "./PathBar";
 import { TabBar } from "./TabBar";
 import { FileIcon } from "./FileIcon";
 import { t, errMsg } from "../i18n";
+
+// Breite des "Öffnen mit"-Untermenüs. Muss zur Regel `.ctx-submenu` in
+// styles.css passen, damit die Platzprüfung an der rechten Fensterkante stimmt.
+const OPEN_WITH_WIDTH = 240;
 
 function fmtSize(n: number, isDir: boolean): string {
   if (isDir) return "—";
@@ -81,6 +90,34 @@ function fmtDate(unix: number): string {
   const d = new Date(unix * 1000);
   const pad = (n: number) => String(n).padStart(2, "0");
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
+// Netzprotokolle liefern über NSWorkspace unterschiedlich aussehende (und bei
+// virtuellen S3/Swift-Pfaden oft nur weiße) Symbole. DualBeam verwendet daher
+// für alle Netzlaufwerke dieselben dateitypabhängigen Symbole. Lokale Dateien
+// behalten ihre nativen macOS-Icons.
+
+function entryFallbackIcon(entry: {
+  name: string;
+  isDir: boolean;
+  isSymlink: boolean;
+}): string {
+  if (entry.isDir) {
+    return entry.name.toLowerCase().endsWith(".app") ? "🟦" : "📁";
+  }
+  if (entry.isSymlink) return "🔗";
+  const extension = entry.name.split(".").pop()?.toLowerCase() ?? "";
+  if (["zip", "7z", "rar", "tar", "gz", "bz2", "xz"].includes(extension)) return "📦";
+  if (["pdf"].includes(extension)) return "📕";
+  if (["doc", "docx", "odt", "rtf"].includes(extension)) return "📘";
+  if (["xls", "xlsx", "ods", "csv"].includes(extension)) return "📗";
+  if (["ppt", "pptx", "odp"].includes(extension)) return "📙";
+  if (["jpg", "jpeg", "png", "gif", "webp", "heic", "tiff", "svg"].includes(extension)) return "🖼️";
+  if (["mp3", "m4a", "aac", "wav", "flac", "ogg"].includes(extension)) return "🎵";
+  if (["mp4", "mov", "mkv", "avi", "webm"].includes(extension)) return "🎬";
+  if (["dmg", "iso"].includes(extension)) return "💿";
+  if (["txt", "md", "json", "xml", "yaml", "yml", "log"].includes(extension)) return "📝";
+  return "📄";
 }
 
 export function Pane(props: { id: PaneId }) {
@@ -254,7 +291,44 @@ export function Pane(props: { id: PaneId }) {
     x: number;
     y: number;
   } | null>(null);
-  const closeMenu = () => setMenu(null);
+  const closeMenu = () => {
+    setMenu(null);
+    resetOpenWith();
+  };
+
+  // ---------- Untermenü "Öffnen mit" ----------
+  // Die Programmliste kostet einen LaunchServices-Aufruf. Sie wird deshalb
+  // erst geholt, wenn der Zeiger den Menüpunkt erreicht, nicht schon beim
+  // Öffnen des Kontextmenüs.
+  const [owApps, setOwApps] = createSignal<OpenWithApp[] | null>(null);
+  const [owFlip, setOwFlip] = createSignal(false);
+  let owLoading = false;
+
+  const resetOpenWith = () => {
+    setOwApps(null);
+    setOwFlip(false);
+    owLoading = false;
+  };
+
+  const loadOpenWith = (ev: MouseEvent) => {
+    // Reicht der Platz rechts nicht, klappt das Untermenü nach links auf.
+    const el = ev.currentTarget as HTMLElement;
+    const r = el.getBoundingClientRect();
+    setOwFlip(r.right + OPEN_WITH_WIDTH > window.innerWidth - 8);
+
+    if (owApps() !== null || owLoading) return;
+    const e = firstSel();
+    if (!e) return;
+    owLoading = true;
+    listOpenWithApps(e.path)
+      .then(setOwApps)
+      // Ein Fehlschlag darf das Menü nicht offen hängen lassen; die leere
+      // Liste zeigt dem Nutzer, dass nichts zur Auswahl steht.
+      .catch(() => setOwApps([]))
+      .finally(() => {
+        owLoading = false;
+      });
+  };
 
   const onRowContextMenu = (ev: MouseEvent, idx: number) => {
     ev.preventDefault();
@@ -264,6 +338,7 @@ export function Pane(props: { id: PaneId }) {
     const e = p.entries[idx];
     if (!e) return;
     if (!p.selected.has(e.path)) selectOnly(id, idx);
+    resetOpenWith();
     setMenu({ kind: "row", x: ev.clientX, y: ev.clientY });
   };
   const onEmptyContextMenu = (ev: MouseEvent) => {
@@ -301,6 +376,121 @@ export function Pane(props: { id: PaneId }) {
     const e = firstSel();
     if (e) await quickLook(e.path);
   };
+  /** Programmname aus dem Bündelpfad, wenn die Liste keinen mitliefert. */
+  const appLabel = (p: string) =>
+    (p.split("/").pop() ?? p).replace(/\.app$/i, "");
+  /** Endung samt Punkt; ohne Endung der ganze Name, damit die Rückfrage
+   *  trotzdem etwas Greifbares nennt. */
+  const fileExt = (name: string) => {
+    const i = name.lastIndexOf(".");
+    return i > 0 ? name.slice(i) : name;
+  };
+
+  const runOpenWith = async (
+    entries: ReturnType<typeof sel>,
+    appPath: string,
+    always: boolean,
+    appName?: string,
+  ) => {
+    const first = entries[0];
+    if (!first) return;
+    try {
+      if (always) {
+        // Die Zuordnung gilt systemweit, nicht nur in DualBeam – das sollte
+        // niemand versehentlich auslösen.
+        const ok = await askConfirm({
+          title: t("pane.ctx.setDefaultTitle"),
+          message: t("pane.ctx.setDefaultMsg", {
+            ext: fileExt(first.name),
+            app: appName ?? appLabel(appPath),
+          }),
+          okLabel: t("pane.ctx.setDefaultOk"),
+        });
+        if (!ok) return;
+        await setDefaultApplicationFor(appPath, first.path);
+      }
+      await openWithApp(
+        entries.map((e) => e.path),
+        appPath,
+      );
+    } catch (e) {
+      await notifyError(errMsg(e));
+    }
+  };
+
+  const actOpenWith = (appPath: string, always: boolean, appName?: string) => {
+    // Verzeichnisse bleiben aussen vor: LaunchServices würde sie an den Finder
+    // weiterreichen statt an das gewählte Programm.
+    const entries = sel().filter((e) => !e.isDir);
+    closeMenu();
+    void runOpenWith(entries, appPath, always, appName);
+  };
+
+  const actOpenWithOther = async (always: boolean) => {
+    // Die Auswahl vor dem Schliessen sichern: Der Dialog läuft asynchron, bis
+    // zu seiner Rückkehr kann sich die Markierung geändert haben.
+    const entries = sel().filter((e) => !e.isDir);
+    closeMenu();
+    if (entries.length === 0) return;
+    try {
+      const app = await chooseApplication();
+      // Abbruch ist kein Fehler und bleibt deshalb ohne Meldung.
+      if (!app) return;
+      await runOpenWith(entries, app, always);
+    } catch (e) {
+      await notifyError(errMsg(e));
+    }
+  };
+  /** Menüeintrag samt Untermenü – einmal zum einmaligen Öffnen, einmal zum
+   *  dauerhaften Festlegen. Beide teilen sich dieselbe Programmliste. */
+  const openWithEntry = (always: boolean) => (
+    <div class="ctx-item ctx-sub" onMouseEnter={loadOpenWith}>
+      <span>
+        {always ? t("pane.ctx.openWithAlways") : t("pane.ctx.openWith")}
+      </span>
+      <span class="ctx-sub-arrow" aria-hidden="true">
+        ›
+      </span>
+      <div class="ctx-submenu" classList={{ flip: owFlip() }}>
+        <Show
+          when={owApps()}
+          fallback={
+            <div class="ctx-hint">{t("pane.ctx.openWithLoading")}</div>
+          }
+        >
+          {(apps) => (
+            <Show
+              when={apps().length > 0}
+              fallback={
+                <div class="ctx-hint">{t("pane.ctx.openWithEmpty")}</div>
+              }
+            >
+              <For each={apps()}>
+                {(a) => (
+                  <div
+                    class="ctx-item ctx-app"
+                    onClick={() => actOpenWith(a.path, always, a.name)}
+                  >
+                    <FileIcon path={a.path} fallback="📦" />
+                    <span class="ctx-app-name">
+                      {a.isDefault && !always
+                        ? t("pane.ctx.openWithDefault", { name: a.name })
+                        : a.name}
+                    </span>
+                  </div>
+                )}
+              </For>
+            </Show>
+          )}
+        </Show>
+        <div class="ctx-sep" />
+        <div class="ctx-item" onClick={() => void actOpenWithOther(always)}>
+          {t("pane.ctx.openWithOther")}
+        </div>
+      </div>
+    </div>
+  );
+
   const actRename = () => {
     closeMenu();
     beginRename();
@@ -601,15 +791,8 @@ export function Pane(props: { id: PaneId }) {
                   <div class="name">
                     <FileIcon
                       path={e.path}
-                      fallback={
-                        e.isDir && e.name.toLowerCase().endsWith(".app")
-                          ? "🟦"
-                          : e.isDir
-                            ? "📁"
-                            : e.isSymlink
-                              ? "🔗"
-                              : "📄"
-                      }
+                      fallback={entryFallbackIcon(e)}
+                      nativeIcon={!pane().isNetwork}
                     />
                     <Show
                       when={
@@ -729,6 +912,10 @@ export function Pane(props: { id: PaneId }) {
                 <div class="ctx-item" onClick={() => void actOpen()}>
                   {t("pane.ctx.open")}
                 </div>
+                <Show when={firstSel() && !firstSel()!.isDir}>
+                  {openWithEntry(false)}
+                  {openWithEntry(true)}
+                </Show>
                 <div class="ctx-item" onClick={() => void actQuickLook()}>
                   {t("pane.ctx.quickLook")}
                 </div>

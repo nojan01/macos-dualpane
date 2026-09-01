@@ -1,10 +1,28 @@
 import { For } from "solid-js";
-import { state, setActive, loadPane, goBackInHistory } from "../state";
+import { state, setActive, loadPane, goBackInHistory, canNavigateUp } from "../state";
 import { t } from "../i18n";
 import type { PaneId } from "../types";
 
-function segments(path: string): { label: string; path: string }[] {
+function segments(path: string, navigationRoot?: string): { label: string; path: string }[] {
   if (!path) return [];
+  const normalizedPath = path.length > 1 ? path.replace(/\/+$/, "") : path;
+  const normalizedRoot = navigationRoot && (navigationRoot.length > 1
+    ? navigationRoot.replace(/\/+$/, "")
+    : navigationRoot);
+  if (
+    normalizedRoot &&
+    (normalizedPath === normalizedRoot || normalizedPath.startsWith(`${normalizedRoot}/`))
+  ) {
+    const rootLabel = normalizedRoot.split("/").filter(Boolean).pop() || "/";
+    const segs: { label: string; path: string }[] = [{ label: rootLabel, path: normalizedRoot }];
+    const relative = normalizedPath.slice(normalizedRoot.length).split("/").filter(Boolean);
+    let acc = normalizedRoot;
+    for (const part of relative) {
+      acc += `/${part}`;
+      segs.push({ label: part, path: acc });
+    }
+    return segs;
+  }
   const parts = path.split("/").filter(Boolean);
   const segs: { label: string; path: string }[] = [{ label: "/", path: "/" }];
   let acc = "";
@@ -17,8 +35,9 @@ function segments(path: string): { label: string; path: string }[] {
 
 export function PathBar(props: { id: PaneId }) {
   const id = props.id;
-  const segs = () => segments(state[id].cwd);
+  const segs = () => segments(state[id].cwd, state[id].navigationRoot);
   const goUp = () => {
+    if (!canNavigateUp(id)) return;
     const cwd = state[id].cwd;
     if (!cwd || cwd === "/") return;
     const idx = cwd.lastIndexOf("/");
@@ -31,7 +50,7 @@ export function PathBar(props: { id: PaneId }) {
         class="path-up"
         title={t("path.up")}
         onClick={(e) => { e.stopPropagation(); goUp(); }}
-        disabled={!state[id].cwd || state[id].cwd === "/"}
+        disabled={!canNavigateUp(id)}
       >↑</button>
       <button
         class="path-back"

@@ -194,7 +194,7 @@ export function FnBar() {
       >
         <b>⌘.</b> {t("fn.hidden")}
       </button>
-      <span class="fn-copyright" title="DualBeam — MIT License">
+      <span class="fn-copyright" title={t("fn.copyright.title")}>
         © 2026 N.J. · MIT
       </span>
     </div>

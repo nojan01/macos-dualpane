@@ -1,10 +1,21 @@
 // Orchestriert Datei-Operationen: Konfliktprüfung, Job-Lauf, Refresh.
 import { createSignal } from "solid-js";
-import { state, setState, refreshPane, loadPane } from "./state";
+import {
+  state,
+  setState,
+  refreshPane,
+  loadPane,
+} from "./state";
 import { askPrompt, askConfirm, notifyError } from "./components/Dialogs";
 import type { Entry, PaneId } from "./types";
 import { t, errMsg } from "./i18n";
-import { isSameOrChildPath, joinPath, splitName, uniqueName } from "./paths";
+import {
+  folderCopyDestination,
+  isSameOrChildPath,
+  joinPath,
+  splitName,
+  uniqueName,
+} from "./paths";
 import {
   checkConflicts,
   runJob,
@@ -28,6 +39,8 @@ import {
 import { openSyncDialog } from "./sync";
 import { rememberStagedDelete } from "./undo";
 import { reportKnownDeleteError } from "./deleteErrors";
+import { objectStorageDeleteTarget, objectStorageTransferTarget } from "./objectStorageProfiles";
+import { remoteStorageDeleteTarget, remoteStorageTransferTarget } from "./remoteProfiles";
 
 const newJobId = () => `job-${Date.now()}-${Math.floor(Math.random() * 1e6)}`;
 
@@ -94,7 +107,9 @@ export async function transferEntries(
   // oder verschoben werden. Ohne diese Schranke würde der rekursive Backend-
   // Kopierer seinen gerade erzeugten Zielbaum erneut mitkopieren.
   const recursiveTarget = srcEntries.find(
-    (e) => e.isDir && isSameOrChildPath(e.path, joinPath(dstCwd, e.name)),
+    (e) =>
+      e.isDir &&
+      isSameOrChildPath(e.path, folderCopyDestination(e.name, dstCwd)),
   );
   if (recursiveTarget) {
     await notifyError(
@@ -103,15 +118,35 @@ export async function transferEntries(
     return;
   }
 
-  let items: JobItem[] = srcEntries.map((e) => ({
-    src: e.path,
-    dst: joinPath(dstCwd, e.name),
-    overwrite: false,
-  }));
+  // Wird ein Ordner in einen bereits geöffneten bzw. beim Drag-and-Drop
+  // direkt getroffenen Ordner mit demselben Namen kopiert, ist ein zweiter
+  // gleichnamiger Unterordner nie sinnvoll. Statt `Screenshots/Screenshots`
+  // werden die Inhalte in den vorhandenen Zielordner zusammengeführt. Das
+  // entspricht dem erwarteten Verhalten beim Ablegen auf einen gleichnamigen
+  // Netzordner und vermeidet bei WebDAV die erst zeitversetzt sichtbare zweite
+  // Collection.
+  const mergedDirectorySources = new Set<string>();
+  let items: JobItem[] = srcEntries.map((e) => {
+    const destination = e.isDir
+      ? folderCopyDestination(e.name, dstCwd)
+      : joinPath(dstCwd, e.name);
+    const mergeIntoTarget = e.isDir && destination === dstCwd;
+    if (mergeIntoTarget) mergedDirectorySources.add(e.path);
+    return {
+      src: e.path,
+      dst: destination,
+      overwrite: false,
+    };
+  });
 
   let conflicts: string[];
   try {
-    conflicts = await checkConflicts(items);
+    // Der bereits vorhandene Zielordner ist beim Zusammenführen kein
+    // Namenskonflikt. Konflikte innerhalb dieses Ordners behandelt der
+    // rekursive Kopierer wie gewohnt ohne Überschreiben.
+    conflicts = await checkConflicts(
+      items.filter((item) => !mergedDirectorySources.has(item.src)),
+    );
   } catch (e) {
     await notifyError(t("common.error", { msg: errMsg(e) }));
     return;
@@ -160,7 +195,9 @@ export async function transferEntries(
   const id = newJobId();
   setState("job", { id, kind, done: 0, total: 0, filesDone: 0, current: "" });
   try {
-    await runJob(id, kind, items);
+    const objectStorage = kind === "copy" ? await objectStorageTransferTarget(items) : undefined;
+    const remoteStorage = kind === "copy" ? await remoteStorageTransferTarget(items) : undefined;
+    await runJob(id, kind, items, objectStorage, remoteStorage);
   } catch (e) {
     await notifyError(t("common.error", { msg: errMsg(e) }));
   } finally {
@@ -235,7 +272,13 @@ export async function duplicateSelected() {
   const id = newJobId();
   setState("job", { id, kind: "copy", done: 0, total: 0, filesDone: 0, current: "" });
   try {
-    await runJob(id, "copy", items);
+    await runJob(
+      id,
+      "copy",
+      items,
+      await objectStorageTransferTarget(items),
+      await remoteStorageTransferTarget(items),
+    );
   } catch (err) {
     await notifyError(t("common.error", { msg: errMsg(err) }));
   } finally {
@@ -276,6 +319,7 @@ export async function deleteSelected(skipConfirm = false) {
   try {
     if (onNetwork) {
       const id = newJobId();
+      const paths = sel.map((e) => e.path);
       setState("job", {
         id,
         kind: "delete",
@@ -284,7 +328,19 @@ export async function deleteSelected(skipConfirm = false) {
         filesDone: 0,
         current: "",
       });
-      await runNetworkDelete(id, sel.map((e) => e.path));
+      let objectStorage;
+      let remoteStorage;
+      try {
+        objectStorage = await objectStorageDeleteTarget(
+          paths,
+          sel.filter((entry) => entry.isDir).map((entry) => entry.path),
+        );
+        if (!objectStorage) remoteStorage = await remoteStorageDeleteTarget(paths);
+      } catch {
+        // Nicht jedes Netzlaufwerk ist ein von DualBeam verwalteter Objekt-
+        // Speicher. Dann bleibt der bewährte generische Löschweg aktiv.
+      }
+      await runNetworkDelete(id, paths, objectStorage, remoteStorage);
     } else {
       const batch = await stageDeleteForUndo(sel.map((e) => e.path));
       if (batch.items.length > 0) rememberStagedDelete(batch.items);
@@ -514,5 +570,10 @@ export async function syncPanes(direction: "left" | "right") {
   const dstCwd = state[dst].cwd;
   if (!dstCwd || srcCwd === dstCwd) return;
   const name = srcCwd.replace(/\/+$/, "").split("/").pop() || srcCwd;
-  await openSyncDialog(srcCwd, dstCwd, name, dst);
+  await openSyncDialog(
+    srcCwd,
+    folderCopyDestination(name, dstCwd),
+    name,
+    dst,
+  );
 }
