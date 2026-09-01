@@ -350,11 +350,15 @@ fn list_dir_blocking(path: String, show_hidden: bool) -> Result<Vec<Entry>, Stri
             .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
             .map(|d| d.as_secs() as i64)
             .unwrap_or(0);
-        let mtime = if is_object_storage && is_dir && reported_mtime == RCLONE_VIRTUAL_DIRECTORY_TIME {
-            remembered_object_directory_times.get(&name).copied().unwrap_or(0)
-        } else {
-            reported_mtime
-        };
+        let mtime =
+            if is_object_storage && is_dir && reported_mtime == RCLONE_VIRTUAL_DIRECTORY_TIME {
+                remembered_object_directory_times
+                    .get(&name)
+                    .copied()
+                    .unwrap_or(0)
+            } else {
+                reported_mtime
+            };
         let ext = Path::new(&name)
             .extension()
             .and_then(|s| s.to_str())
@@ -414,7 +418,9 @@ fn list_dir_blocking(path: String, show_hidden: bool) -> Result<Vec<Entry>, Stri
 #[tauri::command]
 fn open_default(path: String) -> Result<(), String> {
     let p = expand_tilde(&path);
-    let p = remote::download_object_storage_file(&p).transpose()?.unwrap_or(p);
+    let p = remote::download_object_storage_file(&p)
+        .transpose()?
+        .unwrap_or(p);
     std::process::Command::new("open")
         .arg(&p)
         .status()
@@ -800,7 +806,8 @@ fn undo_staging_dir_for(original: &Path, token: &str) -> Result<PathBuf, String>
         return Ok(default);
     }
     let parent = original.parent().unwrap_or_else(|| Path::new("/"));
-    let app_base = dirs::data_local_dir().ok_or_else(|| "Undo-Ordner nicht verfügbar".to_string())?;
+    let app_base =
+        dirs::data_local_dir().ok_or_else(|| "Undo-Ordner nicht verfügbar".to_string())?;
     match (device_of(parent), device_of(&app_base)) {
         (Some(a), Some(b)) if a == b => Ok(default),
         (Some(_), _) => Ok(volume_root_of(parent).join(".DualBeamUndo").join(token)),
@@ -2563,7 +2570,6 @@ impl<'a> JobCtx<'a> {
             },
         );
     }
-
 }
 
 fn remove_path(p: &Path) -> std::io::Result<()> {
@@ -3074,7 +3080,10 @@ fn run_webdav_curl(config: String, cancel: &AtomicBool) -> std::io::Result<std::
             Ok(None) if cancel.load(Ordering::SeqCst) => {
                 let _ = child.kill();
                 let _ = child.wait();
-                return Err(std::io::Error::new(std::io::ErrorKind::Interrupted, "cancelled"));
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::Interrupted,
+                    "cancelled",
+                ));
             }
             Ok(None) => std::thread::sleep(Duration::from_millis(50)),
             Err(error) => return Err(error),
@@ -3312,19 +3321,18 @@ fn webdav_server_file_metadata_result(
     context: &WebDavListingContext,
     path: &Path,
 ) -> std::io::Result<Option<WebDavFileMetadata>> {
-    let url = webdav_remote_url(&context.source_url, &context.mountpoint, path, false)
-        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "ungültiger WebDAV-Pfad"))?;
+    let url = webdav_remote_url(&context.source_url, &context.mountpoint, path, false).ok_or_else(
+        || std::io::Error::new(std::io::ErrorKind::InvalidInput, "ungültiger WebDAV-Pfad"),
+    )?;
     let cancel = AtomicBool::new(false);
     webdav_file_metadata_optional(&url, &context.user, &context.password, &cancel)
 }
 
 #[cfg(target_os = "macos")]
-fn webdav_server_path_exists(
-    context: &WebDavListingContext,
-    path: &Path,
-) -> std::io::Result<bool> {
-    let url = webdav_remote_url(&context.source_url, &context.mountpoint, path, true)
-        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "ungültiger WebDAV-Pfad"))?;
+fn webdav_server_path_exists(context: &WebDavListingContext, path: &Path) -> std::io::Result<bool> {
+    let url = webdav_remote_url(&context.source_url, &context.mountpoint, path, true).ok_or_else(
+        || std::io::Error::new(std::io::ErrorKind::InvalidInput, "ungültiger WebDAV-Pfad"),
+    )?;
     let cancel = AtomicBool::new(false);
     webdav_path_exists(&url, &context.user, &context.password, &cancel)
 }
@@ -4155,10 +4163,7 @@ fn copy_file_with_metadata(src: &Path, dst: &Path) -> std::io::Result<()> {
     let is_metadata_unsupported = |e: &std::io::Error| -> bool {
         matches!(
             e.raw_os_error(),
-            Some(libc::ENOTSUP)
-                | Some(libc::EOPNOTSUPP)
-                | Some(libc::EPERM)
-                | Some(libc::ENOATTR)
+            Some(libc::ENOTSUP) | Some(libc::EOPNOTSUPP) | Some(libc::EPERM) | Some(libc::ENOATTR)
         )
     };
 
@@ -4211,9 +4216,7 @@ fn copy_file_data_synchronously(src: &Path, dst: &Path) -> std::io::Result<()> {
     let mut writer = BufWriter::with_capacity(1024 * 1024, output);
     let written = std::io::copy(&mut reader, &mut writer)?;
     writer.flush()?;
-    let output = writer
-        .into_inner()
-        .map_err(|e| e.into_error())?;
+    let output = writer.into_inner().map_err(|e| e.into_error())?;
     // macOS' `webdavfs` schreibt die Daten korrekt zum Server, unterstützt
     // aber kein fsync und meldet dafür ENOTTY (os error 25). Die unmittelbar
     // folgende Größenprüfung bestätigt trotzdem den vollständigen Upload.
@@ -4628,7 +4631,8 @@ fn copy_recursive(
                                     ctx.cancel,
                                     ctx.force_synchronous_data_copy(),
                                     ctx.webdav_target.as_ref(),
-                                ).map(|_| {
+                                )
+                                .map(|_| {
                                     ctx.files_done += 1;
                                     ctx.emit(&src.to_string_lossy());
                                     CopyOutcome::Copied
@@ -4691,7 +4695,13 @@ fn copy_recursive(
         } else if replacing {
             replace_file_after_copy(src, dst, ctx.cancel, ctx.force_synchronous_data_copy())
         } else {
-            copy_file_retry(src, dst, ctx.cancel, ctx.force_synchronous_data_copy(), None)
+            copy_file_retry(
+                src,
+                dst,
+                ctx.cancel,
+                ctx.force_synchronous_data_copy(),
+                None,
+            )
         }?;
         ctx.files_done += 1;
         ctx.emit(&src.to_string_lossy());
@@ -4933,10 +4943,11 @@ async fn run_job(
                         ctx.emit(&it.src);
                     }
                 }
-                remote::log_object_storage_operation("run_job completed direct object-storage copy");
+                remote::log_object_storage_operation(
+                    "run_job completed direct object-storage copy",
+                );
                 return Ok(());
             }
-
         }
         for it in &items {
             if cancel2.load(Ordering::SeqCst) {
@@ -4957,13 +4968,9 @@ async fn run_job(
             }
             let is_move = kind == "move";
             if remote::sftp_mount_root(&dst).is_some() {
-                let outcome = copy_to_sftp_mount_with_native_client(
-                    &mut ctx,
-                    &src,
-                    &dst,
-                    it.overwrite,
-                )
-                    .map_err(|error| format!("{}: {error}", src.display()))?;
+                let outcome =
+                    copy_to_sftp_mount_with_native_client(&mut ctx, &src, &dst, it.overwrite)
+                        .map_err(|error| format!("{}: {error}", src.display()))?;
                 if is_move {
                     remove_source_after_move(&src, outcome)?;
                 }
@@ -5127,9 +5134,7 @@ pub(crate) fn is_dualbeam_inprogress_name(name: &str) -> bool {
     let Some((pid, sequence)) = ids.split_once('-') else {
         return false;
     };
-    !original.is_empty()
-        && pid.parse::<u32>().is_ok()
-        && sequence.parse::<u64>().is_ok()
+    !original.is_empty() && pid.parse::<u32>().is_ok() && sequence.parse::<u64>().is_ok()
 }
 
 /// Kurzlebige Ordner von DualBeam und Trunk enthalten keine Nutzdaten und
@@ -5153,7 +5158,9 @@ fn is_transient_trunk_path(rel: &Path) -> bool {
     if first == ".DualBeamUndo" {
         return true;
     }
-    if first != ".trunk" { return false; }
+    if first != ".trunk" {
+        return false;
+    }
     matches!(
         components.next().and_then(|part| part.as_os_str().to_str()),
         Some("tools" | "out" | "plugins" | "logs" | "actions" | "notifications")
@@ -5284,12 +5291,10 @@ fn preview_compare_file(
     // kopieren. Reguläre Dateien werden deshalb vor jedem lokalen `stat`
     // direkt per PROPFIND geprüft.
     let server_lookup = match (followed.as_ref(), webdav_target) {
-        (Some(source), Some(context)) if !source.is_dir() => {
-            Some(
-                webdav_server_file_metadata_result(context, dst_path)
-                    .map_err(|error| format!("WebDAV-Ziel am Server prüfen fehlgeschlagen: {error}"))?,
-            )
-        }
+        (Some(source), Some(context)) if !source.is_dir() => Some(
+            webdav_server_file_metadata_result(context, dst_path)
+                .map_err(|error| format!("WebDAV-Ziel am Server prüfen fehlgeschlagen: {error}"))?,
+        ),
         _ => None,
     };
     if let (Some(source), Some(server_metadata)) = (followed.as_ref(), server_lookup) {
@@ -5423,6 +5428,8 @@ fn dir_is_empty(dir: &Path) -> bool {
     }
 }
 
+// Acht Parameter: Pfade, Zaehler und Abbruchsignal des Vorschaudurchlaufs.
+#[allow(clippy::too_many_arguments)]
 fn preview_walk_src(
     src_root: &Path,
     dst_root: &Path,
@@ -5472,8 +5479,10 @@ fn preview_walk_src(
         }
         if link_meta.is_dir() {
             if let Some(context) = webdav_target {
-                let target_exists = webdav_server_path_exists(context, &dst_path)
-                    .map_err(|error| format!("WebDAV-Ziel am Server prüfen fehlgeschlagen: {error}"))?;
+                let target_exists =
+                    webdav_server_path_exists(context, &dst_path).map_err(|error| {
+                        format!("WebDAV-Ziel am Server prüfen fehlgeschlagen: {error}")
+                    })?;
                 if target_exists {
                     // Der Server kennt den Ordner, auch wenn der lokale
                     // webdavfs-Cache ihn noch nicht aufgelistet hat. Die
@@ -5663,7 +5672,9 @@ struct DirectSyncPathInfo {
 fn should_skip_direct_sync_path(rel: &Path, ignore_patterns: &[String]) -> bool {
     is_transient_trunk_path(rel)
         || is_ignored_sync_path(rel, ignore_patterns)
-        || rel.components().any(|component| component.as_os_str() == ".DualBeamUndo")
+        || rel
+            .components()
+            .any(|component| component.as_os_str() == ".DualBeamUndo")
 }
 
 fn collect_filesystem_sync_tree(
@@ -5715,7 +5726,9 @@ fn collect_direct_sync_tree(
         for entry in result? {
             check_sync_preview_cancelled()?;
             let relative = PathBuf::from(&entry.name);
-            if relative.as_os_str().is_empty() || should_skip_direct_sync_path(&relative, ignore_patterns) {
+            if relative.as_os_str().is_empty()
+                || should_skip_direct_sync_path(&relative, ignore_patterns)
+            {
                 continue;
             }
             entries.insert(
@@ -5841,6 +5854,8 @@ fn direct_object_storage_sync_preview(
 /// dereferenziert verglichen; transiente Netzwerkfehler werden wiederholt und
 /// führen im Ernstfall zum Abbruch statt zu falschen Zahlen.
 #[tauri::command]
+// Acht Parameter: beide Seiten der Synchronisation samt Optionen und Fenstergriff.
+#[allow(clippy::too_many_arguments)]
 async fn sync_preview(
     app: AppHandle,
     preview_id: String,
@@ -7256,16 +7271,14 @@ pub fn run() {
 mod copy_tests {
     use super::{
         bookmark_url_from_mount_source, copy_file_with_metadata, count_delete_entries,
-        delete_error_message, destination_is_within_source, is_protected_admin_root,
-        is_dualbeam_inprogress_name, is_retryable_remove_error,
-        is_time_machine_path, is_transient_trunk_path, is_untransferable_file,
-        normalize_max_file_size, parse_mount_url, percent_encode_segment, preview_walk_src,
-        remove_source_after_move,
+        delete_error_message, destination_is_within_source, is_dualbeam_inprogress_name,
+        is_protected_admin_root, is_retryable_remove_error, is_time_machine_path,
+        is_transient_trunk_path, is_untransferable_file, normalize_max_file_size, parse_mount_url,
+        percent_encode_segment, preview_walk_src, remove_source_after_move,
         replace_file_after_copy, search_in_dir_blocking, should_skip_direct_sync_path,
-        sync_preview_inner, sync_two_way_preview_inner,
-        webdav_host_from_url, webdav_http_date_epoch, webdav_propfind_content_length,
-        webdav_propfind_last_modified, webdav_remote_url,
-        zip_extract_inner, CopyOutcome,
+        sync_preview_inner, sync_two_way_preview_inner, webdav_host_from_url,
+        webdav_http_date_epoch, webdav_propfind_content_length, webdav_propfind_last_modified,
+        webdav_remote_url, zip_extract_inner, CopyOutcome,
     };
     use std::ffi::CString;
     use std::os::unix::ffi::OsStrExt;
@@ -7380,7 +7393,10 @@ mod copy_tests {
     fn webdav_propfind_reads_server_modified_time() {
         let response = r#"<d:prop xmlns:d="DAV:"><d:getlastmodified>Thu, 01 Jan 1970 00:00:00 GMT</d:getlastmodified></d:prop>"#;
         assert_eq!(webdav_propfind_last_modified(response), Some(0));
-        assert_eq!(webdav_http_date_epoch("Wed, 21 Oct 2015 07:28:00 GMT"), Some(1_445_412_480));
+        assert_eq!(
+            webdav_http_date_epoch("Wed, 21 Oct 2015 07:28:00 GMT"),
+            Some(1_445_412_480)
+        );
     }
 
     #[test]
@@ -7821,7 +7837,9 @@ mod copy_tests {
         assert!(entries.iter().any(|entry| entry.rel == "neu/klein.txt"));
         assert!(!entries.iter().any(|entry| entry.rel == "neu/gross.bin"));
         // Kein gebündelter Verzeichniseintrag, der die große Datei mitnähme.
-        assert!(!entries.iter().any(|entry| entry.rel == "neu" && entry.is_dir));
+        assert!(!entries
+            .iter()
+            .any(|entry| entry.rel == "neu" && entry.is_dir));
 
         let _ = std::fs::remove_dir_all(root.parent().unwrap());
     }

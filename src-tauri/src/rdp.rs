@@ -67,12 +67,15 @@ fn locate_app() -> Option<PathBuf> {
 
 /// Wie `locate_app`, aber mit kurzem Gedächtnis.
 ///
+/// Zwischenspeicher: Zeitpunkt der letzten Suche und ihr Ergebnis.
+type AppLookupCache = OnceLock<Mutex<Option<(Instant, Option<PathBuf>)>>>;
+
 /// Die Seitenleiste fragt bei jedem Fensterwechsel nach. Eine Installation
 /// ändert sich selten, ein Spotlight-Aufruf kostet aber jedes Mal einen
 /// Prozessstart. Nach einer halben Minute wird erneut nachgesehen, damit eine
 /// frisch installierte App nicht bis zum Programmneustart unsichtbar bleibt.
 fn find_app() -> Option<PathBuf> {
-    static CACHE: OnceLock<Mutex<Option<(Instant, Option<PathBuf>)>>> = OnceLock::new();
+    static CACHE: AppLookupCache = OnceLock::new();
     let cache = CACHE.get_or_init(|| Mutex::new(None));
     let Ok(mut slot) = cache.lock() else {
         return locate_app();
@@ -195,8 +198,12 @@ mod tests {
     use super::*;
 
     fn profile(id: &str) -> RdpProfile {
-        RdpProfile { id: id.into(), name: "X".into(), host: "h".into() }
-}
+        RdpProfile {
+            id: id.into(),
+            name: "X".into(),
+            host: "h".into(),
+        }
+    }
     /// Die Profildatei stammt aus einem fremden Programm. Was hier nicht
     /// abgefangen wird, legt die Seitenleiste lahm.
     #[test]

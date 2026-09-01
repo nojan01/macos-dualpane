@@ -193,18 +193,13 @@ pub fn valid_host(value: &str) -> bool {
     if bare.contains(':') {
         return bare.parse::<IpAddr>().is_ok();
     }
-    value
-        .split('.')
-        .all(|part| {
-            !part.is_empty()
-                && part.len() <= 63
-                && !part.starts_with('-')
-                && !part.ends_with('-')
-                && part
-                    .chars()
-                    .all(|c| c.is_ascii_alphanumeric() || c == '-')
-        })
-        && !value.starts_with('.')
+    value.split('.').all(|part| {
+        !part.is_empty()
+            && part.len() <= 63
+            && !part.starts_with('-')
+            && !part.ends_with('-')
+            && part.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+    }) && !value.starts_with('.')
         && !value.ends_with('.')
 }
 
@@ -368,10 +363,13 @@ fn rclone_executable() -> Result<PathBuf, String> {
 /// rclone-NFS-Adapter spricht er direkt SSH/SFTP und stellt die entfernte
 /// Wurzel als FUSE-Dateisystem bereit.
 fn sshfs_executable() -> Result<PathBuf, String> {
-    [PathBuf::from("/usr/local/bin/sshfs"), PathBuf::from("/opt/homebrew/bin/sshfs")]
-        .into_iter()
-        .find(|path| path.is_file())
-        .ok_or_else(|| "SSHFS ist nicht installiert. Bitte SSHFS für macFUSE installieren.".to_string())
+    [
+        PathBuf::from("/usr/local/bin/sshfs"),
+        PathBuf::from("/opt/homebrew/bin/sshfs"),
+    ]
+    .into_iter()
+    .find(|path| path.is_file())
+    .ok_or_else(|| "SSHFS ist nicht installiert. Bitte SSHFS für macFUSE installieren.".to_string())
 }
 
 /// Der SSHFS-Quellbezeichner bewahrt absichtlich die Schreibweise des
@@ -385,7 +383,11 @@ fn sshfs_source(spec: &RemoteSpec) -> String {
         format!("{}@{host}", spec.username)
     };
     let path = spec.path.trim();
-    let path = if path.is_empty() || path == "/" { "/" } else { path };
+    let path = if path.is_empty() || path == "/" {
+        "/"
+    } else {
+        path
+    };
     format!("{address}:{path}")
 }
 
@@ -416,8 +418,11 @@ fn openssh_option_path(path: &Path) -> String {
 fn create_sshfs_askpass() -> Result<PathBuf, String> {
     let sequence = RC_SOCKET_SEQUENCE.fetch_add(1, Ordering::Relaxed);
     let path = app_dir()?.join(format!("sshfs-askpass-{}-{sequence}", std::process::id()));
-    std::fs::write(&path, "#!/bin/sh\nprintf '%s\\n' \"$DUALBEAM_SSHFS_PASSWORD\"\n")
-        .map_err(|_| "err.remote.mountFailed".to_string())?;
+    std::fs::write(
+        &path,
+        "#!/bin/sh\nprintf '%s\\n' \"$DUALBEAM_SSHFS_PASSWORD\"\n",
+    )
+    .map_err(|_| "err.remote.mountFailed".to_string())?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -578,7 +583,7 @@ fn known_host_matches_scan(known_hosts_output: &str, scanned: &[String]) -> bool
         && known_hosts_output
             .lines()
             .filter_map(host_key_material)
-            .any(|stored| scanned.iter().any(|current| stored == *current))
+            .any(|stored| scanned.contains(&stored))
 }
 
 /// Ein vorhandener Eintrag allein genügt nicht. Ist der Server-Schlüssel
@@ -866,7 +871,10 @@ fn remote_argument(spec: &RemoteSpec) -> String {
         // einen absoluten Serverpfad verlangen und am SFTP-Home vorbeigehen.
         format!("{RCLONE_REMOTE}:{path}")
     } else {
-        format!("{RCLONE_REMOTE}:/{path}", path = path.trim_start_matches('/'))
+        format!(
+            "{RCLONE_REMOTE}:/{path}",
+            path = path.trim_start_matches('/')
+        )
     }
 }
 
@@ -936,7 +944,10 @@ fn mount_blocking(
             .arg(&mount_dir)
             .args(["-p", &spec.port_or_default().to_string()])
             .args(["-o", "StrictHostKeyChecking=yes"])
-            .args(["-o", &format!("UserKnownHostsFile={}", ssh_option_path(known_hosts))])
+            .args([
+                "-o",
+                &format!("UserKnownHostsFile={}", ssh_option_path(known_hosts)),
+            ])
             // Ausschließlich DualBeams bestätigte Schlüsseldatei verwenden;
             // globale Systemschlüssel könnten sonst für dieselbe Adresse einen
             // unpassenden, alten Eintrag beisteuern.
@@ -1144,7 +1155,10 @@ fn object_storage_env(profile: &ObjectStorageProfile, secret: &str) -> Vec<(Stri
             (env_key("type"), "s3".to_string()),
             (env_key("provider"), "Other".to_string()),
             (env_key("env_auth"), "false".to_string()),
-            (env_key("access_key_id"), profile.access_key.trim().to_string()),
+            (
+                env_key("access_key_id"),
+                profile.access_key.trim().to_string(),
+            ),
             (env_key("secret_access_key"), secret.to_string()),
             (env_key("region"), profile.region.trim().to_string()),
             (env_key("endpoint"), profile.endpoint.trim().to_string()),
@@ -1165,8 +1179,14 @@ fn object_storage_env(profile: &ObjectStorageProfile, secret: &str) -> Vec<(Stri
                 (env_key("key"), secret.to_string()),
                 (env_key("auth"), auth_url),
                 (env_key("tenant"), profile.swift_project.trim().to_string()),
-                (env_key("domain"), profile.swift_user_domain.trim().to_string()),
-                (env_key("tenant_domain"), profile.swift_project_domain.trim().to_string()),
+                (
+                    env_key("domain"),
+                    profile.swift_user_domain.trim().to_string(),
+                ),
+                (
+                    env_key("tenant_domain"),
+                    profile.swift_project_domain.trim().to_string(),
+                ),
                 (env_key("region"), profile.region.trim().to_string()),
             ]
         }
@@ -1258,8 +1278,8 @@ pub fn purge_object_storage(
         if cancel.load(std::sync::atomic::Ordering::SeqCst) {
             return Ok(());
         }
-        let context = object_storage_mount_context(path)
-            .ok_or_else(|| "err.remote.notOurs".to_string())?;
+        let context =
+            object_storage_mount_context(path).ok_or_else(|| "err.remote.notOurs".to_string())?;
         let relative = context
             .real_path
             .strip_prefix(&mount_path)
@@ -1278,7 +1298,9 @@ pub fn purge_object_storage(
         // Die Wurzel darf nie per „purge“ gelöscht werden: Bei einem leeren
         // Containerfeld wäre das sonst die Liste aller Container des Kontos.
         if parts.is_empty() {
-            return Err("Das Stammverzeichnis des Objekt-Speichers kann nicht gelöscht werden".into());
+            return Err(
+                "Das Stammverzeichnis des Objekt-Speichers kann nicht gelöscht werden".into(),
+            );
         }
         let target = format!("{}/{}", base.trim_end_matches('/'), parts.join("/"));
         // Die Pane übergibt die beim Listing bekannte Ordnerart. Bei virtuellen
@@ -1290,16 +1312,21 @@ pub fn purge_object_storage(
         // Wenn ein selektierter Pfad weitere selektierte Pfade enthält, muss er
         // ebenfalls ein Ordner sein. Dadurch bleibt eine Sync-Löschung mit
         // Ordner und Kindern stets bei einem einzigen `rclone purge`.
-        let contains_selected_child = paths.iter().any(|other| other != path && other.starts_with(path));
-        let is_dir = listed_as_dir || contains_selected_child || match object_storage_path_is_dir(path) {
-            Some(result) => result?,
-            None => std::fs::symlink_metadata(path)
-                .map(|meta| meta.is_dir() && !meta.file_type().is_symlink())
-                .unwrap_or(false),
-        };
-        if targets.iter().any(|(selected, _, selected_is_dir)| {
-            *selected_is_dir && path.starts_with(selected)
-        }) {
+        let contains_selected_child = paths
+            .iter()
+            .any(|other| other != path && other.starts_with(path));
+        let is_dir = listed_as_dir
+            || contains_selected_child
+            || match object_storage_path_is_dir(path) {
+                Some(result) => result?,
+                None => std::fs::symlink_metadata(path)
+                    .map(|meta| meta.is_dir() && !meta.file_type().is_symlink())
+                    .unwrap_or(false),
+            };
+        if targets
+            .iter()
+            .any(|(selected, _, selected_is_dir)| *selected_is_dir && path.starts_with(selected))
+        {
             continue;
         }
         if is_dir {
@@ -1314,7 +1341,16 @@ pub fn purge_object_storage(
         let mut command = Command::new(&rclone);
         command
             .arg(if is_dir { "purge" } else { "deletefile" })
-            .args(["--checkers", "32", "--contimeout", "15s", "--timeout", "2m", "--retries", "3"])
+            .args([
+                "--checkers",
+                "32",
+                "--contimeout",
+                "15s",
+                "--timeout",
+                "2m",
+                "--retries",
+                "3",
+            ])
             .arg(target)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
@@ -1335,8 +1371,11 @@ pub fn purge_object_storage(
                         object_storage_copy_log("delete completed");
                         break;
                     }
-                    let error = object_storage_copy_error(&output.stderr, &secret)
-                        .replacen("Objekt-Speicher-Kopie", "Objekt-Speicher-Löschen", 1);
+                    let error = object_storage_copy_error(&output.stderr, &secret).replacen(
+                        "Objekt-Speicher-Kopie",
+                        "Objekt-Speicher-Löschen",
+                        1,
+                    );
                     object_storage_copy_log(&format!("delete failed ({status}): {error}"));
                     return Err(error);
                 }
@@ -1371,7 +1410,11 @@ pub fn copy_object_storage(
     object_storage_copy_log(&format!(
         "start profile={} direction={} source={} destination={}",
         profile.id,
-        if source_is_object_storage { "download" } else { "upload" },
+        if source_is_object_storage {
+            "download"
+        } else {
+            "upload"
+        },
         source.display(),
         destination.display()
     ));
@@ -1392,7 +1435,11 @@ pub fn copy_object_storage(
     // Der konkrete Quell- bzw. Zielpfad wird dagegen hier erneut gegen die
     // aktive Registrierung aufgelöst. Damit bleibt der Sicherheitsnachweis
     // erhalten und ist zugleich robust gegenüber Pfadnormalisierung.
-    let object_path = if source_is_object_storage { source } else { destination };
+    let object_path = if source_is_object_storage {
+        source
+    } else {
+        destination
+    };
     let active = match object_storage_mount_context(object_path) {
         Some(active) => active,
         None if profile.protocol == ObjectStorageProtocol::S3 => {
@@ -1403,16 +1450,17 @@ pub fn copy_object_storage(
             // Registrierung hier aus dem zugehörigen Profil wieder her und
             // bilden den relativen Pfad auf den aktiven Dateiraum ab. Swift
             // behält seinen bewährten unveränderten Pfad.
-            reconnect_s3_copy_context(profile, mount_path, object_path)?
-                .ok_or_else(|| {
-                    object_storage_copy_log(
-                        "rejected: S3 source or destination is outside the declared mount path",
-                    );
-                    "err.remote.notOurs".to_string()
-                })?
+            reconnect_s3_copy_context(profile, mount_path, object_path)?.ok_or_else(|| {
+                object_storage_copy_log(
+                    "rejected: S3 source or destination is outside the declared mount path",
+                );
+                "err.remote.notOurs".to_string()
+            })?
         }
         None => {
-            object_storage_copy_log("rejected: source or destination is not an active object-storage path");
+            object_storage_copy_log(
+                "rejected: source or destination is not an active object-storage path",
+            );
             return Err("err.remote.notOurs".into());
         }
     };
@@ -1463,8 +1511,16 @@ pub fn copy_object_storage(
         .arg(from)
         .arg(to)
         .args([
-            "--checkers", "1", "--contimeout", "15s", "--timeout", "2m",
-            "--retries", "3", "--low-level-retries", "2",
+            "--checkers",
+            "1",
+            "--contimeout",
+            "15s",
+            "--timeout",
+            "2m",
+            "--retries",
+            "3",
+            "--low-level-retries",
+            "2",
             // Eine vom Benutzer ausgelöste Kopie ist ein bewusster Auftrag,
             // kein inkrementeller Sync. rclone darf sie daher nicht wegen
             // zufällig gleicher Größe/Zeitstempel still überspringen.
@@ -1492,21 +1548,17 @@ pub fn copy_object_storage(
     for (key, value) in object_storage_env(&profile, &secret) {
         command.env(key, value);
     }
-    let mut child = command
-        .spawn()
-        .map_err(|error| {
-            object_storage_copy_log(&format!("could not start rclone: {error}"));
-            "Objekt-Speicher-Kopie konnte nicht gestartet werden".to_string()
-        })?;
+    let mut child = command.spawn().map_err(|error| {
+        object_storage_copy_log(&format!("could not start rclone: {error}"));
+        "Objekt-Speicher-Kopie konnte nicht gestartet werden".to_string()
+    })?;
     loop {
         match child.try_wait() {
             Ok(Some(status)) => {
-                let output = child
-                    .wait_with_output()
-                    .map_err(|error| {
-                        object_storage_copy_log(&format!("could not collect rclone output: {error}"));
-                        "Objekt-Speicher-Kopie fehlgeschlagen".to_string()
-                    })?;
+                let output = child.wait_with_output().map_err(|error| {
+                    object_storage_copy_log(&format!("could not collect rclone output: {error}"));
+                    "Objekt-Speicher-Kopie fehlgeschlagen".to_string()
+                })?;
                 if status.success() {
                     object_storage_copy_log("rclone reported success; verifying destination");
                     // Für einen nachträglich wiederhergestellten S3-Mount
@@ -1514,21 +1566,15 @@ pub fn copy_object_storage(
                     // lokale Kennung. Die Bestätigung muss dagegen immer den
                     // tatsächlich aktiven Objekt-Speicherpfad abfragen.
                     let verified = if source_is_object_storage {
-                        verify_object_storage_copy(
-                            true,
-                            &active.real_path,
-                            destination,
-                        )
+                        verify_object_storage_copy(true, &active.real_path, destination)
                     } else {
-                        verify_object_storage_copy(
-                            false,
-                            source,
-                            &active.real_path,
-                        )
+                        verify_object_storage_copy(false, source, &active.real_path)
                     };
                     match &verified {
                         Ok(()) => object_storage_copy_log("copy completed and verified"),
-                        Err(error) => object_storage_copy_log(&format!("verification failed: {error}")),
+                        Err(error) => {
+                            object_storage_copy_log(&format!("verification failed: {error}"))
+                        }
                     }
                     return verified;
                 }
@@ -1658,6 +1704,10 @@ fn object_storage_copy_error(stderr: &[u8], secret: &str) -> String {
 /// weiterhin unverändert ihren Dateisystemweg.
 #[cfg(test)]
 #[allow(dead_code)]
+// Acht Parameter: Verbindungsdaten, Quelle, Ziel und Fortschritts-Rueckmeldung.
+// Ein Zusammenfassen in eine Struktur wuerde die Aufrufstellen nicht klarer
+// machen, da jeder Wert nur hier gebraucht wird.
+#[allow(clippy::too_many_arguments)]
 pub fn copy_sftp_storage(
     requested_spec: &RemoteSpec,
     mount_path: &Path,
@@ -1677,8 +1727,7 @@ pub fn copy_sftp_storage(
     }
 
     let expected = requested_spec.descriptor();
-    let real_mount = std::fs::canonicalize(mount_path)
-        .unwrap_or_else(|_| mount_path.to_path_buf());
+    let real_mount = std::fs::canonicalize(mount_path).unwrap_or_else(|_| mount_path.to_path_buf());
     // Nicht die von der WebView gelieferte SFTP-Spezifikation verwenden:
     // Maßgeblich ist ausschließlich die beim Einhängen geprüfte Variante.
     let spec = registry()
@@ -1686,8 +1735,8 @@ pub fn copy_sftp_storage(
         .ok()
         .and_then(|list| {
             list.iter().find_map(|entry| {
-                let entry_mount = std::fs::canonicalize(&entry.path)
-                    .unwrap_or_else(|_| entry.path.clone());
+                let entry_mount =
+                    std::fs::canonicalize(&entry.path).unwrap_or_else(|_| entry.path.clone());
                 (entry_mount == real_mount && entry.descriptor == expected)
                     .then(|| entry.remote_spec.clone())
                     .flatten()
@@ -1719,7 +1768,10 @@ pub fn copy_sftp_storage(
     };
     let obscured = obscure(&rclone, &password)?;
     let (from, to) = if source_is_remote {
-        (remote_path.clone(), destination.to_string_lossy().into_owned())
+        (
+            remote_path.clone(),
+            destination.to_string_lossy().into_owned(),
+        )
     } else {
         (source.to_string_lossy().into_owned(), remote_path.clone())
     };
@@ -1875,7 +1927,11 @@ fn report_sftp_copy_log_line(
 }
 
 #[cfg(test)]
-fn sftp_transfer_target(path: &Path, mount_path: &Path, spec: &RemoteSpec) -> Result<String, String> {
+fn sftp_transfer_target(
+    path: &Path,
+    mount_path: &Path,
+    spec: &RemoteSpec,
+) -> Result<String, String> {
     let real_path = canonicalize_with_missing_suffix(path);
     // Auf macOS können sowohl der technische Mount als auch ein Zielpfad über
     // einen Alias wie `/tmp` bzw. `/private/tmp` dargestellt sein. Beide
@@ -1913,7 +1969,7 @@ fn sftp_copy_error(stderr: &[u8], password: &str) -> String {
         .replace(password, "[geschützt]")
         .lines()
         .filter(|line| !line.trim().is_empty())
-        .last()
+        .next_back()
         .unwrap_or_default()
         .chars()
         .take(600)
@@ -2044,9 +2100,10 @@ pub fn purge_remote_storage(
         let is_dir = std::fs::symlink_metadata(path)
             .map(|meta| meta.is_dir() && !meta.file_type().is_symlink())
             .unwrap_or(false);
-        if targets.iter().any(|(selected, _, selected_is_dir)| {
-            *selected_is_dir && path.starts_with(selected)
-        }) {
+        if targets
+            .iter()
+            .any(|(selected, _, selected_is_dir)| *selected_is_dir && path.starts_with(selected))
+        {
             continue;
         }
         if is_dir {
@@ -2167,14 +2224,11 @@ pub fn refresh_mount_after_direct_delete(mount_path: &Path, paths: &[PathBuf]) {
     if paths.is_empty() {
         return;
     }
-    let rc_socket = registry()
-        .lock()
-        .ok()
-        .and_then(|list| {
-            list.iter()
-                .find(|entry| entry.path == mount_path)
-                .map(|entry| entry.rc_socket.clone())
-        });
+    let rc_socket = registry().lock().ok().and_then(|list| {
+        list.iter()
+            .find(|entry| entry.path == mount_path)
+            .map(|entry| entry.rc_socket.clone())
+    });
     let mut parents: Vec<PathBuf> = paths
         .iter()
         .filter_map(|path| path.parent().map(Path::to_path_buf))
@@ -2234,8 +2288,10 @@ fn sshfs_failure_message(log: &Path) -> String {
     if lower.contains("no such file") || lower.contains("not a directory") {
         return "err.remote.path".into();
     }
-    if lower.contains("could not resolve hostname") || lower.contains("connection refused")
-        || lower.contains("operation timed out") || lower.contains("connection timed out")
+    if lower.contains("could not resolve hostname")
+        || lower.contains("connection refused")
+        || lower.contains("operation timed out")
+        || lower.contains("connection timed out")
     {
         return "err.remote.unreachable".into();
     }
@@ -2278,7 +2334,15 @@ fn verify_object_storage_connection(
 ) -> Result<(), String> {
     let mut command = Command::new(rclone);
     command
-        .args(["lsd", "--contimeout", "10s", "--timeout", "20s", "--retries", "1"])
+        .args([
+            "lsd",
+            "--contimeout",
+            "10s",
+            "--timeout",
+            "20s",
+            "--retries",
+            "1",
+        ])
         .arg(argument)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -2312,8 +2376,8 @@ pub fn is_remote_mount(path: &Path) -> bool {
     // ein Eintrag unmittelbar nach dem Aushängen geprüft wird.
     if let Ok(list) = registry().lock() {
         if list.iter().any(|entry| {
-            let mount_path = std::fs::canonicalize(&entry.path)
-                .unwrap_or_else(|_| entry.path.clone());
+            let mount_path =
+                std::fs::canonicalize(&entry.path).unwrap_or_else(|_| entry.path.clone());
             real_path.starts_with(mount_path)
         }) {
             return true;
@@ -2414,17 +2478,14 @@ pub fn object_storage_mount_root(path: &Path) -> Option<PathBuf> {
     };
     list.iter()
         .find(|entry| {
-            let entry_mount = std::fs::canonicalize(&entry.path)
-                .unwrap_or_else(|_| entry.path.clone());
+            let entry_mount =
+                std::fs::canonicalize(&entry.path).unwrap_or_else(|_| entry.path.clone());
             entry.object_profile.is_some()
                 && entry_mount == context.mount_path
-                && entry
-                    .object_home
-                    .as_ref()
-                    .is_some_and(|home| {
-                        let home = std::fs::canonicalize(home).unwrap_or_else(|_| home.clone());
-                        context.real_path.starts_with(home)
-                    })
+                && entry.object_home.as_ref().is_some_and(|home| {
+                    let home = std::fs::canonicalize(home).unwrap_or_else(|_| home.clone());
+                    context.real_path.starts_with(home)
+                })
         })
         .and_then(|entry| entry.object_home.clone())
         .or(Some(context.mount_path))
@@ -2537,9 +2598,7 @@ fn append_sftp_mkdirs(script: &mut String, directory: &str) -> Result<(), String
 fn sftp_should_skip_path(path: &Path) -> bool {
     path.file_name()
         .and_then(|name| name.to_str())
-        .is_some_and(|name| {
-            name == ".DualBeamUndo" || crate::is_dualbeam_inprogress_name(name)
-        })
+        .is_some_and(|name| name == ".DualBeamUndo" || crate::is_dualbeam_inprogress_name(name))
 }
 
 const SFTP_FILE_DONE_PREFIX: &str = "__DUALBEAM_FILE_DONE_";
@@ -2611,7 +2670,12 @@ fn sftp_meter_percent(record: &[u8]) -> Option<u8> {
         start -= 1;
     }
     (start < percent)
-        .then(|| std::str::from_utf8(&record[start..percent]).ok()?.parse::<u8>().ok())
+        .then(|| {
+            std::str::from_utf8(&record[start..percent])
+                .ok()?
+                .parse::<u8>()
+                .ok()
+        })
         .flatten()
         .filter(|value| *value <= 100)
 }
@@ -2663,8 +2727,8 @@ impl NativeSftpProgressState {
                 .unwrap_or(0)
                 .min(99) as u8
         } else {
-            ((self.completed.saturating_mul(100) + file_percent as usize) / uploads.len())
-                .min(99) as u8
+            ((self.completed.saturating_mul(100) + file_percent as usize) / uploads.len()).min(99)
+                as u8
         };
         if overall > self.last_percent {
             self.last_percent = overall;
@@ -2723,11 +2787,7 @@ impl NativeSftpProgressState {
         }
     }
 
-    fn finish(
-        &mut self,
-        uploads: &[NativeSftpUpload],
-        progress: &mut dyn FnMut(SftpCopyProgress),
-    ) {
+    fn finish(&mut self, uploads: &[NativeSftpUpload], progress: &mut dyn FnMut(SftpCopyProgress)) {
         if !self.pending.is_empty() {
             let record = std::mem::take(&mut self.pending);
             self.process_record(&record, uploads, progress);
@@ -2756,7 +2816,8 @@ fn append_sftp_uploads(
             .into_iter()
             .filter_entry(|entry| !sftp_should_skip_path(entry.path()))
         {
-            let entry = entry.map_err(|error| format!("Verzeichnis lesen fehlgeschlagen: {error}"))?;
+            let entry =
+                entry.map_err(|error| format!("Verzeichnis lesen fehlgeschlagen: {error}"))?;
             let local = entry.path();
             if local == source || sftp_should_skip_path(local) {
                 continue;
@@ -2764,7 +2825,11 @@ fn append_sftp_uploads(
             let relative = local
                 .strip_prefix(source)
                 .map_err(|_| "Ungültiger lokaler SFTP-Quellpfad".to_string())?;
-            let remote = format!("{}/{}", target.trim_end_matches('/'), relative.to_string_lossy());
+            let remote = format!(
+                "{}/{}",
+                target.trim_end_matches('/'),
+                relative.to_string_lossy()
+            );
             if entry.file_type().is_dir() {
                 append_sftp_mkdirs(script, &remote)?;
                 continue;
@@ -2773,13 +2838,7 @@ fn append_sftp_uploads(
                 continue;
             }
             let index = uploads.len();
-            append_sftp_put(
-                script,
-                &local.to_string_lossy(),
-                &remote,
-                index,
-                overwrite,
-            )?;
+            append_sftp_put(script, &local.to_string_lossy(), &remote, index, overwrite)?;
             uploads.push(NativeSftpUpload {
                 path: local.to_string_lossy().into_owned(),
                 size: std::fs::metadata(local).map(|meta| meta.len()).unwrap_or(0),
@@ -2796,16 +2855,12 @@ fn append_sftp_uploads(
             }
         }
         let index = uploads.len();
-        append_sftp_put(
-            script,
-            &source.to_string_lossy(),
-            target,
-            index,
-            overwrite,
-        )?;
+        append_sftp_put(script, &source.to_string_lossy(), target, index, overwrite)?;
         uploads.push(NativeSftpUpload {
             path: source.to_string_lossy().into_owned(),
-            size: std::fs::metadata(source).map(|meta| meta.len()).unwrap_or(0),
+            size: std::fs::metadata(source)
+                .map(|meta| meta.len())
+                .unwrap_or(0),
         });
     }
     Ok(())
@@ -2930,10 +2985,7 @@ pub fn upload_to_sftp_mount(
             .args(["-o", "StrictHostKeyChecking=yes"])
             .args([
                 "-o",
-                &format!(
-                    "UserKnownHostsFile={}",
-                    openssh_option_path(&known_hosts)
-                ),
+                &format!("UserKnownHostsFile={}", openssh_option_path(&known_hosts)),
             ])
             .args(["-o", "GlobalKnownHostsFile=/dev/null"])
             .arg(&address)
@@ -2944,9 +2996,9 @@ pub fn upload_to_sftp_mount(
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::piped());
-        let mut master = master_command.spawn().map_err(|error| {
-            format!("SFTP-Anmeldung konnte nicht gestartet werden: {error}")
-        })?;
+        let mut master = master_command
+            .spawn()
+            .map_err(|error| format!("SFTP-Anmeldung konnte nicht gestartet werden: {error}"))?;
         let master_stderr = master
             .stderr
             .take()
@@ -2993,7 +3045,9 @@ pub fn upload_to_sftp_mount(
                     if let Some(reader) = master_stderr_reader.take() {
                         let _ = reader.join();
                     }
-                    break Err(format!("SFTP-Anmeldung konnte nicht überwacht werden: {error}"));
+                    break Err(format!(
+                        "SFTP-Anmeldung konnte nicht überwacht werden: {error}"
+                    ));
                 }
             }
         };
@@ -3017,10 +3071,7 @@ pub fn upload_to_sftp_mount(
             .args(["-o", "StrictHostKeyChecking=yes"])
             .args([
                 "-o",
-                &format!(
-                    "UserKnownHostsFile={}",
-                    openssh_option_path(&known_hosts)
-                ),
+                &format!("UserKnownHostsFile={}", openssh_option_path(&known_hosts)),
             ])
             .args(["-o", "GlobalKnownHostsFile=/dev/null"])
             .arg(&address)
@@ -3094,10 +3145,7 @@ pub fn upload_to_sftp_mount(
                         // Abschlussbestätigung.
                         if status.success() && progress_state.completed == uploads.len() {
                             progress_state.finish(&uploads, progress);
-                            return Ok(uploads
-                                .iter()
-                                .map(|upload| upload.path.clone())
-                                .collect());
+                            return Ok(uploads.iter().map(|upload| upload.path.clone()).collect());
                         }
                         return Err(sftp_client_error(&output, &password));
                     }
@@ -3144,12 +3192,14 @@ fn object_storage_mount_context(path: &Path) -> Option<ObjectStorageMountContext
     list.iter().find_map(|entry| {
         let profile = entry.object_profile.as_ref()?;
         let mount_path = std::fs::canonicalize(&entry.path).unwrap_or_else(|_| entry.path.clone());
-        real_path.starts_with(&mount_path).then(|| ObjectStorageMountContext {
-            descriptor: entry.descriptor.clone(),
-            mount_path,
-            real_path: real_path.clone(),
-            profile: profile.clone(),
-        })
+        real_path
+            .starts_with(&mount_path)
+            .then(|| ObjectStorageMountContext {
+                descriptor: entry.descriptor.clone(),
+                mount_path,
+                real_path: real_path.clone(),
+                profile: profile.clone(),
+            })
     })
 }
 
@@ -3173,8 +3223,8 @@ fn reconnect_s3_copy_context(
 
     let root = mount_root()?;
     let real_root = std::fs::canonicalize(&root).unwrap_or(root);
-    let real_declared_mount = std::fs::canonicalize(declared_mount)
-        .unwrap_or_else(|_| declared_mount.to_path_buf());
+    let real_declared_mount =
+        std::fs::canonicalize(declared_mount).unwrap_or_else(|_| declared_mount.to_path_buf());
     if !real_declared_mount.starts_with(&real_root) || real_declared_mount == real_root {
         return Ok(None);
     }
@@ -3191,27 +3241,25 @@ fn reconnect_s3_copy_context(
     // Selbst wenn eine manipulierte IPC-Nachricht einen Sonderpfad enthielte,
     // darf daraus nie ein Ziel außerhalb der neu aufgebauten S3-Wurzel werden.
     if relative.components().any(|component| {
-        !matches!(component, std::path::Component::Normal(_) | std::path::Component::CurDir)
+        !matches!(
+            component,
+            std::path::Component::Normal(_) | std::path::Component::CurDir
+        )
     }) {
         return Ok(None);
     }
 
     let descriptor = format!("s3://{}", profile.id);
-    let active_root = registry()
-        .lock()
-        .ok()
-        .and_then(|list| {
-            list.iter().find_map(|entry| {
-                (entry.descriptor == descriptor
-                    && entry
-                        .object_profile
-                        .as_ref()
-                        .is_some_and(|active| active.protocol == ObjectStorageProtocol::S3))
-                .then(|| {
-                    std::fs::canonicalize(&entry.path).unwrap_or_else(|_| entry.path.clone())
-                })
-            })
-        });
+    let active_root = registry().lock().ok().and_then(|list| {
+        list.iter().find_map(|entry| {
+            (entry.descriptor == descriptor
+                && entry
+                    .object_profile
+                    .as_ref()
+                    .is_some_and(|active| active.protocol == ObjectStorageProtocol::S3))
+            .then(|| std::fs::canonicalize(&entry.path).unwrap_or_else(|_| entry.path.clone()))
+        })
+    });
     let active_root = match active_root {
         Some(path) => {
             object_storage_copy_log("S3 copy path remapped to the active mount registration");
@@ -3282,8 +3330,8 @@ pub struct ObjectStorageEntry {
 }
 
 fn object_storage_target(context: &ObjectStorageMountContext) -> Result<String, String> {
-    let relative = object_relative_path(&context.real_path, &context.mount_path)
-        .unwrap_or_default();
+    let relative =
+        object_relative_path(&context.real_path, &context.mount_path).unwrap_or_default();
     if relative.is_empty() {
         Ok(object_storage_argument(&context.profile))
     } else {
@@ -3320,7 +3368,7 @@ fn direct_object_storage_error(stderr: &[u8], secret: &str) -> String {
         .replace(secret, "[geschützt]")
         .lines()
         .filter(|line| !line.trim().is_empty())
-        .last()
+        .next_back()
         .unwrap_or_default()
         .chars()
         .take(600)
@@ -3455,20 +3503,34 @@ pub fn object_storage_path_exists(path: &Path) -> Option<Result<bool, String>> {
     if context.real_path == context.mount_path {
         return Some(Ok(true));
     }
-    let Some(name) = context.real_path.file_name().map(|name| name.to_os_string()) else {
+    let Some(name) = context
+        .real_path
+        .file_name()
+        .map(|name| name.to_os_string())
+    else {
         return Some(Ok(true));
     };
     let parent = context.real_path.parent().unwrap_or(&context.mount_path);
-    Some(list_object_storage_dir(parent).unwrap_or_else(|| Ok(Vec::new())).map(|entries| {
-        entries.iter().any(|entry| entry.name == name.to_string_lossy())
-    }))
+    Some(
+        list_object_storage_dir(parent)
+            .unwrap_or_else(|| Ok(Vec::new()))
+            .map(|entries| {
+                entries
+                    .iter()
+                    .any(|entry| entry.name == name.to_string_lossy())
+            }),
+    )
 }
 
 /// Liefert die Metadaten eines einzelnen Eintrags aus dessen Parent-Listing.
 /// Für S3-/Swift-Präfixe ist dies zuverlässiger als `lsjson --stat`.
 pub fn object_storage_entry(path: &Path) -> Option<Result<Option<ObjectStorageEntry>, String>> {
     let context = object_storage_mount_context(path)?;
-    let Some(name) = context.real_path.file_name().map(|name| name.to_os_string()) else {
+    let Some(name) = context
+        .real_path
+        .file_name()
+        .map(|name| name.to_os_string())
+    else {
         return Some(Ok(Some(ObjectStorageEntry {
             name: String::new(),
             path: context.mount_path,
@@ -3478,15 +3540,20 @@ pub fn object_storage_entry(path: &Path) -> Option<Result<Option<ObjectStorageEn
         })));
     };
     let parent = context.real_path.parent().unwrap_or(&context.mount_path);
-    Some(list_object_storage_dir(parent).unwrap_or_else(|| Ok(Vec::new())).map(|entries| {
-        entries
-            .into_iter()
-            .find(|entry| entry.name == name.to_string_lossy())
-    }))
+    Some(
+        list_object_storage_dir(parent)
+            .unwrap_or_else(|| Ok(Vec::new()))
+            .map(|entries| {
+                entries
+                    .into_iter()
+                    .find(|entry| entry.name == name.to_string_lossy())
+            }),
+    )
 }
 
 pub fn object_storage_path_is_dir(path: &Path) -> Option<Result<bool, String>> {
-    object_storage_entry(path).map(|result| result.map(|entry| entry.is_some_and(|entry| entry.is_dir)))
+    object_storage_entry(path)
+        .map(|result| result.map(|entry| entry.is_some_and(|entry| entry.is_dir)))
 }
 
 /// Benennt ein Objekt bzw. einen Objekt-Präfix direkt auf dem Server um.
@@ -3495,7 +3562,9 @@ pub fn rename_object_storage_path(old: &Path, new: &Path) -> Option<Result<(), S
     let target = object_storage_mount_context(new)?;
     Some((|| {
         if source.descriptor != target.descriptor || source.mount_path != target.mount_path {
-            return Err("Objekt-Speicher kann nur innerhalb desselben Laufwerks umbenannt werden".into());
+            return Err(
+                "Objekt-Speicher kann nur innerhalb desselben Laufwerks umbenannt werden".into(),
+            );
         }
         let secret = crate::object_storage::object_storage_secret(&source.profile.id)?;
         let from = object_storage_target(&source)?;
@@ -3538,7 +3607,8 @@ pub fn download_object_storage_file(path: &Path) -> Option<Result<PathBuf, Strin
             .filter(|name| !name.is_empty())
             .ok_or_else(|| "Ungültiger Objekt-Speicher-Dateiname".to_string())?;
         let cache = app_dir()?.join("object-open-cache");
-        std::fs::create_dir_all(&cache).map_err(|_| "Objekt-Speicher-Cache konnte nicht erstellt werden".to_string())?;
+        std::fs::create_dir_all(&cache)
+            .map_err(|_| "Objekt-Speicher-Cache konnte nicht erstellt werden".to_string())?;
         let sequence = RC_SOCKET_SEQUENCE.fetch_add(1, Ordering::Relaxed);
         let local = cache.join(format!("{}-{sequence}-{name}", std::process::id()));
         let output = direct_object_storage_command(
@@ -3582,8 +3652,9 @@ pub fn materialize_object_storage_path(path: &Path) -> Option<Result<PathBuf, St
         let secret = crate::object_storage::object_storage_secret(&context.profile.id)?;
         let source = object_storage_target(&context)?;
         let cache = app_dir()?.join("object-transfer-cache");
-        std::fs::create_dir_all(&cache)
-            .map_err(|_| "Objekt-Speicher-Zwischenspeicher konnte nicht erstellt werden".to_string())?;
+        std::fs::create_dir_all(&cache).map_err(|_| {
+            "Objekt-Speicher-Zwischenspeicher konnte nicht erstellt werden".to_string()
+        })?;
         let sequence = RC_SOCKET_SEQUENCE.fetch_add(1, Ordering::Relaxed);
         let local = cache.join(format!("{}-{sequence}", std::process::id()));
         let args = vec![
@@ -3649,7 +3720,9 @@ struct ObjectDirectoryTimes {
 }
 
 fn object_directory_times_path() -> Option<PathBuf> {
-    app_dir().ok().map(|dir| dir.join("object-directory-times.json"))
+    app_dir()
+        .ok()
+        .map(|dir| dir.join("object-directory-times.json"))
 }
 
 fn load_object_directory_times() -> ObjectDirectoryTimes {
@@ -4020,7 +4093,7 @@ mod tests {
         assert!(valid_remote_path("/users/jano150"));
         assert!(valid_remote_path(""));
         assert!(!valid_remote_path("/users/../etc"));
-        assert!(!valid_remote_path("..")); 
+        assert!(!valid_remote_path(".."));
         assert!(!valid_remote_path("/users/\u{7}/x"));
     }
 
@@ -4030,7 +4103,10 @@ mod tests {
         assert_eq!(sanitize_label("a/b"), Some("a-b".into()));
         assert_eq!(sanitize_label(".."), None);
         assert_eq!(sanitize_label("   "), None);
-        assert_eq!(sanitize_label("mit Leerzeichen"), Some("mit Leerzeichen".into()));
+        assert_eq!(
+            sanitize_label("mit Leerzeichen"),
+            Some("mit Leerzeichen".into())
+        );
     }
 
     #[test]
@@ -4127,7 +4203,9 @@ mod tests {
     #[test]
     fn ssh_option_path_escapes_spaces_for_openssh() {
         assert_eq!(
-            ssh_option_path(Path::new("/Users/example/Library/Application Support/DualBeam/known_hosts")),
+            ssh_option_path(Path::new(
+                "/Users/example/Library/Application Support/DualBeam/known_hosts"
+            )),
             "/Users/example/Library/Application\\\\ Support/DualBeam/known_hosts"
         );
     }
@@ -4198,5 +4276,4 @@ mod tests {
         assert_eq!(host_pattern("example.com", 22), "example.com");
         assert_eq!(host_pattern("example.com", 2222), "[example.com]:2222");
     }
-
 }

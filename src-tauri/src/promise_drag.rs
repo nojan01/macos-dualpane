@@ -45,10 +45,7 @@ extern "C" {
         app_path: *const c_char,
         out_err: *mut *const c_char,
     ) -> c_int;
-    fn db_choose_application(
-        out_path: *mut *mut c_char,
-        out_err: *mut *const c_char,
-    ) -> c_int;
+    fn db_choose_application(out_path: *mut *mut c_char, out_err: *mut *const c_char) -> c_int;
     fn db_set_default_application(
         app_path: *const c_char,
         file_path: *const c_char,
@@ -367,8 +364,7 @@ fn set_default_application(app_path: String, file_path: String) -> Result<(), St
     let app = CString::new(app_path).map_err(|e| e.to_string())?;
     let file = CString::new(file_path).map_err(|e| e.to_string())?;
     let mut err: *const c_char = std::ptr::null();
-    let r =
-        unsafe { db_set_default_application(app.as_ptr(), file.as_ptr(), &mut err as *mut _) };
+    let r = unsafe { db_set_default_application(app.as_ptr(), file.as_ptr(), &mut err as *mut _) };
     if r == 0 {
         Ok(())
     } else {
