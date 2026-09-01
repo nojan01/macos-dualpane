@@ -1292,9 +1292,10 @@ async fn path_is_network(path: String) -> bool {
 }
 
 // IONOS HiDrive WebDAV-Netzwerk-Bookmark (Host, Anzeigename, URL an einer Stelle).
-// Nur in der persönlichen Build-Variante (Feature `hidrive`, standardmäßig aktiv).
-// Die öffentliche Version wird mit `--no-default-features` gebaut; dann existiert
-// diese personenbezogene Voreinstellung nicht im Binary.
+// Nur in der persönlichen Build-Variante (Feature `hidrive`). Die Voreinstellung
+// ist bewusst leer: Wer nichts angibt, erhält die öffentliche Fassung ohne diese
+// personenbezogene Adresse. Die persönliche Variante fordert das Feature
+// ausdrücklich an (`npm run tauri:build`, siehe package.json).
 #[cfg(feature = "hidrive")]
 const HIDRIVE_HOST: &str = "webdav.hidrive.ionos.com";
 #[cfg(feature = "hidrive")]

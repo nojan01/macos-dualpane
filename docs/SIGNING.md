@@ -166,12 +166,15 @@ Es gibt zwei Build-Varianten, gesteuert über das Cargo-Feature `hidrive`:
 
 | Variante | Befehl | IONOS-HiDrive-Voreinstellung |
 | --- | --- | --- |
-| **Persönlich** (Standard) | `npm run tauri:build` | enthalten |
-| **Öffentlich** (Release) | `npm run tauri:build:public` | entfernt |
+| **Persönlich** | `npm run tauri:build` | enthalten |
+| **Öffentlich** (Release, Standard) | `npm run tauri:build:public` | entfernt |
 
-- Die öffentliche Version wird mit `tauri build --no-default-features` gebaut.
-  Dadurch wird der HiDrive-Code per `#[cfg(feature = "hidrive")]` gar nicht erst
-  einkompiliert – es landet **keine** personenbezogene Voreinstellung im Binary.
+- Das Cargo-Feature `hidrive` ist **nicht** voreingestellt (`default = []`). Ein Bau
+  ohne ausdrückliche Angabe liefert also immer die öffentliche Fassung – wer den
+  Schalter vergisst, veröffentlicht keine personenbezogene Adresse.
+- Die persönliche Variante fordert das Feature ausdrücklich an
+  (`tauri build --features hidrive`). Nur dann wird der HiDrive-Code per
+  `#[cfg(feature = "hidrive")]` überhaupt einkompiliert.
 - Die generische Netzwerk-Funktion (beliebige WebDAV/SMB-URL verbinden, mounten,
   trennen) bleibt in beiden Varianten erhalten; nur das fest vorkonfigurierte
   HiDrive-Lesezeichen entfällt in der öffentlichen Version.
