@@ -29,10 +29,3 @@ src-tauri/binaries
 src-tauri/resources/licenses/DUALBEAM-LICENSE.txt
 src-tauri/resources/licenses/THIRD-PARTY-LICENSES.txt
 src-tauri/resources/licenses/RCLONE-LICENSE.txt
-
-# RemoteClientKit: eigenstaendiges Projekt mit eigenem node_modules und
-# Build-Baum (zusammen ~28 GB), dazu die FreeRDP-Quellen. Gehoert nicht in
-# dieses Repository; die Spezifikation dazu liegt in docs/REMOTE_CLIENT.md.
-remote-client/
-remote-client-backup-*/
-remote-client-source-*.tar.gz
