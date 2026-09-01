@@ -70,10 +70,19 @@ function getIcon(path: string): Promise<string> {
   return p;
 }
 
-export function FileIcon(props: { path: string; fallback: string }) {
+export function FileIcon(props: {
+  path: string;
+  fallback: string;
+  /** Virtuelle Einträge besitzen keine macOS-Datei und damit nur das generische weiße Finder-Symbol. */
+  nativeIcon?: boolean;
+}) {
   const [url, setUrl] = createSignal<string | null>(cacheGet(props.path) ?? null);
   createEffect(() => {
     const path = props.path;
+    if (props.nativeIcon === false) {
+      setUrl(null);
+      return;
+    }
     const cached = cacheGet(path);
     if (cached) {
       setUrl(cached);

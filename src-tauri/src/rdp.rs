@@ -106,6 +106,17 @@ pub fn read_profiles() -> Vec<RdpProfile> {
     items
         .iter()
         .filter_map(|item| {
+            // Objekt-Speicherprofile gehören zu DualBeam/Netzwerk, nicht in
+            // die Liste der startbaren RemoteDesk-Sitzungen. Die anderen
+            // Protokolle bleiben absichtlich erhalten: RemoteDeskRDP kann
+            // neben RDP auch VNC, SSH, SFTP und Mosh über denselben Deep Link
+            // starten. Alte Profile ohne `protocol` gelten als RDP.
+            if matches!(
+                item.get("protocol").and_then(|value| value.as_str()),
+                Some("s3" | "swift")
+            ) {
+                return None;
+            }
             let id = item.get("id")?.as_str()?.trim().to_string();
             let name = item.get("name")?.as_str()?.trim().to_string();
             if id.is_empty() || name.is_empty() {
@@ -185,8 +196,7 @@ mod tests {
 
     fn profile(id: &str) -> RdpProfile {
         RdpProfile { id: id.into(), name: "X".into(), host: "h".into() }
-    }
-
+}
     /// Die Profildatei stammt aus einem fremden Programm. Was hier nicht
     /// abgefangen wird, legt die Seitenleiste lahm.
     #[test]
@@ -248,5 +258,3 @@ mod tests {
         assert_eq!(link_for("abc", &[]), None);
     }
 }
-
-

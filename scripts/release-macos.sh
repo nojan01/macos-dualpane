@@ -119,6 +119,40 @@ npm run "$npm_script"
 app="src-tauri/target/release/bundle/macos/DualBeam.app"
 dmg="src-tauri/target/release/bundle/dmg/DualBeam_${version}_aarch64.dmg"
 
+# create-dmg kopiert `.VolumeIcon.icns` als technische Datei in das Image.
+# Finder zeigt sie bei global aktivierter Anzeige versteckter Dateien selbst
+# mit gesetztem `hidden`-Attribut. Deshalb wird sie vollständig entfernt und
+# das Custom-Icon-Flag des Volumes gelöscht. Das komprimierte Image dazu kurz
+# schreibbar konvertieren und anschließend erneut komprimieren und signieren.
+# Die bereits notarisierten Inhalte der App bleiben unverändert.
+echo
+echo "Entferne die technische Volume-Icon-Datei aus dem DMG ..."
+dmg_scratch="$(mktemp -d "${TMPDIR:-/tmp}/dualbeam-dmg.XXXXXX")"
+dmg_rw="$dmg_scratch/DualBeam-rw.dmg"
+dmg_final="$dmg_scratch/DualBeam-final.dmg"
+dmg_mount="$dmg_scratch/mount"
+mkdir "$dmg_mount"
+cleanup_dmg_scratch() {
+  if mount | grep -Fq " on $dmg_mount "; then
+    hdiutil detach "$dmg_mount" >/dev/null 2>&1 || true
+  fi
+  rm -rf "$dmg_scratch"
+}
+trap cleanup_dmg_scratch EXIT INT TERM
+hdiutil convert "$dmg" -format UDRW -o "$dmg_rw" >/dev/null
+hdiutil attach "$dmg_rw" -mountpoint "$dmg_mount" -nobrowse -noverify -noautoopen >/dev/null
+if [ -f "$dmg_mount/.VolumeIcon.icns" ]; then
+  rm "$dmg_mount/.VolumeIcon.icns"
+fi
+SetFile -a c "$dmg_mount"
+sync
+hdiutil detach "$dmg_mount" >/dev/null
+hdiutil convert "$dmg_rw" -format UDZO -imagekey zlib-level=9 -o "$dmg_final" >/dev/null
+mv "$dmg_final" "$dmg"
+codesign --force --timestamp --sign "$identity" "$dmg"
+trap - EXIT INT TERM
+rm -rf "$dmg_scratch"
+
 # Tauri notarisiert nur die .app und stapelt das Ticket auch nur dort. Das DMG
 # wird zwar signiert, bleibt aber ohne Ticket - beim Oeffnen einer geladenen
 # Datei prueft Gatekeeper jedoch zuerst das DMG. Es wird deshalb hier getrennt

@@ -3,13 +3,16 @@ import { state, loadPane, bumpVolumes } from "../state";
 import {
   loadRemotePassword,
   mountRemote,
+  remoteMounts,
   remoteHostKeys,
   remoteTrustHost,
   saveRemotePassword,
+  unmountRemote,
   type RemoteProtocol,
   type RemoteSpec,
 } from "../ipc";
 import { t, errMsg } from "../i18n";
+import { remoteDescriptor, saveRemoteProfile } from "../remoteProfiles";
 
 /** Reihenfolge im Auswahlfeld: die sichere Voreinstellung zuerst. */
 const PROTOCOLS: RemoteProtocol[] = [
@@ -47,7 +50,7 @@ const [dialog, setDialog] = createSignal<RemoteDialogState | null>(null);
 /** Öffnet „Netzlaufwerk verbinden“ für SFTP und FTPS. Die Felder können aus
  * einer eingegebenen Adresse vorbelegt werden. */
 export function openRemoteDialog(preset: Partial<RemoteDialogState> = {}) {
-  setDialog({
+  const initial: RemoteDialogState = {
     protocol: "sftp",
     host: "",
     port: "",
@@ -60,7 +63,26 @@ export function openRemoteDialog(preset: Partial<RemoteDialogState> = {}) {
     error: null,
     fingerprints: null,
     ...preset,
-  });
+  };
+  setDialog(initial);
+  // Ein gespeichertes Profil soll beim erneuten Öffnen kein neues Passwort
+  // verlangen. Fehlt der Schlüsselbund-Eintrag, bleibt das Feld einfach leer.
+  if (initial.host.trim() && initial.username.trim()) {
+    void loadRemotePassword(toSpec(initial)).then(
+      (password) => {
+        if (!password) return;
+        setDialog((current) =>
+          current &&
+          current.host === initial.host &&
+          current.username === initial.username &&
+          !current.password
+            ? { ...current, password }
+            : current,
+        );
+      },
+      () => {},
+    );
+  }
 }
 
 /** Unverschlüsseltes FTP zeigt denselben Warnhinweis wie im ⌘K-Dialog. */
@@ -150,14 +172,30 @@ export function RemoteDialog() {
         /* Schlüsselbund nicht verfügbar: dann eben ohne. */
       }
     }
+    // Ein rclone-Mount hält sein Ziel beim Start fest. Wenn im Dialog der
+    // Remote-Pfad geändert wurde, darf der vorhandene Mount daher nicht
+    // weiterverwendet werden: Er würde weiterhin die alte Server-Wurzel
+    // zeigen. Ersetze ausschließlich den Mount desselben Lesezeichens, bevor
+    // der neue Verbindungsweg aufgebaut wird.
+    const previous = (await remoteMounts()).find(
+      (mount) => mount.descriptor === remoteDescriptor(spec),
+    );
+    if (previous) await unmountRemote(previous.path);
     const mountPath = await mountRemote(
       spec,
       current.password,
       isInsecure(current.protocol),
     );
+    saveRemoteProfile(spec);
     bumpVolumes();
     close();
-    if (mountPath) await loadPane(state.active, mountPath);
+    if (mountPath) {
+      await loadPane(
+        state.active,
+        mountPath,
+        spec.protocol === "sftp" ? { navigationRoot: mountPath } : {},
+      );
+    }
   };
 
   const loadPassword = async () => {

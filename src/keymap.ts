@@ -3,6 +3,7 @@ import {
   setActive,
   selectOnly,
   loadPane,
+  canNavigateUp,
   toggleHidden,
   forceRefreshPane,
   setFilter,
@@ -54,6 +55,7 @@ async function activateEntry(pane: PaneId) {
 
 async function goUp(pane: PaneId) {
   const p = state[pane];
+  if (!canNavigateUp(pane)) return;
   const parent = parentDir(p.cwd);
   if (parent !== p.cwd) await loadPane(pane, parent);
 }

@@ -34,6 +34,8 @@ import { JobBar } from "./components/JobBar";
 import { AboutDialog, openAbout } from "./components/AboutDialog";
 import { RsyncDialog } from "./components/RsyncDialog";
 import { RemoteDialog } from "./components/RemoteDialog";
+import { ObjectStorageDialog } from "./components/ObjectStorageDialog";
+import { NetworkStorageDialog } from "./components/NetworkStorageDialog";
 import { HelpDialog, openHelp } from "./components/HelpDialog";
 import { LicenseDialog, openLicense } from "./components/LicenseDialog";
 import {
@@ -305,6 +307,8 @@ export function App() {
             done: p.done,
             total: p.total,
             filesDone: p.filesDone,
+            transferPercent: p.transferPercent,
+            indeterminate: p.indeterminate,
             current: p.current,
           });
         }
@@ -916,6 +920,8 @@ export function App() {
       <SyncDialog />
       <RsyncDialog />
       <RemoteDialog />
+      <NetworkStorageDialog />
+      <ObjectStorageDialog />
       <Dialogs />
       <PropertiesDialog />
       <AboutDialog />

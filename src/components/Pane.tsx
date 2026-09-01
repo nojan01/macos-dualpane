@@ -92,6 +92,34 @@ function fmtDate(unix: number): string {
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
 }
 
+// Netzprotokolle liefern über NSWorkspace unterschiedlich aussehende (und bei
+// virtuellen S3/Swift-Pfaden oft nur weiße) Symbole. DualBeam verwendet daher
+// für alle Netzlaufwerke dieselben dateitypabhängigen Symbole. Lokale Dateien
+// behalten ihre nativen macOS-Icons.
+
+function entryFallbackIcon(entry: {
+  name: string;
+  isDir: boolean;
+  isSymlink: boolean;
+}): string {
+  if (entry.isDir) {
+    return entry.name.toLowerCase().endsWith(".app") ? "🟦" : "📁";
+  }
+  if (entry.isSymlink) return "🔗";
+  const extension = entry.name.split(".").pop()?.toLowerCase() ?? "";
+  if (["zip", "7z", "rar", "tar", "gz", "bz2", "xz"].includes(extension)) return "📦";
+  if (["pdf"].includes(extension)) return "📕";
+  if (["doc", "docx", "odt", "rtf"].includes(extension)) return "📘";
+  if (["xls", "xlsx", "ods", "csv"].includes(extension)) return "📗";
+  if (["ppt", "pptx", "odp"].includes(extension)) return "📙";
+  if (["jpg", "jpeg", "png", "gif", "webp", "heic", "tiff", "svg"].includes(extension)) return "🖼️";
+  if (["mp3", "m4a", "aac", "wav", "flac", "ogg"].includes(extension)) return "🎵";
+  if (["mp4", "mov", "mkv", "avi", "webm"].includes(extension)) return "🎬";
+  if (["dmg", "iso"].includes(extension)) return "💿";
+  if (["txt", "md", "json", "xml", "yaml", "yml", "log"].includes(extension)) return "📝";
+  return "📄";
+}
+
 export function Pane(props: { id: PaneId }) {
   const id = props.id;
   const pane = () => state[id];
@@ -763,15 +791,8 @@ export function Pane(props: { id: PaneId }) {
                   <div class="name">
                     <FileIcon
                       path={e.path}
-                      fallback={
-                        e.isDir && e.name.toLowerCase().endsWith(".app")
-                          ? "🟦"
-                          : e.isDir
-                            ? "📁"
-                            : e.isSymlink
-                              ? "🔗"
-                              : "📄"
-                      }
+                      fallback={entryFallbackIcon(e)}
+                      nativeIcon={!pane().isNetwork}
                     />
                     <Show
                       when={

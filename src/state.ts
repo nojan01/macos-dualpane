@@ -6,6 +6,7 @@ import {
   watchPath,
   pathExists,
   pathIsNetwork,
+  navigationRoot,
   homeDir,
   unwatchPane,
 } from "./ipc";
@@ -20,6 +21,10 @@ export type PaneState = {
   cursor: number; // Index in entries (sorted)
   selected: Set<string>; // Paths
   anchor: number | null; // Anker für Shift-Klick
+  /** Netzlaufwerke nutzen ein einheitliches DualBeam-Symbolsystem. */
+  isNetwork: boolean;
+  /** Oberhalb dieser WebDAV-/Objekt-Speicherwurzel gibt es keine Pane-Navigation. */
+  navigationRoot?: string;
   loading: boolean;
   error: string | null;
   sortKey: SortKey;
@@ -60,6 +65,8 @@ export type AppState = {
     done: number;
     total: number;
     filesDone: number;
+    transferPercent?: number;
+    indeterminate?: boolean;
     current: string;
   } | null;
 };
@@ -73,6 +80,7 @@ const emptyPane = (): PaneState => ({
   cursor: 0,
   selected: new Set<string>(),
   anchor: null,
+  isNetwork: false,
   loading: false,
   error: null,
   sortKey: "name",
@@ -113,6 +121,53 @@ export const [state, setState] = createStore<AppState>({
 // Force-update tick zum Re-Rendern wenn sich Set-Inhalte ändern
 export const [selTick, setSelTick] = createSignal(0);
 const bumpSel = () => setSelTick((n) => n + 1);
+
+// Direkte SFTP-Löschungen passieren außerhalb des NFS-Mounts. Bis dessen
+// Verzeichnis-Cache den fehlenden Eintrag selbst liefert, darf eine alte
+// Listing-Antwort einen bereits serverseitig bestätigten Ordner nicht wieder
+// sichtbar machen. Der Marker wird beim ersten frischen Listing ohne diesen
+// Pfad automatisch entfernt.
+const pendingSftpDeletes = new Set<string>();
+const pendingSftpCopies = new Map<string, Entry>();
+
+export function suppressDeletedSftpEntries(paths: string[]) {
+  for (const path of paths) pendingSftpDeletes.add(path);
+}
+
+/** Zeigt serverseitig bestätigte SFTP-Kopien, bis der NFS-Mount sie selbst
+ * auflistet. So führt ein direktes rclone-Upload nicht zu einer leeren Pane,
+ * nur weil deren NFS-Listing noch im Cache liegt. */
+export function retainConfirmedSftpCopies(entries: Entry[]) {
+  for (const entry of entries) {
+    pendingSftpDeletes.delete(entry.path);
+    pendingSftpCopies.set(entry.path, entry);
+  }
+}
+
+function isDirectChild(path: string, candidate: string) {
+  const prefix = path.endsWith("/") ? path : `${path}/`;
+  return candidate.startsWith(prefix) && !candidate.slice(prefix.length).includes("/");
+}
+
+function reconcilePendingSftpEntries(path: string, raw: Entry[]): Entry[] {
+  if (pendingSftpDeletes.size === 0 && pendingSftpCopies.size === 0) return raw;
+  const listed = new Set(raw.map((entry) => entry.path));
+  for (const deleted of pendingSftpDeletes) {
+    // Nur der aktuell eingelesene Elternordner kann zuverlässig bestätigen,
+    // dass sein direkter Eintrag nicht mehr vorhanden ist.
+    if (isDirectChild(path, deleted) && !listed.has(deleted)) pendingSftpDeletes.delete(deleted);
+  }
+  for (const copied of pendingSftpCopies.keys()) {
+    // Sobald der Mount den Eintrag selbst liefert, wird der temporäre
+    // Anzeigewert nicht mehr benötigt.
+    if (isDirectChild(path, copied) && listed.has(copied)) pendingSftpCopies.delete(copied);
+  }
+  const visible = raw.filter((entry) => !pendingSftpDeletes.has(entry.path));
+  for (const [copiedPath, copied] of pendingSftpCopies) {
+    if (isDirectChild(path, copiedPath) && !listed.has(copiedPath)) visible.push(copied);
+  }
+  return visible;
+}
 
 // Signal um Filter-Input in einer Pane zu fokussieren.
 export const [focusFilterTick, setFocusFilterTick] = createSignal<{
@@ -171,12 +226,37 @@ export function sortEntries(
   });
 }
 
+function normalizedPath(path: string): string {
+  return path.length > 1 ? path.replace(/\/+$/, "") : path;
+}
+
+/** macOS löst vorhandene Pfade unter `/Users` häufig als
+ * `/System/Volumes/Data/Users` auf. Für die Navigationsgrenze beschreibt
+ * beides denselben Ort; ohne diese Normalisierung wäre der Aufwärts-Button
+ * an einem Objekt-Speicher-Mount fälschlich wieder aktiv. */
+function comparablePath(path: string): string {
+  const normalized = normalizedPath(path);
+  const dataPrefix = "/System/Volumes/Data";
+  return normalized.startsWith(`${dataPrefix}/`)
+    ? normalized.slice(dataPrefix.length)
+    : normalized;
+}
+
+/** Der Aufwärtsweg endet an der sichtbaren WebDAV-/Objekt-Speicherwurzel. */
+export function canNavigateUp(pane: PaneId): boolean {
+  const current = comparablePath(state[pane].cwd);
+  const root = state[pane].navigationRoot;
+  return !!current && current !== "/" && (!root || current !== comparablePath(root));
+}
+
 const MAX_HISTORY_ENTRIES = 100;
 const paneLoadGeneration: Record<PaneId, number> = { left: 0, right: 0 };
 
 type LoadPaneOptions = {
   recordHistory?: boolean;
   historyIndex?: number;
+  /** Beim Öffnen eines Objekt-Speichers explizit gesetzte sichtbare Wurzel. */
+  navigationRoot?: string;
 };
 
 function pushHistory(pane: PaneId, path: string) {
@@ -205,12 +285,17 @@ export async function loadPane(
   // Für erkannte Netzpfade daher die Existenz-/Eltern-Prüfung überspringen und
   // direkt listen; das Ausweichen passiert erst bei einem echten listDir-Fehler.
   let isNet = false;
-  if (target.startsWith("/Volumes/")) {
-    try {
-      isNet = await pathIsNetwork(target);
-    } catch {}
-    if (!isCurrent()) return;
-  }
+  let root: string | undefined;
+  // Eigene direkte S3-/Swift-Dateiräume liegen bewusst unter Application
+  // Support statt unter /Volumes. Auch sie dürfen nicht mit `pathExists`
+  // geprüft werden: ihre Unterordner sind virtuelle Objekt-Präfixe und haben
+  // keinen lokalen Verzeichniseintrag. Die Backend-Prüfung ist lokal und
+  // erkennt sowohl diese Dateiräume als auch klassische Netz-Mounts.
+  try {
+    isNet = await pathIsNetwork(target);
+  } catch {}
+  if (!isCurrent()) return;
+  setState(pane, "isNetwork", isNet);
   if (!isNet) {
     // Fallback, falls Pfad verschwunden ist (z.B. ausgeworfenes Volume / unmounted DMG):
     // an erstes existierendes Eltern-Verzeichnis (oder Home) ausweichen.
@@ -231,10 +316,32 @@ export async function loadPane(
     }
     if (!isCurrent()) return;
   }
+  const existingRoot = state[pane].navigationRoot;
+  if (options.navigationRoot !== undefined) {
+    root = options.navigationRoot;
+  } else if (
+    existingRoot &&
+    (comparablePath(target) === comparablePath(existingRoot) ||
+      comparablePath(target).startsWith(`${comparablePath(existingRoot)}/`))
+  ) {
+    // Einmal beim Öffnen festgelegte Objekt-Speicherwurzeln bleiben für alle
+    // untergeordneten Ordner erhalten. macOS kennt diese virtuellen Pfade
+    // nicht und darf die UI-Grenze deshalb nicht wieder auf den technischen
+    // App-Support-Ordner zurücksetzen.
+    root = existingRoot;
+  } else {
+    try {
+      root = (await navigationRoot(target)) ?? undefined;
+    } catch {
+      // Ohne lokale Mount-Information bleibt die allgemeine Navigation erhalten.
+    }
+  }
+  if (!isCurrent()) return;
   try {
     const raw = await listDir(target, state.showHidden);
     if (!isCurrent()) return;
-    const sorted = sortEntries(raw, state[pane].sortKey, state[pane].sortDir);
+    const freshRaw = reconcilePendingSftpEntries(target, raw);
+    const sorted = sortEntries(freshRaw, state[pane].sortKey, state[pane].sortDir);
     const filter = state[pane].filter;
     const visible = applyFilter(sorted, filter);
     setState(pane, {
@@ -244,6 +351,7 @@ export async function loadPane(
       cursor: 0,
       selected: new Set(),
       anchor: null,
+      navigationRoot: root,
       loading: false,
     });
     if (options.historyIndex !== undefined) {

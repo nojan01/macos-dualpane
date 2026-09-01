@@ -1,5 +1,10 @@
 import { describe, it, expect } from "vitest";
-import { isSameOrChildPath, joinPath, splitName } from "./paths";
+import {
+  folderCopyDestination,
+  isSameOrChildPath,
+  joinPath,
+  splitName,
+} from "./paths";
 
 describe("joinPath", () => {
   it("fügt einen Separator ein, wenn keiner vorhanden ist", () => {
@@ -12,6 +17,20 @@ describe("joinPath", () => {
 
   it("funktioniert für den Root-Pfad", () => {
     expect(joinPath("/", "bar.txt")).toBe("/bar.txt");
+  });
+});
+
+describe("folderCopyDestination", () => {
+  it("legt den Quellordner unterhalb des geöffneten Zielordners an", () => {
+    expect(folderCopyDestination("Screenshots", "/Volumes/SFTP")).toBe(
+      "/Volumes/SFTP/Screenshots",
+    );
+  });
+
+  it("führt in einen bereits geöffneten gleichnamigen Zielordner zusammen", () => {
+    expect(
+      folderCopyDestination("Screenshots", "/Volumes/SFTP/Screenshots"),
+    ).toBe("/Volumes/SFTP/Screenshots");
   });
 });
 

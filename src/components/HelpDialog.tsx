@@ -256,8 +256,12 @@ const CONTENT: Record<
             desc: "Liegt das Ziel auf dem eingebundenen HiDrive-WebDAV-Laufwerk, lässt sich zwischen dem direkten Kopieren über das Laufwerk und rsync über SSH wählen. rsync überträgt nur Änderungen und ist bei vielen Dateien deutlich schneller; es arbeitet stets einweg. Bei lokalen Zielen erscheint keine Auswahl.",
           },
           {
+            term: "S3- und Swift-Ziele",
+            desc: "Ein eingehängter S3-Bucket oder Swift-Container kann wie ein WebDAV-Laufwerk als Quelle oder Ziel eines Sync-Profils verwendet werden. Die Vorschau liest Verzeichnisse auf dem Objekt-Speicher; bei der ersten Abfrage großer Container kann das trotz Ausschlüssen etwas dauern. Ausgeschlossene Teilbäume werden jedoch nicht weiter betreten.",
+          },
+          {
             term: "Ausschlussregeln",
-            desc: "Unter „Ausschlussregeln“ gilt eine Regel pro Zeile für relative Pfade auf beiden Seiten. Namen, Pfade sowie * und ? werden unterstützt. Eine Datei .dualbeamignore im Quellordner wird zusätzlich berücksichtigt.",
+            desc: "Unter „Ausschlussregeln“ gilt eine Regel pro Zeile für relative Pfade auf beiden Seiten. Namen, Pfade sowie * und ? werden unterstützt. Ausgeschlossene Ordner und ihre Inhalte erscheinen nicht in der Vorschau und werden nicht rekursiv eingelesen. Eine Datei .dualbeamignore im Quellordner wird zusätzlich berücksichtigt.",
           },
           {
             term: "SHA-256-Inhaltsprüfung",
@@ -276,7 +280,7 @@ const CONTENT: Record<
       {
         title: "Netzwerkprotokolle",
         intro:
-          "Über „Mit Server verbinden“ (⌘K) bindest du Freigaben per URL ein. Unterstützte Protokolle:",
+          "Über „Mit Server verbinden“ (⌘K) oder + im Bereich „Netzwerk“ bindest du Freigaben und Objekt-Speicher ein. Unterstützte Protokolle:",
         items: [
           {
             term: "smb://",
@@ -295,28 +299,36 @@ const CONTENT: Record<
             desc: "FTP über TLS. ftps:// ist die implizite Variante (Port 990), ftpes:// die explizite mit AUTH TLS (Port 21). Im Dialog lässt sich zwischen beiden umschalten.",
           },
           {
+            term: "S3 und OpenStack Swift",
+            desc: "Im Dialog „Netzlaufwerk hinzufügen“ wählst du S3 oder OpenStack Swift und hinterlegst Endpunkt, Anmeldedaten sowie optional Bucket bzw. Container. Für Swift sind Keystone v2 und v3 auswählbar. Access Key, Secret Access Key und Swift-Kennwort werden ausschließlich im macOS-Schlüsselbund gespeichert. Ein verbundenes Ziel verhält sich anschließend wie ein Netzwerkordner und lässt sich auch synchronisieren.",
+          },
+          {
             term: "Netzwerk in der Seitenleiste",
-            desc: "Gespeicherte Server erscheinen im Bereich „Netzwerk“. Ein verbundenes Lesezeichen öffnet den Mountpunkt; ein getrenntes verbindet sich per Klick. ↻ verbindet neu. ⏏ ist Stufe 1: Es hängt nur aus und behält das Lesezeichen. × ist Stufe 2: Es hängt aus und entfernt das DualBeam-Lesezeichen dauerhaft. Nicht als Lesezeichen gespeicherte Netzwerk-Volumes erscheinen ebenfalls dort.",
+            desc: "Gespeicherte Server sowie S3-/Swift-Profile erscheinen im Bereich „Netzwerk“. Ein verbundenes Lesezeichen öffnet den Mountpunkt; ein getrenntes verbindet sich per Klick. ⚙ bearbeitet die Einstellungen, ↻ verbindet neu, ⏏ hängt nur aus und behält das Profil, × entfernt es dauerhaft. Nicht als Lesezeichen gespeicherte Netzwerk-Volumes erscheinen ebenfalls dort.",
           },
           {
             term: "Löschen auf Netzlaufwerken",
-            desc: "Nicht jedes Netzlaufwerk stellt einen Papierkorb bereit. DualBeam weist darauf hin; das Löschen kann dann endgültig sein.",
+            desc: "Nicht jedes Netzlaufwerk stellt einen Papierkorb bereit; DualBeam weist darauf hin, das Löschen kann dann endgültig sein. Große Ordner werden bei WebDAV direkt als Collection gelöscht, bei S3, Swift, SFTP und FTPS direkt über rclone statt Datei für Datei über den Mount. Danach wird die betroffene Ordneransicht automatisch aktualisiert. SMB verwendet den nativen macOS-Löschweg.",
           },
           {
             term: "Unsichere lokale Protokolle",
             desc: "http, ftp, afp, nfs und cifs sind ausschließlich für direkte private, Link-Local- oder Loopback-IP-Adressen verfügbar und erfordern eine ausdrückliche Warnbestätigung.",
           },
           {
-            term: "SFTP/FTPS im Hintergrund",
-            desc: "Diese beiden Protokolle bringt macOS nicht selbst mit. DualBeam liefert dafür das Hilfsprogramm rclone mit und bindet das Ziel über den NFS-Dienst von macOS ein. Ein Administratorpasswort ist dafür nicht nötig. Die Verbindung endet automatisch, wenn du DualBeam beendest.",
+            term: "rclone im Hintergrund",
+            desc: "macOS bringt SFTP, FTP/FTPS, S3 und OpenStack Swift nicht selbst als beschreibbare Laufwerke mit. DualBeam liefert dafür rclone mit und bindet diese Ziele über den NFS-Dienst von macOS ein. Ein Administratorpasswort ist nicht nötig. Die Verbindung endet automatisch, wenn du DualBeam beendest.",
           },
         ],
       },
       {
         title: "Anmeldedaten & Schlüsselbund",
         intro:
-          "Das Verbinden übernimmt macOS (Finder), nicht DualBeam. Daraus ergeben sich einige Eigenheiten:",
+          "WebDAV- und SMB-Verbindungen übernimmt macOS (Finder); S3, Swift, SFTP und FTPS richtet DualBeam mit rclone ein. Daraus ergeben sich einige Eigenheiten:",
         items: [
+          {
+            term: "S3-/Swift-Geheimnisse",
+            desc: "Das Objekt-Speicherprofil enthält nur die nicht geheimen Verbindungsdaten. Secret Access Key bzw. Swift-Kennwort liegen getrennt im macOS-Schlüsselbund. Beim Bearbeiten darf das Feld leer bleiben, um das gespeicherte Geheimnis zu behalten.",
+          },
           {
             term: "Passwortabfrage",
             desc: "Hast du beim ersten Verbinden „Passwort sichern“ aktiviert, liegt es im macOS-Schlüsselbund. macOS mountet dann ohne erneute Passwortabfrage – das ist normal und kein Fehler von DualBeam.",
@@ -597,8 +609,12 @@ const CONTENT: Record<
             desc: "If the target is on the mounted HiDrive WebDAV drive, you can choose between copying directly via the drive and rsync over SSH. rsync transfers only changes and is much faster with many files; it always works one-way. For local targets no choice is shown.",
           },
           {
+            term: "S3 and Swift targets",
+            desc: "A mounted S3 bucket or Swift container can be used as the source or destination of a sync profile just like a WebDAV drive. The preview reads directories on the object store, so its first scan of a large container can take time even with exclusions. Excluded subtrees are not entered further, however.",
+          },
+          {
             term: "Exclusion rules",
-            desc: "Under “Exclusion rules”, enter one rule per line for relative paths on both sides. Names, paths, * and ? are supported. A .dualbeamignore file in the source folder is also applied.",
+            desc: "Under “Exclusion rules”, enter one rule per line for relative paths on both sides. Names, paths, * and ? are supported. Excluded folders and their contents do not appear in the preview and are not read recursively. A .dualbeamignore file in the source folder is also applied.",
           },
           {
             term: "SHA-256 content verification",
@@ -617,7 +633,7 @@ const CONTENT: Record<
       {
         title: "Network protocols",
         intro:
-          "Use “Connect to server” (⌘K) to mount shares by URL. Supported protocols:",
+          "Use “Connect to server” (⌘K) or + in the “Network” section to mount shares and object storage. Supported protocols:",
         items: [
           {
             term: "smb://",
@@ -636,28 +652,36 @@ const CONTENT: Record<
             desc: "FTP over TLS. ftps:// is the implicit variant (port 990), ftpes:// the explicit one using AUTH TLS (port 21). The dialog lets you switch between them.",
           },
           {
+            term: "S3 and OpenStack Swift",
+            desc: "In “Add network drive”, choose S3 or OpenStack Swift and enter the endpoint, credentials, and optionally a bucket or container. Keystone v2 and v3 are available for Swift. Access key, secret access key, and Swift password are stored only in the macOS Keychain. Once connected, the target behaves like a network folder and can be synchronized.",
+          },
+          {
             term: "Network in the sidebar",
-            desc: "Saved servers appear in the “Network” section. Clicking a connected bookmark opens its mount point; clicking a disconnected one connects it. ↻ reconnects. ⏏ is stage 1: it only unmounts and keeps the bookmark. × is stage 2: it unmounts and permanently removes the DualBeam bookmark. Network volumes that are not bookmarks appear there as well.",
+            desc: "Saved servers and S3/Swift profiles appear in the “Network” section. Clicking a connected bookmark opens its mount point; clicking a disconnected one connects it. ⚙ edits settings, ↻ reconnects, ⏏ only unmounts and keeps the profile, and × removes it permanently. Network volumes that are not bookmarks appear there as well.",
           },
           {
             term: "Deleting on network shares",
-            desc: "Not every network share provides a Trash. DualBeam warns you when deletion may be permanent.",
+            desc: "Not every network share provides a Trash; DualBeam warns you when deletion may be permanent. Large folders are deleted directly as a collection on WebDAV, and directly through rclone on S3, Swift, SFTP, and FTPS instead of one mounted file at a time. The affected folder view is refreshed automatically afterwards. SMB uses the native macOS deletion path.",
           },
           {
             term: "Insecure local protocols",
             desc: "http, ftp, afp, nfs and cifs are available only for direct private, link-local or loopback IP addresses and require an explicit warning confirmation.",
           },
           {
-            term: "How SFTP/FTPS work",
-            desc: "macOS does not support these two protocols itself. DualBeam bundles the rclone helper and mounts the target through the macOS NFS service. No administrator password is required. The connection ends automatically when you quit DualBeam.",
+            term: "rclone in the background",
+            desc: "macOS does not provide SFTP, FTP/FTPS, S3, or OpenStack Swift as writable drives itself. DualBeam bundles rclone and mounts these targets through the macOS NFS service. No administrator password is required. The connection ends automatically when you quit DualBeam.",
           },
         ],
       },
       {
         title: "Credentials & Keychain",
         intro:
-          "Mounting is handled by macOS (Finder), not by DualBeam. This leads to a few quirks:",
+          "WebDAV and SMB connections are mounted by macOS (Finder); DualBeam configures S3, Swift, SFTP, and FTPS through rclone. This leads to a few quirks:",
         items: [
+          {
+            term: "S3/Swift secrets",
+            desc: "An object-storage profile holds only the non-secret connection data. The secret access key or Swift password is kept separately in the macOS Keychain. When editing a profile, leave the field empty to keep the stored secret.",
+          },
           {
             term: "Password prompt",
             desc: "If you ticked “Save password” on first connect, it is stored in the macOS Keychain. macOS then mounts without asking again – this is normal and not a DualBeam bug.",

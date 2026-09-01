@@ -8,6 +8,7 @@ export function JobBar() {
     <Show when={state.job}>
       {(j) => {
         const pct = () => {
+          if (j().transferPercent !== undefined) return j().transferPercent ?? 0;
           const t = j().total;
           return t > 0 ? Math.min(100, Math.round((j().done / t) * 100)) : 0;
         };
@@ -19,6 +20,7 @@ export function JobBar() {
                 class="bar-fill jobbar-fill"
                 classList={{
                   indeterminate:
+                    !!j().indeterminate ||
                     j().kind === "rsync" ||
                     (j().kind === "delete" && j().total === 0),
                 }}
@@ -33,22 +35,36 @@ export function JobBar() {
             </div>
             <span class="prog">
               <Show
-                when={j().kind !== "rsync"}
-                fallback={t("jobbar.filesCopied", { count: j().filesDone })}
+                when={j().transferPercent !== undefined}
+                fallback={
+                  <Show
+                    when={j().indeterminate}
+                    fallback={
+                      <Show
+                        when={j().kind !== "rsync"}
+                        fallback={t("jobbar.filesCopied", { count: j().filesDone })}
+                      >
+                        {/* Auf Netzlaufwerken ist die Gesamtzahl nicht bekannt: Sie
+                            vorab zu ermitteln würde so lange dauern wie das Löschen
+                            selbst. Dann lieber melden, was schon erledigt ist, statt
+                            „0 / ?" anzuzeigen. */}
+                        <Show
+                          when={j().kind === "delete" && j().total === 0}
+                          fallback={t("jobbar.items", {
+                            done: j().done,
+                            total: j().total || "?",
+                          })}
+                        >
+                          {t("jobbar.itemsDeleted", { count: j().done })}
+                        </Show>
+                      </Show>
+                    }
+                  >
+                    {t("common.loading")}
+                  </Show>
+                }
               >
-                {/* Auf Netzlaufwerken ist die Gesamtzahl nicht bekannt: Sie
-                    vorab zu ermitteln würde so lange dauern wie das Löschen
-                    selbst. Dann lieber melden, was schon erledigt ist, statt
-                    „0 / ?" anzuzeigen. */}
-                <Show
-                  when={j().kind === "delete" && j().total === 0}
-                  fallback={t("jobbar.items", {
-                    done: j().done,
-                    total: j().total || "?",
-                  })}
-                >
-                  {t("jobbar.itemsDeleted", { count: j().done })}
-                </Show>
+                {j().transferPercent} %
               </Show>
               <Show when={j().kind !== "delete" && j().kind !== "rsync"}>
                 {" · "}

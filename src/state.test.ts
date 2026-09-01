@@ -5,6 +5,7 @@ const ipc = vi.hoisted(() => ({
   listDir: vi.fn(),
   pathExists: vi.fn(),
   pathIsNetwork: vi.fn(),
+  navigationRoot: vi.fn(),
   homeDir: vi.fn(),
   watchPath: vi.fn(),
   unwatchPane: vi.fn(),
@@ -14,6 +15,7 @@ vi.mock("./ipc", () => ipc);
 
 import {
   _set,
+  canNavigateUp,
   followFrom,
   loadPane,
   selectOnly,
@@ -46,6 +48,7 @@ describe("loadPane", () => {
     vi.clearAllMocks();
     ipc.pathExists.mockResolvedValue(true);
     ipc.pathIsNetwork.mockResolvedValue(false);
+    ipc.navigationRoot.mockResolvedValue(null);
     ipc.homeDir.mockResolvedValue("/Users/test");
     ipc.watchPath.mockResolvedValue(undefined);
     _set("showHidden", false);
@@ -83,6 +86,21 @@ describe("loadPane", () => {
 
     expect(state.left.cwd).toBe("/fast");
     expect(state.left.entries[0]?.path).toBe("/fast/file.txt");
+  });
+
+  it("begrenzt die Aufwärtsnavigation an der sichtbaren Mountwurzel", () => {
+    _set("left", "cwd", "/private/remote/Datensicherung");
+    _set("left", "navigationRoot", "/private/remote/Datensicherung");
+    expect(canNavigateUp("left")).toBe(false);
+
+    _set("left", "cwd", "/private/remote/Datensicherung/Dokumente");
+    expect(canNavigateUp("left")).toBe(true);
+  });
+
+  it("erkennt die S3-Mountwurzel auch nach der macOS-Pfadnormalisierung", () => {
+    _set("left", "cwd", "/System/Volumes/Data/Users/nojan/Library/Application Support/DualBeam/Remote/Volumes/S3 DS");
+    _set("left", "navigationRoot", "/Users/nojan/Library/Application Support/DualBeam/Remote/Volumes/S3 DS");
+    expect(canNavigateUp("left")).toBe(false);
   });
 });
 

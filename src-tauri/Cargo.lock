@@ -325,8 +325,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c673075a2e0e5f4a1dde27ce9dee1ea4558c7ffe648f576438a20ca1d2acc4b0"
 dependencies = [
  "iana-time-zone",
+ "js-sys",
  "num-traits",
  "serde",
+ "wasm-bindgen",
  "windows-link 0.2.1",
 ]
 
@@ -748,14 +750,16 @@ checksum = "f678cf4a922c215c63e0de95eb1ff08a958a81d47e485cf9da1e27bf6305cfa5"
 
 [[package]]
 name = "dualbeam"
-version = "0.4.0"
+version = "0.4.31"
 dependencies = [
  "cc",
+ "chrono",
  "dirs 5.0.1",
  "libc",
  "notify",
  "notify-debouncer-mini",
  "security-framework",
+ "security-framework-sys",
  "serde",
  "serde_json",
  "sha2",

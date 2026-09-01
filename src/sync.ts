@@ -11,12 +11,18 @@ import {
   saveRsyncPassword,
   moveToTrash,
   pathIsNetwork,
+  remoteMounts,
+  loadRemotePassword,
+  mountRemote,
+  mountObjectStorage,
+  listNetworkBookmarks,
+  mountNetworkUrl,
   runNetworkDelete,
   type SyncEntry,
 } from "./ipc";
 import type { PaneId } from "./types";
 import { t, errMsg } from "./i18n";
-import { joinPath } from "./paths";
+import { folderCopyDestination, joinPath } from "./paths";
 import { askConfirm, askPrompt, notifyError } from "./components/Dialogs";
 import { reportKnownDeleteError } from "./deleteErrors";
 import {
@@ -26,6 +32,17 @@ import {
   syncProfiles,
   type SyncProfile,
 } from "./syncProfiles";
+import {
+  remoteDescriptor,
+  remoteProfiles,
+  remoteStorageDeleteTarget,
+  remoteStorageTransferTarget,
+} from "./remoteProfiles";
+import {
+  objectStorageDeleteTarget,
+  objectStorageProfiles,
+  objectStorageTransferTarget,
+} from "./objectStorageProfiles";
 
 export type SyncDialogState = {
   src: string;
@@ -109,6 +126,226 @@ function basename(path: string): string {
 }
 
 const HIDRIVE_WEBDAV_MOUNT = "/Volumes/webdav.hidrive.ionos.com";
+
+type RemotePathRef = NonNullable<NonNullable<SyncProfile["remotePaths"]>["src"]>;
+type NetworkPathRef = NonNullable<NonNullable<SyncProfile["networkPaths"]>["src"]>;
+
+function localRemotePath(path: string) {
+  // Die Schreibweise des Ordners ist nicht garantiert: Auf case-insensitiven
+  // Dateisystemen kann derselbe Pfad als „DualBeam“ oder „dualbeam“ auftreten.
+  const match =
+    /^(.*\/Library\/Application Support\/DualBeam\/Remote\/Volumes\/)([^/]+)(\/.*)?$/i.exec(path);
+  if (!match) return null;
+  return { label: match[2], relativePath: match[3] || "" };
+}
+
+function remotePathRef(
+  path: string,
+  mounts: Awaited<ReturnType<typeof remoteMounts>>,
+): RemotePathRef | undefined {
+  const mount = mounts.find(
+    (item) => path === item.path || path.startsWith(`${item.path}/`),
+  );
+  if (!mount) return undefined;
+  return { descriptor: mount.descriptor, relativePath: path.slice(mount.path.length) };
+}
+
+function resolvedRemotePath(
+  ref: RemotePathRef | undefined,
+  mounts: Awaited<ReturnType<typeof remoteMounts>>,
+) {
+  if (!ref) return undefined;
+  const mount = mounts.find((item) => item.descriptor === ref.descriptor);
+  if (!mount) return null;
+  return `${mount.path}${ref.relativePath}`;
+}
+
+function networkPathRef(
+  path: string,
+  bookmarks: Awaited<ReturnType<typeof listNetworkBookmarks>>,
+): NetworkPathRef | undefined {
+  const bookmark = bookmarks.find(
+    (item) => path === item.mountPath || path.startsWith(`${item.mountPath}/`),
+  );
+  if (!bookmark) return undefined;
+  return { url: bookmark.url, relativePath: path.slice(bookmark.mountPath.length) };
+}
+
+function resolvedNetworkPath(
+  ref: NetworkPathRef | undefined,
+  bookmarks: Awaited<ReturnType<typeof listNetworkBookmarks>>,
+) {
+  if (!ref) return undefined;
+  const bookmark = bookmarks.find((item) => item.url === ref.url && item.connected);
+  if (!bookmark) return null;
+  return `${bookmark.mountPath}${ref.relativePath}`;
+}
+
+async function mountRemoteForSync(ref: RemotePathRef): Promise<string | null> {
+  const profile = remoteProfiles().find(
+    (item) => remoteDescriptor(item) === ref.descriptor,
+  );
+  if (profile) {
+    const password = await loadRemotePassword(profile);
+    if (!password) return "Das Passwort für das Netzwerk-Laufwerk fehlt im Schlüsselbund.";
+    await mountRemote(profile, password, profile.protocol === "ftp");
+    return null;
+  }
+  const object = objectStorageProfiles().find(
+    (item) => `${item.protocol}://${item.id}` === ref.descriptor,
+  );
+  if (object) {
+    await mountObjectStorage(object);
+    return null;
+  }
+  return "Das gespeicherte Netzwerk-Laufwerk wurde nicht gefunden.";
+}
+
+async function mountNetworkForSync(ref: NetworkPathRef): Promise<string | null> {
+  const bookmark = (await listNetworkBookmarks()).find((item) => item.url === ref.url);
+  if (!bookmark) return "Das gespeicherte Netzwerk-Laufwerk wurde nicht gefunden.";
+  await mountNetworkUrl(bookmark.url);
+  return null;
+}
+
+/** Alte Profile enthielten nur den flüchtigen Mount-Namen. Eine automatische
+ * Umstellung ist ausschließlich dann sicher, wenn genau ein gespeichertes
+ * Remote-Profil genau einem aktuell eingehängten Remote-Laufwerk entspricht. */
+function migrateLegacyRemotePath(
+  path: string,
+  mounts: Awaited<ReturnType<typeof remoteMounts>>,
+) {
+  const legacy = localRemotePath(path);
+  if (!legacy) return undefined;
+  const exact = mounts.find((item) => item.label === legacy.label);
+  if (exact) {
+    const nextPath = `${exact.path}${legacy.relativePath}`;
+    return { path: nextPath, ref: remotePathRef(nextPath, mounts)! };
+  }
+  const known = mounts.filter(
+    (mount) =>
+      remoteProfiles().some(
+        (profile) => remoteDescriptor(profile) === mount.descriptor,
+      ) ||
+      // S3 und Swift werden über eigene Profile verwaltet. Ohne sie bliebe ein
+      // Altprofil auf einem Objekt-Speicher dauerhaft unreparierbar.
+      objectStorageProfiles().some(
+        (profile) => `${profile.protocol}://${profile.id}` === mount.descriptor,
+      ),
+  );
+  if (known.length !== 1) return undefined;
+  const nextPath = `${known[0].path}${legacy.relativePath}`;
+  return { path: nextPath, ref: remotePathRef(nextPath, mounts)! };
+}
+
+async function resolveProfileRemotePaths(
+  profile: SyncProfile,
+): Promise<SyncProfile | null> {
+  let mounts = await remoteMounts();
+  const refs = [profile.remotePaths?.src, profile.remotePaths?.dst].filter(
+    (ref): ref is NonNullable<RemotePathRef> => !!ref,
+  );
+  for (const ref of refs) {
+    if (resolvedRemotePath(ref, mounts) !== null) continue;
+    try {
+      const error = await mountRemoteForSync(ref);
+      if (error) {
+        await notifyError(`Netzwerk-Laufwerk ist offline: ${error}`);
+        return null;
+      }
+      mounts = await remoteMounts();
+      if (resolvedRemotePath(ref, mounts) === null) {
+        await notifyError("Netzwerk-Laufwerk ist offline und konnte nicht verbunden werden.");
+        return null;
+      }
+    } catch (error) {
+      await notifyError(`Netzwerk-Laufwerk ist offline: ${errMsg(error)}`);
+      return null;
+    }
+  }
+
+  let bookmarks = await listNetworkBookmarks();
+  // Auch ältere Profile, die nur den früheren /Volumes-Pfad kennen, können
+  // über das gespeicherte Lesezeichen eindeutig migriert und verbunden werden.
+  const savedSourceNetworkRef = profile.networkPaths?.src
+    ?? networkPathRef(profile.src, bookmarks);
+  const savedTargetNetworkRef = profile.networkPaths?.dst
+    ?? networkPathRef(profile.dst, bookmarks);
+  const networkRefs = [savedSourceNetworkRef, savedTargetNetworkRef].filter(
+    (ref): ref is NonNullable<NetworkPathRef> => !!ref,
+  );
+  for (const ref of networkRefs) {
+    if (resolvedNetworkPath(ref, bookmarks) !== null) continue;
+    try {
+      const error = await mountNetworkForSync(ref);
+      if (error) {
+        await notifyError(`Netzwerk-Laufwerk ist offline: ${error}`);
+        return null;
+      }
+      bookmarks = await listNetworkBookmarks();
+      if (resolvedNetworkPath(ref, bookmarks) === null) {
+        await notifyError("Netzwerk-Laufwerk ist offline und konnte nicht verbunden werden.");
+        return null;
+      }
+    } catch (error) {
+      await notifyError(`Netzwerk-Laufwerk ist offline: ${errMsg(error)}`);
+      return null;
+    }
+  }
+
+  const sourceResolved = resolvedRemotePath(profile.remotePaths?.src, mounts)
+    ?? resolvedNetworkPath(savedSourceNetworkRef, bookmarks);
+  const targetResolved = resolvedRemotePath(profile.remotePaths?.dst, mounts)
+    ?? resolvedNetworkPath(savedTargetNetworkRef, bookmarks);
+
+  let src = sourceResolved ?? profile.src;
+  let dst = targetResolved ?? profile.dst;
+  let srcRef = profile.remotePaths?.src;
+  let dstRef = profile.remotePaths?.dst;
+  let srcNetworkRef = savedSourceNetworkRef;
+  let dstNetworkRef = savedTargetNetworkRef;
+
+  // Einmalige Migration für Profile, die vor der stabilen Zuordnung gespeichert
+  // wurden. Scheint die Zuordnung nicht eindeutig, wird nichts geraten.
+  if (!srcRef) {
+    const migrated = migrateLegacyRemotePath(src, mounts);
+    if (migrated) {
+      src = migrated.path;
+      srcRef = migrated.ref;
+    }
+  }
+  if (!dstRef) {
+    const migrated = migrateLegacyRemotePath(dst, mounts);
+    if (migrated) {
+      dst = migrated.path;
+      dstRef = migrated.ref;
+    }
+  }
+
+  const stale = !srcRef
+    ? localRemotePath(src)
+    : !dstRef
+      ? localRemotePath(dst)
+      : null;
+  if (stale) {
+    await notifyError(`Das Laufwerk „${stale.label}“ ist nicht verbunden. Bitte verbinden Sie es in der Seitenleiste erneut.`);
+    return null;
+  }
+  const remotePaths = srcRef || dstRef ? { src: srcRef, dst: dstRef } : undefined;
+  const networkPaths = srcNetworkRef || dstNetworkRef
+    ? { src: srcNetworkRef, dst: dstNetworkRef }
+    : undefined;
+  const resolved = { ...profile, src, dst, remotePaths, networkPaths };
+  if (
+    resolved.src !== profile.src ||
+    resolved.dst !== profile.dst ||
+    JSON.stringify(resolved.remotePaths) !== JSON.stringify(profile.remotePaths) ||
+    JSON.stringify(resolved.networkPaths) !== JSON.stringify(profile.networkPaths)
+  ) {
+    saveSyncProfile(resolved);
+  }
+  return resolved;
+}
 
 const isHiDriveWebDavPath = (path: string) =>
   path === HIDRIVE_WEBDAV_MOUNT || path.startsWith(`${HIDRIVE_WEBDAV_MOUNT}/`);
@@ -329,8 +566,15 @@ export async function refreshSyncPreview() {
 }
 
 export async function applySyncProfile(id: string, preview = false) {
-  const profile = syncProfiles().find((item) => item.id === id);
-  if (!profile || state.job) return;
+  const savedProfile = syncProfiles().find((item) => item.id === id);
+  if (!savedProfile || state.job) return false;
+  // Ein Profil bleibt auch dann auswählbar, wenn sein Netzlaufwerk nicht
+  // mehr existiert. Nur Vorschau und Ausführung brauchen eine Verbindung;
+  // insbesondere muss der Löschen-Button für einen verwaisten Eintrag sofort
+  // verfügbar sein.
+  setActiveSyncProfileId(savedProfile.id);
+  const profile = await resolveProfileRemotePaths(savedProfile);
+  if (!profile) return false;
   setSyncDeleteExtra(profile.deleteExtra);
   setSyncIgnorePatterns(profile.ignorePatterns);
   setSyncMode(profile.mode);
@@ -342,6 +586,10 @@ export async function applySyncProfile(id: string, preview = false) {
     profile.transport === "rsync" && !isHiDriveWebDavPath(profile.dst)
       ? "filesystem"
       : profile.transport;
+  const destination =
+    transport === "filesystem"
+      ? folderCopyDestination(basename(profile.src), profile.dst)
+      : profile.dst;
   setSyncTransport(transport);
   if (transport === "rsync") {
     const defaults = rsyncDefaultsFromWebDavPath(profile.dst);
@@ -359,13 +607,12 @@ export async function applySyncProfile(id: string, preview = false) {
       // klare Meldung statt das Profil unbrauchbar zu machen.
     }
   } else {
-    setRsyncDefaults(profile.dst);
+    setRsyncDefaults(destination);
     setSyncRsyncPassword("");
   }
-  setActiveSyncProfileId(profile.id);
   setSyncDialog({
     src: profile.src,
-    dst: profile.dst,
+    dst: destination,
     srcName: basename(profile.src),
     target: state.active === "left" ? "right" : "left",
   });
@@ -373,6 +620,7 @@ export async function applySyncProfile(id: string, preview = false) {
   setSyncConflictChoices({});
   setSyncPreviewReady(false);
   if (preview && transport === "filesystem") await reloadPreview();
+  return true;
 }
 
 /** Führt ein gespeichertes Profil unabhängig von den aktuell geöffneten Panes
@@ -383,7 +631,8 @@ export async function runSyncProfile(id: string) {
   const profile = syncProfiles().find((item) => item.id === id);
   if (!profile || state.job) return;
 
-  await applySyncProfile(profile.id, true);
+  const applied = await applySyncProfile(profile.id, true);
+  if (!applied) return;
   // `reloadPreview` kann bei einem Fehler den Dialog schließen. In diesem
   // Fall darf kein Job mit einer unvollständigen Vorschau gestartet werden.
   if (!syncDialog() || syncLoading()) return;
@@ -407,6 +656,26 @@ export async function saveCurrentSyncProfile() {
     }));
   const trimmed = name?.trim();
   if (!trimmed) return;
+  let remotePaths: SyncProfile["remotePaths"];
+  let networkPaths: SyncProfile["networkPaths"];
+  try {
+    const mounts = await remoteMounts();
+    const src = remotePathRef(dialog.src, mounts);
+    const dst = remotePathRef(dialog.dst, mounts);
+    if (src || dst) remotePaths = { src, dst };
+  } catch {
+    // Das Speichern eines lokalen Profils darf nicht an einer kurzzeitig
+    // nicht erreichbaren Remote-Mount-Abfrage scheitern.
+  }
+  try {
+    const bookmarks = await listNetworkBookmarks();
+    const src = networkPathRef(dialog.src, bookmarks);
+    const dst = networkPathRef(dialog.dst, bookmarks);
+    if (src || dst) networkPaths = { src, dst };
+  } catch {
+    // Ein lokales Profil bleibt auch dann speicherbar, wenn die macOS-
+    // Netzwerk-Laufwerke gerade nicht abgefragt werden können.
+  }
   const profile: SyncProfile = {
     id: existing?.id ?? newSyncProfileId(),
     name: trimmed,
@@ -424,8 +693,10 @@ export async function saveCurrentSyncProfile() {
             host: syncRsyncHost().trim(),
             username: syncRsyncUsername().trim(),
             remotePath: syncRsyncRemotePath().trim(),
-          }
+        }
         : undefined,
+    remotePaths,
+    networkPaths,
   };
   saveSyncProfile(profile);
   setActiveSyncProfileId(profile.id);
@@ -544,14 +815,17 @@ export async function confirmSync() {
           filesDone: 0,
           current: "",
         });
+        const items = leftToRight.map((entry) => ({
+          src: joinPath(s.src, entry.rel),
+          dst: joinPath(s.dst, entry.rel),
+          overwrite: true,
+        }));
         await runJob(
           id,
           "copy",
-          leftToRight.map((entry) => ({
-            src: joinPath(s.src, entry.rel),
-            dst: joinPath(s.dst, entry.rel),
-            overwrite: true,
-          })),
+          items,
+          await objectStorageTransferTarget(items),
+          await remoteStorageTransferTarget(items),
         );
       }
       if (rightToLeft.length > 0) {
@@ -563,14 +837,17 @@ export async function confirmSync() {
           filesDone: 0,
           current: "",
         });
+        const items = rightToLeft.map((entry) => ({
+          src: joinPath(s.dst, entry.rel),
+          dst: joinPath(s.src, entry.rel),
+          overwrite: true,
+        }));
         await runJob(
           id,
           "copy",
-          rightToLeft.map((entry) => ({
-            src: joinPath(s.dst, entry.rel),
-            dst: joinPath(s.src, entry.rel),
-            overwrite: true,
-          })),
+          items,
+          await objectStorageTransferTarget(items),
+          await remoteStorageTransferTarget(items),
         );
       }
     } catch (e) {
@@ -598,7 +875,12 @@ export async function confirmSync() {
       const items = copies.map((e) => ({
         src: joinPath(s.src, e.rel),
         dst: joinPath(s.dst, e.rel),
-        overwrite: e.action === "update",
+        // Sync muss denselben robusten Überschreibpfad wie der normale
+        // Kopierprozess verwenden. Die SFTP-Verzeichnisansicht kann kurzzeitig
+        // veraltet sein und eine vorhandene Datei als "copy" statt "update"
+        // melden. `overwrite: true` lädt deshalb zunächst unter einem
+        // temporären Namen hoch und ersetzt das Ziel anschließend sicher.
+        overwrite: true,
       }));
       setState("job", {
         id,
@@ -608,7 +890,13 @@ export async function confirmSync() {
         filesDone: 0,
         current: "",
       });
-      await runJob(id, "copy", items);
+      await runJob(
+        id,
+        "copy",
+        items,
+        await objectStorageTransferTarget(items),
+        await remoteStorageTransferTarget(items),
+      );
     }
     if (deletes.length > 0) {
       const deletePaths = deletes.map((e) => joinPath(s.dst, e.rel));
@@ -625,7 +913,21 @@ export async function confirmSync() {
         current: "",
       });
       if (targetIsNetwork) {
-        await runNetworkDelete(id, deletePaths);
+        let objectStorage;
+        let remoteStorage;
+        try {
+          objectStorage = await objectStorageDeleteTarget(
+            deletePaths,
+            deletes
+              .filter((entry) => entry.isDir)
+              .map((entry) => joinPath(s.dst, entry.rel)),
+          );
+          if (!objectStorage) remoteStorage = await remoteStorageDeleteTarget(deletePaths);
+        } catch {
+          // Für nicht verwaltete Netzlaufwerke gibt es keinen Objekt-Speicher-
+          // Schnellpfad; sie werden weiterhin über das Dateisystem gelöscht.
+        }
+        await runNetworkDelete(id, deletePaths, objectStorage, remoteStorage);
       } else {
         await moveToTrash(deletePaths);
         setState("job", "done", deletes.length);
@@ -657,6 +959,6 @@ export async function syncToOther() {
     return;
   }
   const dstCwd = state[dstPane].cwd;
-  const dst = joinPath(dstCwd, folder.name);
+  const dst = folderCopyDestination(folder.name, dstCwd);
   await openSyncDialog(folder.path, dst, folder.name, dstPane);
 }
