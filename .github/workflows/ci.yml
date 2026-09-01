@@ -23,6 +23,13 @@ jobs:
       - name: Install frontend dependencies
         run: npm ci
 
+      # Tauris Build-Skript prueft die in tauri.conf.json angemeldeten Sidecars.
+      # Ohne rclone bricht schon 'cargo clippy' ab ("resource path ... doesn't
+      # exist"). Die Datei ist bewusst nicht eingecheckt (~78 MB), das Skript
+      # laedt sie und prueft ihre Pruefsumme.
+      - name: Fetch rclone sidecar
+        run: bash scripts/fetch-rclone.sh
+
       - name: Test and build frontend
         run: |
           npm test
