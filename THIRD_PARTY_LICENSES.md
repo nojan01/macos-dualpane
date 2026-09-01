@@ -2,9 +2,8 @@
 
 Stand: 1. August 2026, DualBeam 0.4.0
 
-DualBeam selbst steht unter der [EULA](EULA.md). Für die hier aufgeführten
-Fremdkomponenten gelten ausschließlich deren eigene Lizenzen; sie gehen im
-Konfliktfall vor (EULA Ziffer 5).
+DualBeam selbst steht unter der [MIT-Lizenz](LICENSE). Für die hier aufgeführten
+Fremdkomponenten gelten zusätzlich deren eigene Lizenzen.
 
 ---
 
@@ -95,7 +94,7 @@ Im Programmpaket unter `DualBeam.app/Contents/Resources/licenses/`:
 
 | Datei | Inhalt |
 | --- | --- |
-| `EULA.txt` | Endbenutzer-Lizenzvereinbarung für DualBeam |
+| `DUALBEAM-LICENSE.txt` | MIT-Lizenz von DualBeam samt Urhebervermerk |
 | `RCLONE-LICENSE.txt` | MIT-Lizenz von rclone samt Urhebervermerk |
 | `MIT.txt` | Wortlaut der MIT-Lizenz |
 | `APACHE-2.0.txt` | Wortlaut der Apache-Lizenz 2.0 |
@@ -105,9 +104,3 @@ Für die beiden übrigen Lizenzen liegt bewusst kein eigener Text bei:
 **CC0-1.0** (`notify`) ist eine Gemeinfreiheitserklärung und verlangt weder
 Urhebervermerk noch Lizenztext. Bei **Unlicense ODER MIT** (`walkdir`) ist die
 MIT-Alternative gewählt, deren Wortlaut in `MIT.txt` steht.
-
-## 5. Hinweis zum Lizenzwechsel
-
-DualBeam stand bis einschließlich Version 0.4.0 unter der MIT-Lizenz. Bereits
-erteilte MIT-Rechte bleiben für die damals veröffentlichten Fassungen bestehen;
-die EULA gilt für alles Spätere.

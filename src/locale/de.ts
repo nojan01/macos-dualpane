@@ -452,7 +452,7 @@ export const de: Record<string, string> = {
   "about.version": "Version",
   "about.author": "Autor",
   "about.license": "Lizenz",
-  "about.licenseName": "EULA (Endbenutzer-Lizenzvereinbarung)",
+  "about.licenseName": "MIT-Lizenz",
   "about.website": "Webseite",
   "about.checkUpdates": "Nach Updates suchen",
   "about.checking": "Suche nach Updates…",

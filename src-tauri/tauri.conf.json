@@ -48,8 +48,8 @@
     "category": "Utility",
     "shortDescription": "Dual-Pane File Manager",
     "longDescription": "Schlanker Dateimanager mit zwei Panes im Stil von Commander One / ForkLift.",
-    "copyright": "Copyright © 2026 N.J. — Alle Rechte vorbehalten",
-    "license": "LicenseRef-DualBeam-EULA",
+    "copyright": "Copyright © 2026 N.J.",
+    "license": "MIT",
     "licenseFile": "../LICENSE",
     "macOS": {
       "minimumSystemVersion": "12.0",

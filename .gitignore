@@ -24,8 +24,8 @@ src-tauri/gen/schemas
 # Mitgelieferte Fremdprogramme (per scripts/fetch-rclone.sh geholt, ~78 MB)
 src-tauri/binaries
 
-# Aus EULA.md und THIRD_PARTY_LICENSES.md erzeugt (scripts/sync-licenses.sh),
+# Aus LICENSE und THIRD_PARTY_LICENSES.md erzeugt (scripts/sync-licenses.sh),
 # rclone-Text von scripts/fetch-rclone.sh geholt. Nicht von Hand pflegen.
-src-tauri/resources/licenses/EULA.txt
+src-tauri/resources/licenses/DUALBEAM-LICENSE.txt
 src-tauri/resources/licenses/THIRD-PARTY-LICENSES.txt
 src-tauri/resources/licenses/RCLONE-LICENSE.txt

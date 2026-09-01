@@ -3,7 +3,7 @@ name = "dualbeam"
 version = "0.4.0"
 description = "DualBeam — Dual-Pane File Manager für macOS"
 authors = ["N.J."]
-license = "LicenseRef-DualBeam-EULA"
+license = "MIT"
 edition = "2021"
 
 [lib]
