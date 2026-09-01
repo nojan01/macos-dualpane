@@ -1374,7 +1374,7 @@ fn list_volumes_blocking() -> Result<Vec<Volume>, String> {
             kind: "remote".to_string(),
         });
     }
-    out.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    out.sort_by_key(|entry| entry.name.to_lowercase());
     Ok(out)
 }
 
