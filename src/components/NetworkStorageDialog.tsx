@@ -5,10 +5,9 @@ import { errMsg, t } from "../i18n";
 import { emptyObjectStorageProfile } from "../objectStorageProfiles";
 import { openObjectStorageDialog } from "./ObjectStorageDialog";
 import { openRemoteDialog } from "./RemoteDialog";
-import { openRsyncDialog } from "./RsyncDialog";
 import { notifyError } from "./Dialogs";
 
-type Protocol = "webdav" | "smb" | "s3" | "swift" | "sftp" | "ftps" | "rsync";
+type Protocol = "webdav" | "smb" | "s3" | "swift" | "sftp" | "ftps";
 type DialogState = { protocol: Protocol; webdavUrl: string; busy: boolean };
 
 const [dialog, setDialog] = createSignal<DialogState | null>(null);
@@ -36,11 +35,7 @@ export function NetworkStorageDialog() {
     const current = dialog();
     if (!current || current.busy) return;
     close();
-    if (current.protocol === "rsync") {
-      openRsyncDialog("", "/");
-    } else {
-      openRemoteDialog({ protocol: current.protocol === "ftps" ? "ftpsExplicit" : "sftp" });
-    }
+    openRemoteDialog({ protocol: current.protocol === "ftps" ? "ftpsExplicit" : "sftp" });
   };
 
   const connectWebDav = async () => {
@@ -83,7 +78,6 @@ export function NetworkStorageDialog() {
           <option value="swift">OpenStack Swift</option>
           <option value="sftp">SFTP</option>
           <option value="ftps">FTPS</option>
-          <option value="rsync">rsync über SSH</option>
         </select>
       </label>
       <Show when={current().protocol === "webdav" || current().protocol === "smb"} fallback={<p class="network-storage-note">{t("network.nextCredentials")}</p>}>

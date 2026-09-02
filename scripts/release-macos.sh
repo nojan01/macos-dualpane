@@ -7,8 +7,7 @@
 # mussten neu beschafft werden.
 #
 # Aufruf:
-#   scripts/release-macos.sh              persoenliche Variante (mit HiDrive)
-#   scripts/release-macos.sh --public     oeffentliche Variante (ohne HiDrive)
+#   scripts/release-macos.sh              bauen, signieren, notarisieren
 #   scripts/release-macos.sh --reset      hinterlegte Zugangsdaten loeschen
 set -euo pipefail
 
@@ -17,14 +16,8 @@ SERVICE="DualBeam Notarisierung"
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_root"
 
-variant="persoenlich"
-npm_script="tauri:build"
 for arg in "$@"; do
   case "$arg" in
-    --public)
-      variant="oeffentlich"
-      npm_script="tauri:build:public"
-      ;;
     --reset)
       security delete-generic-password -s "$SERVICE" >/dev/null 2>&1 &&
         echo "Hinterlegte Zugangsdaten geloescht." ||
@@ -32,7 +25,7 @@ for arg in "$@"; do
       exit 0
       ;;
     *)
-      echo "Unbekannte Option: $arg (erlaubt: --public, --reset)" >&2
+      echo "Unbekannte Option: $arg (erlaubt: --reset)" >&2
       exit 1
       ;;
   esac
@@ -101,7 +94,7 @@ fi
 
 version="$(sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\(.*\)".*/\1/p' "$conf" | head -1)"
 echo
-echo "Baue DualBeam $version, Variante: $variant"
+echo "Baue DualBeam $version"
 echo "Signatur: $identity"
 echo
 
@@ -128,7 +121,7 @@ export TAURI_SIGNING_PRIVATE_KEY="$updater_key"
 export TAURI_SIGNING_PRIVATE_KEY_PASSWORD=""
 
 # shellcheck disable=SC2086
-npm run "$npm_script"
+npm run tauri:build
 
 app="src-tauri/target/release/bundle/macos/DualBeam.app"
 dmg="src-tauri/target/release/bundle/dmg/DualBeam_${version}_aarch64.dmg"
@@ -234,29 +227,20 @@ fi
 echo "Fertig signiert und notarisiert:"
 echo "  $dmg"
 
-# Updater-Manifest nur fuer die oeffentliche Variante. Die persoenliche
-# Variante enthaelt HiDrive-Funktionen; wuerde sie als Update ausgeliefert,
-# bekaemen alle Nutzer eine Fassung, die so nicht vorgesehen ist. Umgekehrt
-# wuerde ein Update mit der oeffentlichen Fassung einer persoenlichen
-# Installation stillschweigend Funktionen entziehen.
+# Ohne Manifest kann der eingebaute Updater das Paket nicht anbieten; es wird
+# deshalb bei jedem Release miterzeugt.
 updater_archive="src-tauri/target/release/bundle/macos/DualBeam.app.tar.gz"
-if [ "$variant" = "oeffentlich" ]; then
-  if [ ! -f "$updater_archive" ]; then
-    echo
-    echo "Updater-Archiv fehlt: $updater_archive" >&2
-    echo "Ist \"createUpdaterArtifacts\" in $conf aktiviert?" >&2
-    exit 1
-  fi
-  npm run --silent make-updater-manifest -- \
-    "$version" darwin-aarch64 "$updater_archive" latest.json
+if [ ! -f "$updater_archive" ]; then
   echo
-  echo "Fuer das GitHub-Release hochladen:"
-  echo "  $dmg"
-  echo "  $updater_archive"
-  echo "  ${updater_archive}.sig"
-  echo "  latest.json"
-else
-  echo
-  echo "Hinweis: Variante \"$variant\" – es wurde kein Updater-Manifest erzeugt."
-  echo "Fuer ein veroeffentlichtes Update: scripts/release-macos.sh --public"
+  echo "Updater-Archiv fehlt: $updater_archive" >&2
+  echo "Ist \"createUpdaterArtifacts\" in $conf aktiviert?" >&2
+  exit 1
 fi
+npm run --silent make-updater-manifest -- \
+  "$version" darwin-aarch64 "$updater_archive" latest.json
+echo
+echo "Fuer das GitHub-Release hochladen:"
+echo "  $dmg"
+echo "  $updater_archive"
+echo "  ${updater_archive}.sig"
+echo "  latest.json"

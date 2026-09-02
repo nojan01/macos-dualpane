@@ -32,7 +32,6 @@ import { SyncDialog } from "./components/SyncDialog";
 import { PropertiesDialog } from "./components/PropertiesDialog";
 import { JobBar } from "./components/JobBar";
 import { AboutDialog, openAbout } from "./components/AboutDialog";
-import { RsyncDialog } from "./components/RsyncDialog";
 import { RemoteDialog } from "./components/RemoteDialog";
 import { ObjectStorageDialog } from "./components/ObjectStorageDialog";
 import { NetworkStorageDialog } from "./components/NetworkStorageDialog";
@@ -281,13 +280,9 @@ export function App() {
     createEffect(() => {
       const job = state.job;
       const label = job
-        ? job.kind === "rsync"
-          ? job.filesDone > 0
-            ? String(job.filesDone)
-            : "↻"
-          : job.total > 0
-            ? `${job.done}/${job.total}`
-            : "…"
+        ? job.total > 0
+          ? `${job.done}/${job.total}`
+          : "…"
         : null;
       if (label === lastDockBadge) return;
       lastDockBadge = label;
@@ -401,7 +396,7 @@ export function App() {
       const rCwd =
         persisted.panes.right.tabs[persisted.panes.right.activeTab].cwd;
       // Beide Panes parallel laden: liegt eines (oder beide) auf einem langsamen
-      // Netzlaufwerk (HiDrive/WebDAV), blockiert es so nicht das jeweils andere.
+      // Netzlaufwerk (WebDAV/SMB), blockiert es so nicht das jeweils andere.
       await Promise.all([
         loadPane("left", lCwd || home),
         loadPane("right", rCwd || home),
@@ -928,7 +923,6 @@ export function App() {
       <RenameDialog />
       <SearchDialog />
       <SyncDialog />
-      <RsyncDialog />
       <RemoteDialog />
       <NetworkStorageDialog />
       <ObjectStorageDialog />

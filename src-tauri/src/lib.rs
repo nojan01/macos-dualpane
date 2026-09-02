@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
-use std::io::{BufReader, Read, Write};
+use std::io::{Read, Write};
 use std::net::IpAddr;
 use std::process::{Command, Stdio};
 
@@ -1241,29 +1241,44 @@ fn unmount_all_network_volumes() {
     }
 }
 
-fn is_hidrive_webdav_path(path: &Path) -> bool {
-    #[cfg(feature = "hidrive")]
-    {
-        path.starts_with(Path::new("/Volumes").join(HIDRIVE_HOST))
+// Fragt den Kernel unmittelbar nach dem Dateisystemtyp eines Pfads. Anders als
+// die Auswertung von `/sbin/mount` hängt das weder an einem externen Prozess
+// noch am Zerlegen von dessen Textausgabe: Scheitert der Kommandoaufruf, bliebe
+// die Mount-Tabelle leer und ein Netzlaufwerk würde als lokal gelten — mit der
+// Folge, dass beim Löschen der Papierkorb benutzt wird und große Dateien dort
+// als 0-Byte-Rest zurückbleiben.
+// Existiert der Pfad selbst noch nicht (etwa ein geplantes Kopierziel), zählt
+// das nächstgelegene vorhandene Elternverzeichnis.
+fn statfs_fstype(path: &Path) -> Option<String> {
+    use std::os::unix::ffi::OsStrExt;
+    let mut candidate = Some(path);
+    while let Some(current) = candidate {
+        if let Ok(raw) = std::ffi::CString::new(current.as_os_str().as_bytes()) {
+            let mut info: libc::statfs = unsafe { std::mem::zeroed() };
+            // Sicher: `raw` lebt über den Aufruf hinaus, `info` ist voll
+            // initialisiert und wird nur bei Rückgabewert 0 ausgelesen.
+            if unsafe { libc::statfs(raw.as_ptr(), &mut info) } == 0 {
+                let name = unsafe { std::ffi::CStr::from_ptr(info.f_fstypename.as_ptr()) };
+                return name.to_str().ok().map(|s| s.to_ascii_lowercase());
+            }
+        }
+        candidate = current.parent();
     }
-    #[cfg(not(feature = "hidrive"))]
-    {
-        let _ = path;
-        false
-    }
+    None
 }
 
 fn is_network_path(path: &Path, mounts: &std::collections::HashMap<String, String>) -> bool {
-    // Fallback für macOS WebDAV: In seltenen Fällen liefert die Mount-Tabelle
-    // während eines laufenden Finder-Zugriffs keinen passenden Präfix-Treffer.
-    // Der bekannte HiDrive-Mount darf dann trotzdem nie in den lokalen
-    // Papierkorb/Undo-Ordner verschoben werden.
     // SFTP/FTP/FTPS werden von DualBeam über rclone unterhalb des eigenen
     // App-Ordners eingehängt. Sie erscheinen nicht zuverlässig in der
     // macOS-Mount-Tabelle, sind aber ebenso Netzwerkziele: Für sie darf weder
     // Papierkorb noch der lokale Undo-Puffer verwendet werden.
+    // `statfs` fragt den Kernel direkt und greift daher auch dann, wenn der
+    // Aufruf von `/sbin/mount` ausfällt; die Mount-Tabelle bleibt als
+    // Rückfallebene erhalten.
     remote::is_remote_mount(path)
-        || is_hidrive_webdav_path(path)
+        || statfs_fstype(path)
+            .map(|fstype| is_network_fstype(&fstype))
+            .unwrap_or(false)
         || path_fstype(path, mounts)
             .map(|fstype| is_network_fstype(&fstype))
             .unwrap_or(false)
@@ -1298,32 +1313,6 @@ async fn path_is_network(path: String) -> bool {
     .unwrap_or(false)
 }
 
-// IONOS HiDrive WebDAV-Netzwerk-Bookmark (Host, Anzeigename, URL an einer Stelle).
-// Nur in der persönlichen Build-Variante (Feature `hidrive`). Die Voreinstellung
-// ist bewusst leer: Wer nichts angibt, erhält die öffentliche Fassung ohne diese
-// personenbezogene Adresse. Die persönliche Variante fordert das Feature
-// ausdrücklich an (`npm run tauri:build`, siehe package.json).
-#[cfg(feature = "hidrive")]
-const HIDRIVE_HOST: &str = "webdav.hidrive.ionos.com";
-#[cfg(feature = "hidrive")]
-const HIDRIVE_NAME: &str = "IONOS HiDrive";
-#[cfg(feature = "hidrive")]
-const HIDRIVE_URL: &str = "https://webdav.hidrive.ionos.com/";
-
-// Anzeigename für ein gemountetes Volume. In der HiDrive-Variante wird der
-// technische WebDAV-Hostname durch den freundlichen Namen ersetzt.
-#[cfg(feature = "hidrive")]
-fn volume_display_name(name: &str) -> String {
-    match name {
-        HIDRIVE_HOST => HIDRIVE_NAME.to_string(),
-        _ => name.to_string(),
-    }
-}
-#[cfg(not(feature = "hidrive"))]
-fn volume_display_name(name: &str) -> String {
-    name.to_string()
-}
-
 #[tauri::command]
 async fn list_volumes() -> Result<Vec<Volume>, String> {
     tauri::async_runtime::spawn_blocking(list_volumes_blocking)
@@ -1352,9 +1341,8 @@ fn list_volumes_blocking() -> Result<Vec<Volume>, String> {
                 _ => "local",
             }
             .to_string();
-            let display = volume_display_name(&name);
             out.push(Volume {
-                name: display,
+                name,
                 path: path_str,
                 kind,
             });
@@ -1427,29 +1415,12 @@ fn save_network_bookmark_settings(settings: &NetworkBookmarkSettings) -> Result<
     std::fs::write(path, text).map_err(|e| e.to_string())
 }
 
-fn builtin_network_bookmarks() -> Vec<(String, String, String)> {
-    // (name, url, expected mount path)
-    #[cfg(feature = "hidrive")]
-    {
-        vec![(
-            HIDRIVE_NAME.into(),
-            HIDRIVE_URL.into(),
-            format!("/Volumes/{}", HIDRIVE_HOST),
-        )]
-    }
-    // Öffentliche Version: keine vordefinierten Netzwerk-Lesezeichen.
-    #[cfg(not(feature = "hidrive"))]
-    {
-        Vec::new()
-    }
-}
-
 fn known_network_bookmarks() -> Vec<(String, String, String)> {
     let settings = load_network_bookmark_settings();
-    let mut bookmarks: Vec<(String, String, String)> = builtin_network_bookmarks()
-        .into_iter()
-        .filter(|(_, url, _)| !settings.removed_urls.contains(url))
-        .collect();
+    // (name, url, erwarteter Mountpfad) – ausschließlich vom Nutzer angelegte
+    // Lesezeichen. `removed_urls` bleibt für Einstellungsdateien älterer
+    // Versionen erhalten, damit dort entfernte Einträge entfernt bleiben.
+    let mut bookmarks: Vec<(String, String, String)> = Vec::new();
     for bookmark in settings.bookmarks {
         if !settings.removed_urls.contains(&bookmark.url)
             && !bookmarks.iter().any(|(_, url, _)| url == &bookmark.url)
@@ -1523,24 +1494,19 @@ fn remember_network_volume_inner(path: &Path) -> Result<(), String> {
     })?;
     let name = mount_path
         .file_name()
-        .map(|name| volume_display_name(&name.to_string_lossy()))
+        .map(|name| name.to_string_lossy().into_owned())
         .unwrap_or_else(|| url.clone());
     let mut settings = load_network_bookmark_settings();
     settings.removed_urls.retain(|removed| removed != &url);
-    if !builtin_network_bookmarks()
-        .iter()
-        .any(|(_, known_url, _)| known_url == &url)
-    {
-        if let Some(bookmark) = settings.bookmarks.iter_mut().find(|item| item.url == url) {
-            bookmark.name = name;
-            bookmark.mount_path = mount_path_str;
-        } else {
-            settings.bookmarks.push(StoredNetworkBookmark {
-                name,
-                url,
-                mount_path: mount_path_str,
-            });
-        }
+    if let Some(bookmark) = settings.bookmarks.iter_mut().find(|item| item.url == url) {
+        bookmark.name = name;
+        bookmark.mount_path = mount_path_str;
+    } else {
+        settings.bookmarks.push(StoredNetworkBookmark {
+            name,
+            url,
+            mount_path: mount_path_str,
+        });
     }
     save_network_bookmark_settings(&settings)
 }
@@ -1567,17 +1533,11 @@ fn list_network_bookmarks() -> Result<Vec<NetworkBookmark>, String> {
 /// werden.
 #[tauri::command]
 fn remove_network_bookmark(url: String) -> Result<(), String> {
-    let is_builtin = builtin_network_bookmarks()
-        .iter()
-        .any(|(_, known_url, _)| known_url == &url);
     let mut settings = load_network_bookmark_settings();
     let custom_count = settings.bookmarks.len();
     settings.bookmarks.retain(|bookmark| bookmark.url != url);
-    if !is_builtin && settings.bookmarks.len() == custom_count {
+    if settings.bookmarks.len() == custom_count {
         return Err("Unbekanntes Netzwerk-Lesezeichen".into());
-    }
-    if is_builtin && !settings.removed_urls.contains(&url) {
-        settings.removed_urls.push(url);
     }
     save_network_bookmark_settings(&settings)
 }
@@ -2041,428 +2001,6 @@ struct JobItem {
     overwrite: bool,
 }
 
-/// Direkte rsync-over-SSH-Synchronisation. Die Zugangsdaten stammen aus dem
-/// Dialog und werden nicht persistent gespeichert.
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct RsyncRequest {
-    job_id: String,
-    local_path: String,
-    host: String,
-    remote_path: String,
-    username: String,
-    password: String,
-    delete_extra: bool,
-    exclude_patterns: Vec<String>,
-    /// Obergrenze je Datei in Bytes; `None` oder `0` bedeutet „keine Grenze“.
-    /// `#[serde(default)]`, damit ältere Aufrufer ohne das Feld weiterhin gehen.
-    #[serde(default)]
-    max_file_size: Option<u64>,
-}
-
-fn valid_rsync_username(value: &str) -> bool {
-    !value.is_empty()
-        && value
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
-}
-
-fn valid_rsync_host(value: &str) -> bool {
-    !value.is_empty()
-        && value
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '.'))
-}
-
-fn valid_rsync_path(value: &str) -> bool {
-    value.starts_with('/')
-        && value
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '/' | '-' | '_' | '.'))
-        && !value.split('/').any(|part| part == "..")
-}
-
-fn rsync_askpass_script() -> Result<PathBuf, String> {
-    static NEXT_ASKPASS_ID: AtomicU64 = AtomicU64::new(0);
-    let id = NEXT_ASKPASS_ID.fetch_add(1, Ordering::Relaxed);
-    let path = std::env::temp_dir().join(format!(
-        "dualbeam-rsync-askpass-{}-{id}.sh",
-        std::process::id()
-    ));
-    let mut file = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&path)
-        .map_err(|e| e.to_string())?;
-    // Das Kennwort selbst liegt nur in der Prozessumgebung des Kindprozesses.
-    // Das Skript enthält keine Zugangsdaten und wird direkt nach rsync entfernt.
-    file.write_all(b"#!/bin/sh\nprintf '%s\\n' \"$DUALBEAM_RSYNC_PASSWORD\"\n")
-        .map_err(|e| e.to_string())?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700))
-            .map_err(|e| e.to_string())?;
-    }
-    Ok(path)
-}
-
-fn rsync_executable() -> PathBuf {
-    // Homebrew installiert die aktuelle rsync-Version auf Apple-Silicon-Macs
-    // unter /opt/homebrew. Sie wird bevorzugt, der mit macOS gelieferte Client
-    // bleibt als kompatibler Fallback erhalten.
-    [
-        "/opt/homebrew/bin/rsync",
-        "/usr/local/bin/rsync",
-        "/usr/bin/rsync",
-    ]
-    .iter()
-    .map(PathBuf::from)
-    .find(|path| path.is_file())
-    .unwrap_or_else(|| PathBuf::from("rsync"))
-}
-
-const RSYNC_KEYCHAIN_SERVICE: &str = "com.nojan.dualbeam.rsync";
-
-fn rsync_keychain_account(host: &str, username: &str) -> Result<String, String> {
-    if !valid_rsync_username(username) || !valid_rsync_host(host) {
-        return Err("Ungültiger rsync-Server oder Benutzername".into());
-    }
-    Ok(format!("{username}@{host}"))
-}
-
-#[tauri::command]
-fn save_rsync_password(host: String, username: String, password: String) -> Result<(), String> {
-    if password.is_empty() {
-        return Err("Leeres rsync-Passwort wird nicht gespeichert".into());
-    }
-    let account = rsync_keychain_account(&host, &username)?;
-    #[cfg(target_os = "macos")]
-    {
-        security_framework::passwords::set_generic_password(
-            RSYNC_KEYCHAIN_SERVICE,
-            &account,
-            password.as_bytes(),
-        )
-        .map_err(|e| e.to_string())
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        let _ = account;
-        Err("Der macOS-Schlüsselbund ist nur unter macOS verfügbar".into())
-    }
-}
-
-#[tauri::command]
-fn load_rsync_password(host: String, username: String) -> Result<Option<String>, String> {
-    let account = rsync_keychain_account(&host, &username)?;
-    #[cfg(target_os = "macos")]
-    {
-        match security_framework::passwords::get_generic_password(RSYNC_KEYCHAIN_SERVICE, &account)
-        {
-            Ok(password) => String::from_utf8(password)
-                .map(Some)
-                .map_err(|_| "Ungültiges Kennwort im macOS-Schlüsselbund".to_string()),
-            // Ein fehlender Schlüsselbund-Eintrag ist kein Fehler im Dialog.
-            Err(_) => Ok(None),
-        }
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        let _ = account;
-        Err("Der macOS-Schlüsselbund ist nur unter macOS verfügbar".into())
-    }
-}
-
-fn emit_rsync_status_line(
-    app: &AppHandle,
-    job_id: &str,
-    fallback_current: &str,
-    line: &[u8],
-    files_done: &mut u64,
-) {
-    let text = String::from_utf8_lossy(line);
-    if let Some(path) = text.trim().strip_prefix("DUALBEAM:") {
-        // Nur dieses eigene, zeilenbasierte rsync-Ereignis zählt eine Datei.
-        // `to-chk` enthält dagegen die gesamte zu prüfende Baumstruktur und
-        // würde fälschlich wie eine Kopiermenge aussehen.
-        *files_done += 1;
-        let _ = app.emit(
-            "job-progress",
-            JobProgress {
-                job_id: job_id.to_string(),
-                done: 0,
-                total: 0,
-                files_done: *files_done,
-                transfer_percent: None,
-                indeterminate: false,
-                current: if path.is_empty() {
-                    fallback_current.to_string()
-                } else {
-                    path.to_string()
-                },
-                finished: false,
-                cancelled: false,
-                error: None,
-            },
-        );
-    }
-}
-
-#[cfg(unix)]
-fn terminate_rsync_process_group(pid: u32) {
-    // rsync startet ssh als Kindprozess. Ein Signal an die eigene Prozessgruppe
-    // beendet beides zuverlässig, statt eine offene SSH-Verbindung stehen zu
-    // lassen. Fehler sind hier unkritisch: der Prozess kann schon fertig sein.
-    unsafe {
-        let _ = libc::kill(-(pid as i32), libc::SIGTERM);
-    }
-}
-
-fn run_rsync_inner(
-    app: &AppHandle,
-    request: RsyncRequest,
-    cancel: &Arc<AtomicBool>,
-) -> Result<(), String> {
-    if !valid_rsync_username(&request.username) {
-        return Err("Ungültiger rsync-Benutzername".into());
-    }
-    if !valid_rsync_host(&request.host) {
-        return Err("Ungültiger rsync-Server".into());
-    }
-    if !valid_rsync_path(&request.remote_path) {
-        return Err(
-            "Der rsync-Zielpfad muss absolut sein und darf keine '..'-Segmente enthalten".into(),
-        );
-    }
-    if request.password.is_empty() {
-        return Err("Für die rsync-Anmeldung ist ein Passwort erforderlich".into());
-    }
-    let local = expand_tilde(&request.local_path);
-    if !local.is_dir() {
-        return Err(format!(
-            "Lokaler rsync-Quellordner existiert nicht: {}",
-            local.display()
-        ));
-    }
-    let askpass = rsync_askpass_script()?;
-    // Drop-Guard: löscht das Askpass-Skript auch bei frühen Fehler-Returns
-    // (Spawn-Fehler, fehlende Pipes), nicht nur am glücklichen Ende.
-    struct AskpassGuard(PathBuf);
-    impl Drop for AskpassGuard {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_file(&self.0);
-        }
-    }
-    let _askpass_guard = AskpassGuard(askpass.clone());
-    let remote = format!(
-        "{}@{}:{}",
-        request.username, request.host, request.remote_path
-    );
-    let local_arg = format!("{}/", local.to_string_lossy().trim_end_matches('/'));
-    let mut command = Command::new(rsync_executable());
-    command
-        // Entspricht der von IONOS dokumentierten HiDrive-Empfehlung:
-        // rekursiv, Links und Zeiten erhalten, Verzeichnisse übertragen,
-        // ausführliche Fehlerausgabe. `-a` wäre hier ungeeignet, weil es
-        // zusätzlich Eigentümer, Gruppen und Unix-Rechte setzen möchte.
-        .args(["-rltDv", "--partial", "--out-format=DUALBEAM:%n"])
-        .arg("-e")
-        // Akzeptiert den Hostschlüssel beim allerersten Zugriff und schützt
-        // danach weiterhin vor einem geänderten Schlüssel (MITM-Erkennung).
-        .arg("/usr/bin/ssh -o StrictHostKeyChecking=accept-new")
-        .env("SSH_ASKPASS", &askpass)
-        .env("SSH_ASKPASS_REQUIRE", "force")
-        .env("DISPLAY", "dualbeam:0")
-        .env("DUALBEAM_RSYNC_PASSWORD", request.password)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt;
-        // Eigene Prozessgruppe, damit cancel_job rsync und sein ssh-Kind
-        // gemeinsam beenden kann.
-        unsafe {
-            command.pre_exec(|| {
-                if libc::setpgid(0, 0) == -1 {
-                    return Err(std::io::Error::last_os_error());
-                }
-                Ok(())
-            });
-        }
-    }
-    if request.delete_extra {
-        command.arg("--delete");
-    }
-    for pattern in request.exclude_patterns {
-        // Als separates Argument übergeben; rsync interpretiert die Regel,
-        // nicht eine Shell. Damit bleiben gespeicherte Ausschlussmuster wie
-        // `node_modules/` und `*.log` ohne Shell-Injection nutzbar.
-        command.arg("--exclude").arg(pattern);
-    }
-    // Größengrenze: rsync bringt dafür `--max-size` mit. Die Angabe erfolgt in
-    // Bytes ohne Suffix, damit rsync nicht selbst eine Einheit interpretieren
-    // muss. Ohne Grenze entfällt das Argument vollständig.
-    if let Some(limit) = normalize_max_file_size(request.max_file_size) {
-        command.arg(format!("--max-size={limit}"));
-    }
-    command.arg(local_arg).arg(&remote);
-    let mut child = command.spawn().map_err(|e| {
-        if e.kind() == std::io::ErrorKind::NotFound {
-            "rsync ist auf diesem Mac nicht verfügbar".to_string()
-        } else {
-            e.to_string()
-        }
-    })?;
-    let pid = child.id();
-    {
-        let mgr: State<JobManager> = app.state();
-        lock_safe(&mgr.rsync_pids).insert(request.job_id.clone(), pid);
-    }
-    let progress_current = format!("rsync: {remote}");
-    let _ = app.emit(
-        "job-progress",
-        JobProgress {
-            job_id: request.job_id.clone(),
-            done: 0,
-            total: 0,
-            files_done: 0,
-            transfer_percent: None,
-            indeterminate: false,
-            current: progress_current.clone(),
-            finished: false,
-            cancelled: false,
-            error: None,
-        },
-    );
-    if cancel.load(Ordering::SeqCst) {
-        #[cfg(unix)]
-        terminate_rsync_process_group(pid);
-    }
-
-    let stdout = child
-        .stdout
-        .take()
-        .ok_or_else(|| "rsync-Ausgabe konnte nicht gelesen werden".to_string())?;
-    let stderr = child
-        .stderr
-        .take()
-        .ok_or_else(|| "rsync-Fehlerausgabe konnte nicht gelesen werden".to_string())?;
-    let progress_app = app.clone();
-    let progress_job_id = request.job_id.clone();
-    let stdout_reader = std::thread::spawn(move || {
-        let mut reader = BufReader::new(stdout);
-        let mut line = Vec::new();
-        let mut collected = Vec::new();
-        let mut files_done = 0;
-        let mut byte = [0_u8; 1];
-        loop {
-            match reader.read(&mut byte) {
-                Ok(0) | Err(_) => break,
-                Ok(_) if byte[0] == b'\r' || byte[0] == b'\n' => {
-                    if !line.is_empty() {
-                        collected.extend_from_slice(&line);
-                        collected.push(byte[0]);
-                        emit_rsync_status_line(
-                            &progress_app,
-                            &progress_job_id,
-                            &progress_current,
-                            &line,
-                            &mut files_done,
-                        );
-                        line.clear();
-                    }
-                }
-                Ok(_) => line.push(byte[0]),
-            }
-        }
-        if !line.is_empty() {
-            collected.extend_from_slice(&line);
-            emit_rsync_status_line(
-                &progress_app,
-                &progress_job_id,
-                &progress_current,
-                &line,
-                &mut files_done,
-            );
-        }
-        collected
-    });
-    let stderr_reader = std::thread::spawn(move || {
-        let mut text = Vec::new();
-        let mut reader = BufReader::new(stderr);
-        let _ = reader.read_to_end(&mut text);
-        text
-    });
-    let status = child.wait().map_err(|e| e.to_string());
-    let stdout = stdout_reader.join().unwrap_or_default();
-    let stderr = stderr_reader.join().unwrap_or_default();
-    {
-        let mgr: State<JobManager> = app.state();
-        lock_safe(&mgr.rsync_pids).remove(&request.job_id);
-    }
-    // Askpass-Skript wird vom Drop-Guard entfernt.
-    if cancel.load(Ordering::SeqCst) {
-        return Err("err.rsyncCancelled".into());
-    }
-    let status = status?;
-    if status.success() {
-        Ok(())
-    } else {
-        let stderr = String::from_utf8_lossy(&stderr).trim().to_owned();
-        let stdout = String::from_utf8_lossy(&stdout).trim().to_owned();
-        Err(if !stderr.is_empty() {
-            stderr
-        } else if !stdout.is_empty() {
-            stdout
-        } else {
-            format!("rsync wurde mit Status {:?} beendet", status.code())
-        })
-    }
-}
-
-#[tauri::command]
-async fn run_rsync(app: AppHandle, request: RsyncRequest) -> Result<(), String> {
-    if request.job_id.is_empty() {
-        return Err("Ungültige rsync-Jobkennung".into());
-    }
-    let cancel = Arc::new(AtomicBool::new(false));
-    {
-        let mgr: State<JobManager> = app.state();
-        lock_safe(&mgr.cancels).insert(request.job_id.clone(), cancel.clone());
-    }
-    let job_id = request.job_id.clone();
-    let app_for_worker = app.clone();
-    let cancel_for_worker = cancel.clone();
-    let result = tauri::async_runtime::spawn_blocking(move || {
-        run_rsync_inner(&app_for_worker, request, &cancel_for_worker)
-    })
-    .await
-    .map_err(|e| e.to_string())?;
-    {
-        let mgr: State<JobManager> = app.state();
-        lock_safe(&mgr.cancels).remove(&job_id);
-        lock_safe(&mgr.rsync_pids).remove(&job_id);
-    }
-    let _ = app.emit(
-        "job-progress",
-        JobProgress {
-            job_id,
-            done: 0,
-            total: 0,
-            files_done: 0,
-            transfer_percent: None,
-            indeterminate: false,
-            current: String::new(),
-            finished: true,
-            cancelled: cancel.load(Ordering::SeqCst),
-            error: result.as_ref().err().cloned(),
-        },
-    );
-    result
-}
-
 #[derive(Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 struct JobProgress {
@@ -2488,7 +2026,17 @@ struct JobProgress {
 #[derive(Default)]
 pub struct JobManager {
     cancels: Mutex<HashMap<String, Arc<AtomicBool>>>,
-    rsync_pids: Mutex<HashMap<String, u32>>,
+}
+
+// Beendet einen Kindprozess samt seiner Prozessgruppe. Nötig, weil etwa `curl`
+// eigene Kindprozesse startet: Ein Signal nur an den Elternprozess ließe eine
+// offene Netzwerkverbindung zurück. Fehler sind hier unkritisch – der Prozess
+// kann bereits beendet sein.
+#[cfg(unix)]
+fn terminate_process_group(pid: u32) {
+    unsafe {
+        let _ = libc::kill(-(pid as i32), libc::SIGTERM);
+    }
 }
 
 #[tauri::command]
@@ -3661,7 +3209,7 @@ fn webdav_collection_delete(
             Ok(None) => {
                 if cancel.load(Ordering::SeqCst) {
                     #[cfg(unix)]
-                    terminate_rsync_process_group(pid);
+                    terminate_process_group(pid);
                     let _ = child.wait();
                     return false;
                 }
@@ -4254,7 +3802,7 @@ fn is_enotsup(e: &std::io::Error) -> bool {
 }
 
 /// Prüft, ob ein Fehler vorübergehend/transient ist – typisch für langsame
-/// Netzlaufwerke (WebDAV/HiDrive, SMB), die einzelne Operationen mit Timeout
+/// Netzlaufwerke (WebDAV, SMB), die einzelne Operationen mit Timeout
 /// (ETIMEDOUT / macOS „os error 60") oder Verbindungsabbrüchen quittieren.
 /// Solche Fehler können durch einen erneuten Versuch verschwinden.
 #[cfg(unix)]
@@ -4281,7 +3829,7 @@ fn is_transient(_e: &std::io::Error) -> bool {
 }
 
 /// Kopiert eine Datei und wiederholt den Versuch bei transienten Netzwerk-
-/// fehlern (z. B. os error 60 „Operation timed out" auf HiDrive/WebDAV) mit
+/// fehlern (z. B. os error 60 „Operation timed out" auf WebDAV) mit
 /// exponentiellem Backoff. Bricht sofort ab, wenn der Job abgebrochen wurde
 /// oder ein nicht-transienter Fehler auftritt.
 fn copy_file_retry(
@@ -5038,13 +4586,8 @@ async fn run_job(
 fn cancel_job(app: AppHandle, job_id: String) {
     let mgr: State<JobManager> = app.state();
     let cancel = lock_safe(&mgr.cancels).get(&job_id).cloned();
-    let rsync_pid = lock_safe(&mgr.rsync_pids).get(&job_id).copied();
     if let Some(c) = cancel {
         c.store(true, Ordering::SeqCst);
-    }
-    #[cfg(unix)]
-    if let Some(pid) = rsync_pid {
-        terminate_rsync_process_group(pid);
     }
 }
 
@@ -5088,7 +4631,7 @@ fn effective_src_mtime_secs(meta: &std::fs::Metadata) -> i64 {
     file_mtime_secs(meta).min(now_secs())
 }
 
-/// Toleranz für den mtime-Vergleich. Netzlaufwerke (WebDAV/HiDrive) und FAT
+/// Toleranz für den mtime-Vergleich. Netzlaufwerke (WebDAV) und FAT
 /// speichern Änderungszeiten nur grob (FAT: 2s) bzw. setzen beim Upload eine
 /// eigene Zeit. Ohne Toleranz würden gleichnamige Dateien sonst bei jedem
 /// Durchlauf fälschlich als „geändert" erscheinen.
@@ -5874,7 +5417,7 @@ async fn sync_preview(
         let mgr: State<JobManager> = app.state();
         lock_safe(&mgr.cancels).insert(preview_id.clone(), cancel.clone());
     }
-    // Der Verzeichnis-Abgleich kann auf langsamen Netzlaufwerken (WebDAV/HiDrive,
+    // Der Verzeichnis-Abgleich kann auf langsamen Netzlaufwerken (WebDAV,
     // SMB) sehr lange dauern. Als synchroner Befehl liefe er auf dem Haupt-Thread
     // und würde die gesamte Oberfläche einfrieren (macOS-Beachball) – der
     // Vorbereitungs-Hinweis im Dialog könnte gar nicht erst gezeichnet werden.
@@ -7232,9 +6775,6 @@ pub fn run() {
             quick_look,
             check_conflicts,
             run_job,
-            run_rsync,
-            save_rsync_password,
-            load_rsync_password,
             cancel_job,
             sync_preview,
             sync_two_way_preview,
@@ -7306,13 +6846,14 @@ mod copy_tests {
     use super::{
         bookmark_url_from_mount_source, copy_file_with_metadata, count_delete_entries,
         delete_error_message, destination_is_within_source, is_dualbeam_inprogress_name,
-        is_protected_admin_root, is_retryable_remove_error, is_time_machine_path,
-        is_transient_trunk_path, is_untransferable_file, normalize_max_file_size, parse_mount_url,
-        percent_encode_segment, preview_walk_src, remove_source_after_move,
-        replace_file_after_copy, search_in_dir_blocking, should_skip_direct_sync_path,
-        sync_preview_inner, sync_two_way_preview_inner, webdav_host_from_url,
-        webdav_http_date_epoch, webdav_propfind_content_length, webdav_propfind_last_modified,
-        webdav_remote_url, zip_extract_inner, CopyOutcome,
+        is_network_fstype, is_protected_admin_root, is_retryable_remove_error,
+        is_time_machine_path, is_transient_trunk_path, is_untransferable_file, mount_fs_types,
+        normalize_max_file_size, parse_mount_url, percent_encode_segment, preview_walk_src,
+        remove_source_after_move, replace_file_after_copy, search_in_dir_blocking,
+        should_skip_direct_sync_path, statfs_fstype, sync_preview_inner,
+        sync_two_way_preview_inner, webdav_host_from_url, webdav_http_date_epoch,
+        webdav_propfind_content_length, webdav_propfind_last_modified, webdav_remote_url,
+        zip_extract_inner, CopyOutcome,
     };
     use std::ffi::CString;
     use std::os::unix::ffi::OsStrExt;
@@ -7449,8 +6990,8 @@ mod copy_tests {
     #[test]
     fn webdav_host_is_extracted() {
         assert_eq!(
-            webdav_host_from_url("https://webdav.hidrive.ionos.com/remote.php").as_deref(),
-            Some("webdav.hidrive.ionos.com")
+            webdav_host_from_url("https://webdav.example.com/remote.php").as_deref(),
+            Some("webdav.example.com")
         );
         assert_eq!(
             webdav_host_from_url("https://user@host.example:8443/x").as_deref(),
@@ -8081,5 +7622,55 @@ mod copy_tests {
             .any(|entry| entry.path == needle.to_string_lossy()));
 
         let _ = std::fs::remove_dir_all(root.parent().unwrap());
+    }
+
+    // Belegt die Gleichwertigkeit der Kernel-Abfrage mit der bisherigen Quelle:
+    // Für jeden eingehängten Mountpoint muss `statfs` denselben Dateisystemtyp
+    // melden wie die Textausgabe von `/sbin/mount`. Gilt das für alle lokal
+    // vorhandenen Typen, gilt es auch für Netzwerktypen wie webdav, die auf
+    // einem Testrechner selten eingehängt sind.
+    #[test]
+    fn statfs_matches_mount_table() {
+        let table = mount_fs_types();
+        assert!(!table.is_empty(), "Mount-Tabelle unerwartet leer");
+
+        let mut checked = 0usize;
+        for (mountpoint, expected) in &table {
+            let Some(measured) = statfs_fstype(Path::new(mountpoint)) else {
+                continue;
+            };
+            assert_eq!(
+                measured,
+                expected.to_ascii_lowercase(),
+                "Abweichung bei {mountpoint}: statfs meldet {measured}, /sbin/mount meldet {expected}"
+            );
+            checked += 1;
+        }
+        assert!(checked > 0, "kein Mountpoint konnte geprüft werden");
+    }
+
+    // Ein Löschziel kann bereits verschwunden sein. Dann muss der Typ des
+    // nächstgelegenen vorhandenen Elternverzeichnisses gelten – sonst fiele der
+    // Netzwerkschutz genau dann aus, wenn er gebraucht wird.
+    #[test]
+    fn statfs_falls_back_to_parent_directory() {
+        let root = statfs_fstype(Path::new("/")).expect("Wurzel muss einen Typ liefern");
+        let missing = statfs_fstype(Path::new("/dualbeam-gibt-es-nicht/auch-nicht"))
+            .expect("Rückfall auf die Wurzel erwartet");
+        assert_eq!(root, missing);
+    }
+
+    // statfs liefert kleingeschrieben; is_network_fstype vergleicht exakt.
+    #[test]
+    fn network_fstypes_are_recognised() {
+        for fstype in ["webdav", "smbfs", "nfs", "afpfs", "ftp", "cifs"] {
+            assert!(
+                is_network_fstype(fstype),
+                "{fstype} muss als Netzwerk gelten"
+            );
+        }
+        for fstype in ["apfs", "hfs", "exfat", "msdos"] {
+            assert!(!is_network_fstype(fstype), "{fstype} ist kein Netzwerk");
+        }
     }
 }

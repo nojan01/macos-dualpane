@@ -1,6 +1,6 @@
 [package]
 name = "dualbeam"
-version = "0.5.1"
+version = "0.5.2"
 description = "DualBeam — Dual-Pane File Manager für macOS"
 authors = ["N.J."]
 license = "MIT"
@@ -9,13 +9,6 @@ edition = "2021"
 [lib]
 name = "dualbeam_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
-
-[features]
-# Öffentliche Builds enthalten keine vordefinierte externe Netzwerkadresse.
-# Die persönliche HiDrive-Voreinstellung muss bewusst mit `--features hidrive`
-# angefordert werden.
-default = []
-hidrive = []
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }

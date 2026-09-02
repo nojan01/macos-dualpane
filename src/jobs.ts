@@ -45,10 +45,7 @@ import { remoteStorageDeleteTarget, remoteStorageTransferTarget } from "./remote
 const newJobId = () => `job-${Date.now()}-${Math.floor(Math.random() * 1e6)}`;
 
 // Sicherheitsnetz, falls macOS die WebDAV-Mount-Tabelle kurzzeitig nicht
-// liefert: HiDrive darf nie in den lokalen Papierkorb/Undo-Ordner wandern.
-const isHiDriveWebDavPath = (path: string) =>
-  path === "/Volumes/webdav.hidrive.ionos.com" ||
-  path.startsWith("/Volumes/webdav.hidrive.ionos.com/");
+// liefert: Netzdateien dürfen nie in den lokalen Papierkorb/Undo-Ordner wandern.
 
 export function selectedEntries(pane: PaneId) {
   const p = state[pane];
@@ -292,13 +289,15 @@ export async function deleteSelected(skipConfirm = false) {
   const pane = state.active;
   const sel = selectedEntries(pane);
   if (sel.length === 0) return;
-  let onNetwork = sel.some((entry) => isHiDriveWebDavPath(entry.path));
+  // Die Netzwerkerkennung liegt allein im Backend: `pathIsNetwork` fragt über
+  // statfs den Kernel und ist damit verlässlicher als jede Pfad-Heuristik.
+  let onNetwork = false;
   try {
-    onNetwork = (await pathIsNetwork(sel[0].path)) || onNetwork;
+    onNetwork = await pathIsNetwork(sel[0].path);
   } catch {}
 
   if (!skipConfirm) {
-    // Auf Netzlaufwerken (z. B. HiDrive/WebDAV) gibt es keinen Papierkorb –
+    // Auf Netzlaufwerken (WebDAV, SMB usw.) gibt es keinen Papierkorb –
     // dort wird direkt und dauerhaft gelöscht. Das in der Bestätigung klar sagen.
     const ok = await askConfirm({
       title: onNetwork

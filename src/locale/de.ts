@@ -54,31 +54,12 @@ export const de: Record<string, string> = {
   "jobbar.items": "{done} / {total} Einträge",
   "jobbar.itemsDeleted": "{count} Einträge gelöscht",
   "jobbar.filesCopied": "{count} Dateien kopiert",
-  "jobbar.rsync": "rsync (SSH)",
 
-  // Rsync
-  "rsync.title": "Mit HiDrive per rsync synchronisieren",
-  "rsync.description":
-    "Die Quelle wird direkt über SSH mit HiDrive abgeglichen. Das Passwort wird nur für diesen Transfer verwendet und nicht gespeichert.",
-  "rsync.localPath": "Lokaler Quellordner",
-  "rsync.username": "HiDrive-Benutzer",
-  "rsync.password": "Passwort",
-  "rsync.host": "rsync-Server",
-  "rsync.remotePath": "Zielpfad auf HiDrive",
-  "rsync.deleteExtra": "Überzählige Dateien am Ziel löschen",
-  "rsync.savePassword": "Passwort im macOS-Schlüsselbund speichern",
-  "rsync.loadPassword": "Passwort aus Schlüsselbund laden",
-  "rsync.required": "Lokaler Ordner, Benutzername und Passwort sind erforderlich.",
-  "rsync.usernameRequired": "Bitte zuerst den HiDrive-Benutzernamen eingeben.",
-  "rsync.passwordMissing": "Für diesen Server und Benutzer ist kein Passwort im Schlüsselbund gespeichert.",
-  "rsync.start": "Synchronisieren",
-  "rsync.running": "Synchronisiert…",
   "rdp.connectTitle": "RDP-Sitzung zu {target} in RemoteDeskRDP öffnen",
   "rdp.connecting": "Verbindung wird aufgebaut …",
   "err.rdp.unknown":
     "Diese Verbindung steht nicht mehr in RemoteDeskRDP. Vermutlich wurde sie dort gelöscht.",
   "err.rdp.open": "RemoteDeskRDP ließ sich nicht starten: {0}",
-  "err.rsyncCancelled": "rsync-Synchronisation wurde abgebrochen.",
 
   // Pane
   "pane.filter.placeholder": "Filter (⌘F)",
@@ -401,17 +382,6 @@ export const de: Record<string, string> = {
   "sync.profileSaveLabel": "Name des Profils",
   "sync.profileDeleteTitle": "Sync-Profil löschen",
   "sync.profileDeleteConfirm": "Profil „{name}“ löschen?",
-  "sync.transport": "Übertragungsart",
-  "sync.transportFilesystem": "Direkt über eingebundenes Laufwerk (WebDAV)",
-  "sync.transportRsync": "rsync über SSH (HiDrive)",
-  "sync.rsyncMountedNote":
-    "HiDrive bleibt über WebDAV sichtbar. Der eigentliche Abgleich läuft direkt per rsync/SSH und umgeht die unzuverlässige WebDAV-Übertragung.",
-  "sync.rsyncDirect":
-    "Der Abgleich wird direkt auf HiDrive durch rsync ermittelt und ausgeführt.",
-  "sync.rsyncDeleteNote":
-    "Mit der folgenden Option löscht rsync Dateien, die nur noch auf HiDrive liegen, dauerhaft.",
-  "sync.rsyncRequired":
-    "Für rsync sind Server, HiDrive-Benutzer, Zielpfad und Passwort erforderlich. Das Passwort kann aus dem Schlüsselbund geladen werden.",
   "sync.ignoreTitle": "Ausschlussregeln",
   "sync.ignoreHelp":
     "Eine Regel pro Zeile. Unterstützt Namen, Pfade sowie * und ?. Die Datei .dualbeamignore im Quellordner gilt zusätzlich.",
@@ -438,7 +408,7 @@ export const de: Record<string, string> = {
   "network.connectServer": "Mit Server verbinden…",
   "network.connectTitle": "Mit Server verbinden",
   "network.connectLabel":
-    "Serveradresse (SMB, HTTPS-WebDAV oder rsync://; z. B. rsync://rsync.hidrive.ionos.com/users/name/)",
+    "Serveradresse (SMB oder HTTPS-WebDAV; z. B. https://server/webdav)",
   "network.connect": "Verbinden",
   "network.connectFailed": "Verbinden fehlgeschlagen",
   "network.insecureTitle": "Unsichere Verbindung",

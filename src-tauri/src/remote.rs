@@ -19,9 +19,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::object_storage::{ObjectStorageProfile, ObjectStorageProtocol};
 
-/// Schlüsselbund-Dienst für die Kennwörter der Netzlaufwerke. Bewusst getrennt
-/// von dem der rsync-Synchronisation, damit beide unabhängig voneinander
-/// widerrufen werden können.
+/// Schlüsselbund-Dienst für die Kennwörter der Netzlaufwerke.
 const KEYCHAIN_SERVICE: &str = "com.nojan.dualbeam.remote";
 
 /// Name, unter dem das Ziel innerhalb von rclone geführt wird. Er taucht nur in
@@ -3969,7 +3967,7 @@ mod tests {
     #[test]
     fn hosts_are_checked() {
         assert!(valid_host("example.com"));
-        assert!(valid_host("sftp.hidrive.ionos.com"));
+        assert!(valid_host("sftp.example.com"));
         assert!(valid_host("192.168.1.10"));
         assert!(valid_host("[fe80::1]"));
         assert!(!valid_host(""));
@@ -4097,7 +4095,7 @@ mod tests {
 
     #[test]
     fn labels_become_safe_folder_names() {
-        assert_eq!(sanitize_label("HiDrive"), Some("HiDrive".into()));
+        assert_eq!(sanitize_label("Archiv"), Some("Archiv".into()));
         assert_eq!(sanitize_label("a/b"), Some("a-b".into()));
         assert_eq!(sanitize_label(".."), None);
         assert_eq!(sanitize_label("   "), None);

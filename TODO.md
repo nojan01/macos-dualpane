@@ -31,28 +31,26 @@
 - Dock-Badge bei laufenden Jobs
 
 ## Netzwerk / Remote
-- ✅ **Verzeichnis-Synchronisation aktiver Pane → anderer Pane** (mit Vorschau, Update-/Lösch-Erkennung; funktioniert mit einem im Finder gemounteten HiDrive-Volume)
+- ✅ **Verzeichnis-Synchronisation aktiver Pane → anderer Pane** (mit Vorschau, Update-/Lösch-Erkennung; funktioniert mit einem im Finder gemounteten WebDAV-Volume)
 - WebDAV-Unterstützung als zweiter Pane-Backend-Typ neben lokalem FS (links lokal, rechts Remote)
-  - Ziel-Storage: **IONOS HiDrive** (WebDAV-Endpoint `https://webdav.hidrive.ionos.com/`, Login mit HiDrive-Benutzername + Passwort/App-Passwort, HTTPS Pflicht)
+  - Ziel-Storage: beliebiger WebDAV-Anbieter (Login mit Benutzername + Passwort/App-Passwort, HTTPS Pflicht)
   - Rust-Seite: Crate `reqwest_dav` oder `hyper` mit WebDAV-Methoden (`PROPFIND`, `MKCOL`, `MOVE`, `COPY`, `PUT`, `GET`, `DELETE`, `LOCK`)
   - TS-Alternative: npm `webdav` (CORS-Problem, daher besser via Tauri-Command)
-  - Auth: HiDrive-App-Passwort statt Hauptpasswort verwenden; Credentials im macOS-Keychain ablegen
+  - Auth: App-Passwort statt Hauptpasswort verwenden; Credentials im macOS-Keychain ablegen
   - Verbindungs-Profile speichern (Name, URL, Benutzer, Root-Pfad)
   - Optional später: eingebauter WebDAV-Server (Rust `dav-server`) für P2P-Austausch im LAN — vom macOS Finder direkt mountbar
-  - Stolpersteine bei HiDrive: viele kleine Dateien = viele HTTPS-Roundtrips (langsam); Range-Requests für große Dateien nutzen; ggf. Rate-Limits / Quota beachten; Locking nur bei Multi-User nötig
+  - Stolpersteine bei WebDAV: viele kleine Dateien = viele HTTPS-Roundtrips (langsam); Range-Requests für große Dateien nutzen; ggf. Rate-Limits / Quota beachten; Locking nur bei Multi-User nötig
   - Referenz: manuelle Einrichtung in macOS (zur Validierung / als UX-Vorbild)
     1. Finder → Menü **Gehe zu** → **Mit Server verbinden…** (Cmd+K)
-    2. Serveradresse: `https://webdav.hidrive.ionos.com/`
+    2. Serveradresse: `https://server/webdav`
     3. Verbinden als: **Registrierter Benutzer**
-    4. HiDrive-Benutzername + Passwort eingeben
+    4. Benutzername + Passwort eingeben
     5. **Passwort im Schlüsselbund sichern** aktivieren
     6. **Verbinden** → Finder öffnet das Netzlaufwerk
 
 ## Sonstiges
 - Tastatur-Cheatsheet (Cmd+/)
 - Weitere Sprachen (FR/ES) — i18n-Gerüst steht
-- Automatische Updates (Tauri Updater) + signierte/notarisierte DMG
-  - ⏳ Updates werden bewusst außerhalb der App bereitgestellt; die App baut keine allgemeinen Internetverbindungen auf.
-  - **Nach Signierung/Notarisierung:** Update-Flow auf vollautomatische Installation umstellen — entweder echter Tauri-Updater (signierte `.app.tar.gz` + Update-Signatur, Selbst-Ersetzung ohne Drag-and-Drop) oder still mounten + `ditto`/`rsync` der `.app` nach `/Applications` + Neustart; setzt gültige Developer-ID + Notarisierung voraus, damit Gatekeeper die ersetzte App akzeptiert
+- ✅ **Automatische Updates (Tauri Updater) + signierte/notarisierte DMG** — Suche nur auf ausdrückliche Anforderung im Menü; Installation über signiertes `.app.tar.gz` und Update-Signatur ohne Drag-and-Drop
 - Quellcode und Releases werden bewusst außerhalb der App bereitgestellt, damit die App keine allgemeinen Internetverbindungen aufbaut.
 - Signierter Privileged Helper (SMAppService) für Time-Machine-Löschvorgänge: ersetzt den Terminal.app-Umweg, vermeidet das kurze Aufblitzen eines Terminal-Fensters, behält FDA-Vererbung und macht das Passwort-Handling über XPC sauberer (kein temp-File auf Disk).

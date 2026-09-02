@@ -10,26 +10,12 @@ import {
   syncMode,
   syncVerifyChecksums,
   syncMaxFileSizeMb,
-  syncTransport,
-  syncRsyncAvailable,
-  syncRsyncHost,
-  syncRsyncUsername,
-  syncRsyncRemotePath,
-  syncRsyncPassword,
-  syncRsyncSavePassword,
   syncConflictChoices,
   setSyncDelete,
   setSyncIgnoreText,
   setSyncModeAndRefresh,
   setSyncVerifyChecksumsAndRefresh,
   setSyncMaxFileSizeAndRefresh,
-  setSyncTransportAndRefresh,
-  setSyncRsyncHostValue,
-  setSyncRsyncUsernameValue,
-  setSyncRsyncRemotePathValue,
-  setSyncRsyncPasswordValue,
-  setSyncRsyncSavePasswordValue,
-  loadSyncRsyncPasswordFromKeychain,
   setSyncConflictChoice,
   refreshSyncPreview,
   applySyncProfile,
@@ -38,7 +24,6 @@ import {
   cancelSync,
   confirmSync,
 } from "../sync";
-import { notifyError } from "./Dialogs";
 import { syncProfiles } from "../syncProfiles";
 
 /** Vorgabe beim Einschalten der Größengrenze: 1 GB. Darüber liegen in der
@@ -164,97 +149,6 @@ export function SyncDialog() {
                       </button>
                     </Show>
                   </div>
-                  <Show when={syncRsyncAvailable()}>
-                    <label class="sync-transport">
-                      {t("sync.transport")}
-                      <select
-                        value={syncTransport()}
-                        onChange={(event) =>
-                          void setSyncTransportAndRefresh(
-                            event.currentTarget.value as "filesystem" | "rsync",
-                          )
-                        }
-                      >
-                        <option value="filesystem">
-                          {t("sync.transportFilesystem")}
-                        </option>
-                        <option value="rsync">{t("sync.transportRsync")}</option>
-                      </select>
-                    </label>
-                  </Show>
-                  <Show when={syncTransport() === "rsync"}>
-                    <div class="sync-rsync">
-                      <p>{t("sync.rsyncMountedNote")}</p>
-                      <label>
-                        {t("rsync.host")}
-                        <input
-                          type="text"
-                          value={syncRsyncHost()}
-                          onInput={(event) =>
-                            setSyncRsyncHostValue(event.currentTarget.value)
-                          }
-                        />
-                      </label>
-                      <label>
-                        {t("rsync.username")}
-                        <input
-                          type="text"
-                          autocomplete="username"
-                          value={syncRsyncUsername()}
-                          onInput={(event) =>
-                            setSyncRsyncUsernameValue(event.currentTarget.value)
-                          }
-                        />
-                      </label>
-                      <label>
-                        {t("rsync.password")}
-                        <input
-                          type="password"
-                          autocomplete="current-password"
-                          value={syncRsyncPassword()}
-                          onInput={(event) =>
-                            setSyncRsyncPasswordValue(event.currentTarget.value)
-                          }
-                        />
-                      </label>
-                      <label>
-                        {t("rsync.remotePath")}
-                        <input
-                          type="text"
-                          value={syncRsyncRemotePath()}
-                          onInput={(event) =>
-                            setSyncRsyncRemotePathValue(event.currentTarget.value)
-                          }
-                        />
-                      </label>
-                      <label class="sync-option">
-                        <input
-                          type="checkbox"
-                          checked={syncRsyncSavePassword()}
-                          onChange={(event) =>
-                            setSyncRsyncSavePasswordValue(
-                              event.currentTarget.checked,
-                            )
-                          }
-                        />
-                        {t("rsync.savePassword")}
-                      </label>
-                      <button
-                        class="secondary"
-                        onClick={() =>
-                          void loadSyncRsyncPasswordFromKeychain().then(
-                            (loaded) => {
-                              if (!loaded) void notifyError(t("rsync.passwordMissing"));
-                            },
-                            (error) => void notifyError(String(error)),
-                          )
-                        }
-                      >
-                        {t("rsync.loadPassword")}
-                      </button>
-                    </div>
-                  </Show>
-                  <Show when={syncTransport() === "filesystem"}>
                   <label class="sync-option">
                     <input
                       type="checkbox"
@@ -279,27 +173,17 @@ export function SyncDialog() {
                     />
                     {t("sync.verifyChecksums")}
                   </label>
-                  </Show>
-                  <Show when={syncTransport() === "filesystem"}>
-                    <div class="sync-preview-action">
-                      <p>{t("sync.previewHint")}</p>
-                      <button
-                        class="secondary"
-                        onClick={() => void refreshSyncPreview()}
-                      >
-                        {t("sync.preview")}
-                      </button>
-                    </div>
-                  </Show>
-                  <ul class="modal-list">
-                    <Show when={syncTransport() === "rsync"}>
-                      <li>{t("sync.rsyncDirect")}</li>
-                    </Show>
-                    <Show
-                      when={
-                        syncTransport() === "filesystem" && syncPreviewReady()
-                      }
+                  <div class="sync-preview-action">
+                    <p>{t("sync.previewHint")}</p>
+                    <button
+                      class="secondary"
+                      onClick={() => void refreshSyncPreview()}
                     >
+                      {t("sync.preview")}
+                    </button>
+                  </div>
+                  <ul class="modal-list">
+                    <Show when={syncPreviewReady()}>
                     <Show
                       when={syncMode() === "twoWay"}
                       fallback={
@@ -339,20 +223,12 @@ export function SyncDialog() {
                     </Show>
                   </ul>
                   <Show
-                    when={
-                      syncTransport() === "filesystem" &&
-                      syncPreviewReady() &&
-                      validEntries().length === 0
-                    }
+                    when={syncPreviewReady() && validEntries().length === 0}
                   >
                     <p>{t("sync.upToDate")}</p>
                   </Show>
                   <Show
-                    when={
-                      syncTransport() === "filesystem" &&
-                      syncPreviewReady() &&
-                      validEntries().length > 0
-                    }
+                    when={syncPreviewReady() && validEntries().length > 0}
                   >
                     <details class="sync-details">
                       <summary>{t("sync.details")}</summary>
@@ -402,17 +278,11 @@ export function SyncDialog() {
                       </ul>
                     </details>
                   </Show>
-                  <Show
-                    when={
-                      syncTransport() === "rsync" || syncMode() === "oneWay"
-                    }
-                  >
+                  <Show when={syncMode() === "oneWay"}>
                     <p class="danger">
-                      {syncTransport() === "rsync"
-                        ? t("sync.rsyncDeleteNote")
-                        : syncPreviewReady() && counts().del > 0
-                          ? t("sync.extrasPrompt", { count: counts().del })
-                          : t("sync.deleteExtraHint")}
+                      {syncPreviewReady() && counts().del > 0
+                        ? t("sync.extrasPrompt", { count: counts().del })
+                        : t("sync.deleteExtraHint")}
                     </p>
                     <label class="sync-option">
                       <input
@@ -495,9 +365,7 @@ export function SyncDialog() {
               <button
                 onClick={() => void confirmSync()}
                 disabled={
-                  syncLoading() ||
-                  (syncTransport() === "filesystem" && effectiveTotal() === 0)
-                  || (syncTransport() === "filesystem" && !syncPreviewReady())
+                  syncLoading() || effectiveTotal() === 0 || !syncPreviewReady()
                 }
               >
                 {t("sync.start")}

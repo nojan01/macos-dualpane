@@ -81,12 +81,8 @@ mitgeliefert.
 Nicht mitgeliefert, sondern nur aufgerufen — und deshalb ohne Lizenzpflicht für
 DualBeam:
 
-`rsync`, `curl`, `open`, `osascript`, `security`, `ssh-keygen`, `ssh-keyscan`,
+`curl`, `open`, `osascript`, `security`, `ssh-keygen`, `ssh-keyscan`,
 `mount`, `umount`, `diskutil`, `hdiutil`, `mdfind`, `qlmanage`, `tmutil`.
-
-`rsync` wird bevorzugt aus einer Homebrew-Installation genommen
-(`/opt/homebrew/bin/rsync`), sonst von macOS. In beiden Fällen stammt es nicht
-von DualBeam.
 
 ## 4. Beigelegte Lizenztexte
 

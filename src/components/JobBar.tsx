@@ -14,14 +14,13 @@ export function JobBar() {
         };
         return (
           <div class="jobbar">
-            <span class="kind">{j().kind === "rsync" ? t("jobbar.rsync") : j().kind === "copy" ? t("jobbar.copying") : j().kind === "delete" ? t("jobbar.deleting") : t("jobbar.moving")}</span>
+            <span class="kind">{j().kind === "copy" ? t("jobbar.copying") : j().kind === "delete" ? t("jobbar.deleting") : t("jobbar.moving")}</span>
             <div class="bar">
               <div
                 class="bar-fill jobbar-fill"
                 classList={{
                   indeterminate:
                     !!j().indeterminate ||
-                    j().kind === "rsync" ||
                     (j().kind === "delete" && j().total === 0),
                 }}
                 ref={(el) =>
@@ -40,23 +39,18 @@ export function JobBar() {
                   <Show
                     when={j().indeterminate}
                     fallback={
+                      /* Auf Netzlaufwerken ist die Gesamtzahl nicht bekannt: Sie
+                         vorab zu ermitteln würde so lange dauern wie das Löschen
+                         selbst. Dann lieber melden, was schon erledigt ist, statt
+                         „0 / ?" anzuzeigen. */
                       <Show
-                        when={j().kind !== "rsync"}
-                        fallback={t("jobbar.filesCopied", { count: j().filesDone })}
+                        when={j().kind === "delete" && j().total === 0}
+                        fallback={t("jobbar.items", {
+                          done: j().done,
+                          total: j().total || "?",
+                        })}
                       >
-                        {/* Auf Netzlaufwerken ist die Gesamtzahl nicht bekannt: Sie
-                            vorab zu ermitteln würde so lange dauern wie das Löschen
-                            selbst. Dann lieber melden, was schon erledigt ist, statt
-                            „0 / ?" anzuzeigen. */}
-                        <Show
-                          when={j().kind === "delete" && j().total === 0}
-                          fallback={t("jobbar.items", {
-                            done: j().done,
-                            total: j().total || "?",
-                          })}
-                        >
-                          {t("jobbar.itemsDeleted", { count: j().done })}
-                        </Show>
+                        {t("jobbar.itemsDeleted", { count: j().done })}
                       </Show>
                     }
                   >
@@ -66,7 +60,7 @@ export function JobBar() {
               >
                 {j().transferPercent} %
               </Show>
-              <Show when={j().kind !== "delete" && j().kind !== "rsync"}>
+              <Show when={j().kind !== "delete"}>
                 {" · "}
                 {t("jobbar.filesCopied", { count: j().filesDone })}
               </Show>

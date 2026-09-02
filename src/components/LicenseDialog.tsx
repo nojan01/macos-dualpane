@@ -77,7 +77,7 @@ const CONTENT: Record<
           },
           {
             term: "Werkzeuge des Betriebssystems",
-            desc: "rsync, curl, open, osascript, security, ssh-keygen, ssh-keyscan, mount, umount, diskutil, hdiutil, mdfind, qlmanage und tmutil werden nur aufgerufen, nicht mitgeliefert — für sie besteht keine Lizenzpflicht.",
+            desc: "curl, open, osascript, security, ssh-keygen, ssh-keyscan, mount, umount, diskutil, hdiutil, mdfind, qlmanage und tmutil werden nur aufgerufen, nicht mitgeliefert — für sie besteht keine Lizenzpflicht.",
           },
         ],
         outro:
@@ -160,7 +160,7 @@ const CONTENT: Record<
           },
           {
             term: "Operating system tools",
-            desc: "rsync, curl, open, osascript, security, ssh-keygen, ssh-keyscan, mount, umount, diskutil, hdiutil, mdfind, qlmanage and tmutil are merely invoked, not bundled — no licence obligation arises for them.",
+            desc: "curl, open, osascript, security, ssh-keygen, ssh-keyscan, mount, umount, diskutil, hdiutil, mdfind, qlmanage and tmutil are merely invoked, not bundled — no licence obligation arises for them.",
           },
         ],
         outro:

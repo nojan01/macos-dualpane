@@ -61,7 +61,7 @@ export type AppState = {
   editing: { pane: PaneId; idx: number } | null;
   job: {
     id: string;
-    kind: "copy" | "move" | "delete" | "rsync";
+    kind: "copy" | "move" | "delete";
     done: number;
     total: number;
     filesDone: number;
@@ -279,7 +279,7 @@ export async function loadPane(
   setState(pane, "loading", true);
   setState(pane, "error", null);
   let target = path;
-  // Netzlaufwerke (HiDrive/WebDAV/SMB…, i. d. R. unter /Volumes) sind langsam:
+  // Netzlaufwerke (WebDAV/SMB…, i. d. R. unter /Volumes) sind langsam:
   // ein zusätzliches pathExists wäre ein weiterer Server-Roundtrip vor listDir.
   // pathIsNetwork liest dagegen nur die lokale Mount-Tabelle (kein Server-Zugriff).
   // Für erkannte Netzpfade daher die Existenz-/Eltern-Prüfung überspringen und
@@ -364,7 +364,7 @@ export async function loadPane(
     if (isCurrent()) watchPath(pane, target).catch(() => {});
   } catch (e) {
     if (!isCurrent()) return;
-    // Netzpfad nicht erreichbar (z. B. HiDrive ausgehängt): auf Home ausweichen,
+    // Netzpfad nicht erreichbar (z. B. Freigabe ausgehängt): auf Home ausweichen,
     // damit die App sofort nutzbar bleibt, statt nur eine Fehlermeldung zu zeigen.
     if (isNet) {
       try {
@@ -395,7 +395,7 @@ export async function forceRefreshAll() {
 }
 
 // Aktualisiert beide Panes. Damit wird auch ein im inaktiven Pane geöffnetes
-// Netzlaufwerk (z. B. HiDrive/WebDAV) neu eingelesen. Jeder loadPane-Aufruf
+// Netzlaufwerk (z. B. WebDAV/SMB) neu eingelesen. Jeder loadPane-Aufruf
 // löst im Backend ein frisches read_dir aus, was bei webdavfs einen neuen
 // PROPFIND und damit einen serverseitigen Refresh bewirkt.
 export async function refreshAll() {

@@ -252,10 +252,6 @@ const CONTENT: Record<
             desc: "Erkennt Änderungen in beide Richtungen. Gleichzeitig oder nicht eindeutig geänderte Dateien erscheinen als Konflikt; wähle dafür die linke Version, die rechte Version oder „Überspringen“. Automatisches Löschen ist in diesem Modus ausgeschaltet.",
           },
           {
-            term: "Übertragungsart (HiDrive)",
-            desc: "Liegt das Ziel auf dem eingebundenen HiDrive-WebDAV-Laufwerk, lässt sich zwischen dem direkten Kopieren über das Laufwerk und rsync über SSH wählen. rsync überträgt nur Änderungen und ist bei vielen Dateien deutlich schneller; es arbeitet stets einweg. Bei lokalen Zielen erscheint keine Auswahl.",
-          },
-          {
             term: "S3- und Swift-Ziele",
             desc: "Ein eingehängter S3-Bucket oder Swift-Container kann wie ein WebDAV-Laufwerk als Quelle oder Ziel eines Sync-Profils verwendet werden. Die Vorschau liest Verzeichnisse auf dem Objekt-Speicher; bei der ersten Abfrage großer Container kann das trotz Ausschlüssen etwas dauern. Ausgeschlossene Teilbäume werden jedoch nicht weiter betreten.",
           },
@@ -288,7 +284,7 @@ const CONTENT: Record<
           },
           {
             term: "https:// (WebDAV)",
-            desc: "Verschlüsselte WebDAV-Freigaben (z. B. Nextcloud, HiDrive, ownCloud). Beispiel: https://server/webdav.",
+            desc: "Verschlüsselte WebDAV-Freigaben (z. B. Nextcloud, ownCloud). Beispiel: https://server/webdav.",
           },
           {
             term: "sftp:// (SSH)",
@@ -335,7 +331,7 @@ const CONTENT: Record<
           },
           {
             term: "Dialog „webdavfs_agent…“",
-            desc: "Dieser Schlüsselbund-Dialog stammt von macOS. Er fragt nicht nach deinem HiDrive-Passwort, sondern ob der System-Dienst das gespeicherte Passwort lesen darf.",
+            desc: "Dieser Schlüsselbund-Dialog stammt von macOS. Er fragt nicht nach deinem Server-Passwort, sondern ob der System-Dienst das gespeicherte Passwort lesen darf.",
           },
           {
             term: "Mountet trotz „Nicht erlauben“",
@@ -605,10 +601,6 @@ const CONTENT: Record<
             desc: "Detects changes in both directions. Files changed at the same time or without an unambiguous direction are shown as conflicts; choose the left version, right version, or “Skip”. Automatic deletion is disabled in this mode.",
           },
           {
-            term: "Transfer method (HiDrive)",
-            desc: "If the target is on the mounted HiDrive WebDAV drive, you can choose between copying directly via the drive and rsync over SSH. rsync transfers only changes and is much faster with many files; it always works one-way. For local targets no choice is shown.",
-          },
-          {
             term: "S3 and Swift targets",
             desc: "A mounted S3 bucket or Swift container can be used as the source or destination of a sync profile just like a WebDAV drive. The preview reads directories on the object store, so its first scan of a large container can take time even with exclusions. Excluded subtrees are not entered further, however.",
           },
@@ -641,7 +633,7 @@ const CONTENT: Record<
           },
           {
             term: "https:// (WebDAV)",
-            desc: "Encrypted WebDAV shares (e.g. Nextcloud, HiDrive, ownCloud). Example: https://server/webdav.",
+            desc: "Encrypted WebDAV shares (e.g. Nextcloud, ownCloud). Example: https://server/webdav.",
           },
           {
             term: "sftp:// (SSH)",
@@ -688,7 +680,7 @@ const CONTENT: Record<
           },
           {
             term: "“webdavfs_agent…” dialog",
-            desc: "This Keychain dialog comes from macOS. It does not ask for your HiDrive password, but whether the system service may read the stored password.",
+            desc: "This Keychain dialog comes from macOS. It does not ask for your server password, but whether the system service may read the stored password.",
           },
           {
             term: "Mounts despite “Deny”",

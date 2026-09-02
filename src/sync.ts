@@ -1,14 +1,11 @@
-// Verzeichnis-Synchronisation: aktiver Pane → anderer Pane (z. B. HiDrive).
+// Verzeichnis-Synchronisation: aktiver Pane → anderer Pane.
 import { createSignal } from "solid-js";
 import { state, setState, refreshPane } from "./state";
 import {
   syncPreview,
   syncTwoWayPreview,
   runJob,
-  runRsync,
   cancelJob,
-  loadRsyncPassword,
-  saveRsyncPassword,
   moveToTrash,
   pathIsNetwork,
   remoteMounts,
@@ -64,14 +61,6 @@ const [syncVerifyChecksums, setSyncVerifyChecksums] = createSignal(false);
 // Obergrenze je Datei in MB; 0 bedeutet „keine Grenze". Sehr große Dateien
 // blockieren auf langsamen Zielen sonst den gesamten Abgleich.
 const [syncMaxFileSizeMb, setSyncMaxFileSizeMb] = createSignal(0);
-const [syncTransport, setSyncTransport] = createSignal<
-  "filesystem" | "rsync"
->("filesystem");
-const [syncRsyncHost, setSyncRsyncHost] = createSignal("rsync.hidrive.ionos.com");
-const [syncRsyncUsername, setSyncRsyncUsername] = createSignal("");
-const [syncRsyncRemotePath, setSyncRsyncRemotePath] = createSignal("/");
-const [syncRsyncPassword, setSyncRsyncPassword] = createSignal("");
-const [syncRsyncSavePassword, setSyncRsyncSavePassword] = createSignal(true);
 const [syncConflictChoices, setSyncConflictChoices] = createSignal<
   Record<string, "left" | "right" | "skip">
 >({});
@@ -93,12 +82,6 @@ export {
   syncMode,
   syncVerifyChecksums,
   syncMaxFileSizeMb,
-  syncTransport,
-  syncRsyncHost,
-  syncRsyncUsername,
-  syncRsyncRemotePath,
-  syncRsyncPassword,
-  syncRsyncSavePassword,
   syncConflictChoices,
   activeSyncProfileId,
 };
@@ -124,8 +107,6 @@ function basename(path: string): string {
   const trimmed = path.replace(/\/+$/, "");
   return trimmed.slice(trimmed.lastIndexOf("/") + 1) || path;
 }
-
-const HIDRIVE_WEBDAV_MOUNT = "/Volumes/webdav.hidrive.ionos.com";
 
 type RemotePathRef = NonNullable<NonNullable<SyncProfile["remotePaths"]>["src"]>;
 type NetworkPathRef = NonNullable<NonNullable<SyncProfile["networkPaths"]>["src"]>;
@@ -347,35 +328,6 @@ async function resolveProfileRemotePaths(
   return resolved;
 }
 
-const isHiDriveWebDavPath = (path: string) =>
-  path === HIDRIVE_WEBDAV_MOUNT || path.startsWith(`${HIDRIVE_WEBDAV_MOUNT}/`);
-
-/** rsync (über SSH zu HiDrive) ist nur sinnvoll, wenn das Sync-Ziel auf dem
- * HiDrive-WebDAV-Mount liegt. Bei lokalen Zielen wird der Transport-Selektor
- * ausgeblendet und immer das Dateisystem verwendet. */
-export function syncRsyncAvailable(): boolean {
-  const s = syncDialog();
-  return !!s && isHiDriveWebDavPath(s.dst);
-}
-
-function rsyncDefaultsFromWebDavPath(dst: string) {
-  // Der sichtbare WebDAV-Pfad dient nur zur Orientierung. rsync benötigt
-  // denselben HiDrive-Pfad ohne den lokalen /Volumes-Mountpoint.
-  const mount = HIDRIVE_WEBDAV_MOUNT;
-  const remotePath = dst === mount || dst.startsWith(`${mount}/`)
-    ? dst.slice(mount.length) || "/"
-    : "/";
-  const username = remotePath.match(/^\/users\/([^/]+)/)?.[1] ?? "";
-  return { host: "rsync.hidrive.ionos.com", remotePath, username };
-}
-
-function setRsyncDefaults(dst: string) {
-  const defaults = rsyncDefaultsFromWebDavPath(dst);
-  setSyncRsyncHost(defaults.host);
-  setSyncRsyncRemotePath(defaults.remotePath);
-  setSyncRsyncUsername(defaults.username);
-}
-
 async function reloadPreview() {
   const s = syncDialog();
   if (!s) return;
@@ -383,15 +335,6 @@ async function reloadPreview() {
   const previewId = `preview-${newJobId()}`;
   activePreviewId = previewId;
   setSyncPreviewReady(false);
-  // Bei rsync ist ein WebDAV-Vergleich nicht verlässlich und für den Ablauf
-  // auch nicht nötig: rsync ermittelt seine Differenzen direkt am Server.
-  if (syncTransport() === "rsync") {
-    setSyncEntries([]);
-    setSyncConflictChoices({});
-    setSyncLoading(false);
-    setSyncPreviewReady(true);
-    return;
-  }
   setSyncLoading(true);
   try {
     // Immer mit delete_extra=true vorschauen, damit überzählige Ziel-Dateien
@@ -459,10 +402,6 @@ export async function openSyncDialog(
   setSyncMode("oneWay");
   setSyncVerifyChecksums(false);
   setSyncMaxFileSizeMb(0);
-  setSyncTransport("filesystem");
-  setRsyncDefaults(dst);
-  setSyncRsyncPassword("");
-  setSyncRsyncSavePassword(true);
   setSyncConflictChoices({});
   setActiveSyncProfileId(null);
   setSyncEntries([]);
@@ -510,50 +449,6 @@ export function setSyncMaxFileSizeAndRefresh(value: number) {
   setSyncPreviewReady(false);
 }
 
-export function setSyncTransportAndRefresh(
-  transport: "filesystem" | "rsync",
-) {
-  setSyncTransport(transport);
-  // rsync arbeitet einweg (lokal → HiDrive); Zwei-Wege-Konflikte gehören
-  // weiterhin zum Dateisystem-Transport über das eingebundene Laufwerk.
-  if (transport === "rsync") setSyncMode("oneWay");
-  setSyncEntries([]);
-  setSyncConflictChoices({});
-  setSyncPreviewReady(false);
-}
-
-export function setSyncRsyncHostValue(value: string) {
-  setSyncRsyncHost(value);
-}
-
-export function setSyncRsyncUsernameValue(value: string) {
-  setSyncRsyncUsername(value);
-}
-
-export function setSyncRsyncRemotePathValue(value: string) {
-  setSyncRsyncRemotePath(value);
-}
-
-export function setSyncRsyncPasswordValue(value: string) {
-  setSyncRsyncPassword(value);
-}
-
-export function setSyncRsyncSavePasswordValue(value: boolean) {
-  setSyncRsyncSavePassword(value);
-}
-
-/** Lädt ein gespeichertes Kennwort. Fehlende Einträge bleiben still leer,
- * damit ein gespeichertes Profil aus der Sidebar nicht blockiert wird. */
-export async function loadSyncRsyncPasswordFromKeychain(): Promise<boolean> {
-  const host = syncRsyncHost().trim();
-  const username = syncRsyncUsername().trim();
-  if (!host || !username) return false;
-  const password = await loadRsyncPassword(host, username);
-  if (!password) return false;
-  setSyncRsyncPassword(password);
-  return true;
-}
-
 export function setSyncConflictChoice(
   rel: string,
   choice: "left" | "right" | "skip",
@@ -580,36 +475,7 @@ export async function applySyncProfile(id: string, preview = false) {
   setSyncMode(profile.mode);
   setSyncVerifyChecksums(profile.verifyChecksums);
   setSyncMaxFileSizeMb(profile.maxFileSizeMb);
-  // Sicherheitsnetz: rsync gilt nur für HiDrive-Ziele. Ein (altes) Profil mit
-  // lokalem Ziel fällt auf den Dateisystem-Transport zurück.
-  const transport =
-    profile.transport === "rsync" && !isHiDriveWebDavPath(profile.dst)
-      ? "filesystem"
-      : profile.transport;
-  const destination =
-    transport === "filesystem"
-      ? folderCopyDestination(basename(profile.src), profile.dst)
-      : profile.dst;
-  setSyncTransport(transport);
-  if (transport === "rsync") {
-    const defaults = rsyncDefaultsFromWebDavPath(profile.dst);
-    setSyncRsyncHost(profile.rsync?.host || defaults.host);
-    setSyncRsyncUsername(profile.rsync?.username || defaults.username);
-    setSyncRsyncRemotePath(profile.rsync?.remotePath || defaults.remotePath);
-    setSyncRsyncPassword("");
-    setSyncRsyncSavePassword(true);
-    // Der Schlüsselbund ist die einzige persistente Passwortquelle. Das
-    // ermöglicht den Start eines rsync-Profils direkt aus der Sidebar.
-    try {
-      await loadSyncRsyncPasswordFromKeychain();
-    } catch {
-      // Wenn der Schlüsselbund nicht verfügbar ist, zeigt confirmSync eine
-      // klare Meldung statt das Profil unbrauchbar zu machen.
-    }
-  } else {
-    setRsyncDefaults(destination);
-    setSyncRsyncPassword("");
-  }
+  const destination = folderCopyDestination(basename(profile.src), profile.dst);
   setSyncDialog({
     src: profile.src,
     dst: destination,
@@ -619,7 +485,7 @@ export async function applySyncProfile(id: string, preview = false) {
   setSyncEntries([]);
   setSyncConflictChoices({});
   setSyncPreviewReady(false);
-  if (preview && transport === "filesystem") await reloadPreview();
+  if (preview) await reloadPreview();
   return true;
 }
 
@@ -686,15 +552,6 @@ export async function saveCurrentSyncProfile() {
     mode: syncMode(),
     verifyChecksums: syncVerifyChecksums(),
     maxFileSizeMb: syncMaxFileSizeMb(),
-    transport: syncTransport(),
-    rsync:
-      syncTransport() === "rsync"
-        ? {
-            host: syncRsyncHost().trim(),
-            username: syncRsyncUsername().trim(),
-            remotePath: syncRsyncRemotePath().trim(),
-        }
-        : undefined,
     remotePaths,
     networkPaths,
   };
@@ -737,58 +594,7 @@ export async function confirmSync() {
   const entries = syncEntries();
   const mode = syncMode();
   const conflictChoices = syncConflictChoices();
-  if (syncTransport() === "filesystem" && !syncPreviewReady()) return;
-
-  if (syncTransport() === "rsync") {
-    const host = syncRsyncHost().trim();
-    const username = syncRsyncUsername().trim();
-    const remotePath = syncRsyncRemotePath().trim();
-    const password = syncRsyncPassword();
-    if (!host || !username || !remotePath || !password) {
-      // Dialog offen lassen: Die Meldung soll fehlende Pflichtfelder anmahnen,
-      // ohne die bereits gemachten Eingaben zu verwerfen.
-      await notifyError(t("sync.rsyncRequired"));
-      return;
-    }
-    setSyncDialog(null);
-    const id = newJobId();
-    try {
-      if (syncRsyncSavePassword()) {
-        await saveRsyncPassword(host, username, password);
-      }
-      // rsync meldet nur tatsächlich übertragene Dateien; die komplette
-      // Baumgröße wäre lediglich der Vergleich, nicht die Kopiermenge.
-      setState("job", {
-        id,
-        kind: "rsync",
-        done: 0,
-        total: 0,
-        filesDone: 0,
-        current: `rsync: ${username}@${host}`,
-      });
-      await runRsync({
-        jobId: id,
-        localPath: s.src,
-        host,
-        remotePath,
-        username,
-        password,
-        deleteExtra: syncDeleteExtra(),
-        excludePatterns: ignorePatternList(),
-        maxFileSize: maxFileSizeBytes(),
-      });
-    } catch (e) {
-      // Ein bewusster Klick auf „Abbrechen“ ist kein Fehlerdialog.
-      if (errMsg(e) !== t("err.rsyncCancelled")) {
-        await notifyError(t("common.error", { msg: errMsg(e) }));
-      }
-    } finally {
-      setState("job", null);
-      await refreshPane("left");
-      await refreshPane("right");
-    }
-    return;
-  }
+  if (!syncPreviewReady()) return;
 
   setSyncDialog(null);
 
@@ -900,9 +706,12 @@ export async function confirmSync() {
     }
     if (deletes.length > 0) {
       const deletePaths = deletes.map((e) => joinPath(s.dst, e.rel));
-      let targetIsNetwork = isHiDriveWebDavPath(s.dst);
+      // Die Netzwerkerkennung liegt allein im Backend: `pathIsNetwork` fragt
+      // über statfs den Kernel und ist damit verlässlicher als jede
+      // Pfad-Heuristik im Frontend.
+      let targetIsNetwork = false;
       try {
-        targetIsNetwork = (await pathIsNetwork(s.dst)) || targetIsNetwork;
+        targetIsNetwork = await pathIsNetwork(s.dst);
       } catch {}
       setState("job", {
         id,

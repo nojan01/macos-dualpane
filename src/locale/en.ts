@@ -53,31 +53,12 @@ export const en: Record<string, string> = {
   "jobbar.items": "{done} / {total} entries",
   "jobbar.itemsDeleted": "{count} entries deleted",
   "jobbar.filesCopied": "{count} files copied",
-  "jobbar.rsync": "rsync (SSH)",
 
-  // Rsync
-  "rsync.title": "Synchronize with HiDrive via rsync",
-  "rsync.description":
-    "The source is synchronized directly with HiDrive over SSH. The password is used only for this transfer and is not stored.",
-  "rsync.localPath": "Local source folder",
-  "rsync.username": "HiDrive username",
-  "rsync.password": "Password",
-  "rsync.host": "rsync server",
-  "rsync.remotePath": "HiDrive destination path",
-  "rsync.deleteExtra": "Delete extra files at destination",
-  "rsync.savePassword": "Save password in macOS Keychain",
-  "rsync.loadPassword": "Load password from Keychain",
-  "rsync.required": "Local folder, username, and password are required.",
-  "rsync.usernameRequired": "Enter the HiDrive username first.",
-  "rsync.passwordMissing": "No password is stored in Keychain for this server and user.",
-  "rsync.start": "Synchronize",
-  "rsync.running": "Synchronizing…",
   "rdp.connectTitle": "Open an RDP session to {target} in RemoteDeskRDP",
   "rdp.connecting": "Connecting …",
   "err.rdp.unknown":
     "This connection no longer exists in RemoteDeskRDP. It was probably deleted there.",
   "err.rdp.open": "RemoteDeskRDP could not be started: {0}",
-  "err.rsyncCancelled": "rsync synchronization was cancelled.",
 
   // Pane
   "pane.filter.placeholder": "Filter (⌘F)",
@@ -398,17 +379,6 @@ export const en: Record<string, string> = {
   "sync.profileSaveLabel": "Profile name",
   "sync.profileDeleteTitle": "Delete sync profile",
   "sync.profileDeleteConfirm": "Delete profile “{name}”?",
-  "sync.transport": "Transfer method",
-  "sync.transportFilesystem": "Directly via mounted drive (WebDAV)",
-  "sync.transportRsync": "rsync over SSH (HiDrive)",
-  "sync.rsyncMountedNote":
-    "HiDrive remains visible over WebDAV. The actual transfer runs directly via rsync/SSH and avoids unreliable WebDAV transfers.",
-  "sync.rsyncDirect":
-    "rsync determines and performs the synchronization directly on HiDrive.",
-  "sync.rsyncDeleteNote":
-    "With the following option, rsync permanently deletes files that exist only on HiDrive.",
-  "sync.rsyncRequired":
-    "rsync requires a server, HiDrive username, destination path, and password. The password can be loaded from Keychain.",
   "sync.ignoreTitle": "Exclusion rules",
   "sync.ignoreHelp":
     "One rule per line. Names, paths, * and ? are supported. .dualbeamignore in the source folder is applied as well.",
@@ -435,7 +405,7 @@ export const en: Record<string, string> = {
   "network.connectServer": "Connect to server…",
   "network.connectTitle": "Connect to server",
   "network.connectLabel":
-    "Server address (SMB, HTTPS WebDAV, or rsync://; e.g. rsync://rsync.hidrive.ionos.com/users/name/)",
+    "Server address (SMB or HTTPS WebDAV; e.g. https://server/webdav)",
   "network.connect": "Connect",
   "network.connectFailed": "Connection failed",
   "network.insecureTitle": "Insecure connection",

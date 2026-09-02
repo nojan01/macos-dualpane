@@ -9,8 +9,7 @@ Macs läuft.
 Signierung und Notarisierung sind eingerichtet und laufen ueber ein Skript:
 
 ```bash
-scripts/release-macos.sh              # persoenliche Variante (mit HiDrive)
-scripts/release-macos.sh --public     # oeffentliche Variante (ohne HiDrive)
+scripts/release-macos.sh              # bauen, signieren, notarisieren
 scripts/release-macos.sh --reset      # hinterlegte Zugangsdaten loeschen
 ```
 
@@ -159,26 +158,6 @@ xcrun stapler validate \
 6. `scripts/release-macos.sh` aufrufen → fertig signiert & notarisiert.
 
 ---
-
-## Build-Varianten: persönlich vs. öffentlich
-
-Es gibt zwei Build-Varianten, gesteuert über das Cargo-Feature `hidrive`:
-
-| Variante | Befehl | IONOS-HiDrive-Voreinstellung |
-| --- | --- | --- |
-| **Persönlich** | `npm run tauri:build` | enthalten |
-| **Öffentlich** (Release, Standard) | `npm run tauri:build:public` | entfernt |
-
-- Das Cargo-Feature `hidrive` ist **nicht** voreingestellt (`default = []`). Ein Bau
-  ohne ausdrückliche Angabe liefert also immer die öffentliche Fassung – wer den
-  Schalter vergisst, veröffentlicht keine personenbezogene Adresse.
-- Die persönliche Variante fordert das Feature ausdrücklich an
-  (`tauri build --features hidrive`). Nur dann wird der HiDrive-Code per
-  `#[cfg(feature = "hidrive")]` überhaupt einkompiliert.
-- Die generische Netzwerk-Funktion (beliebige WebDAV/SMB-URL verbinden, mounten,
-  trennen) bleibt in beiden Varianten erhalten; nur das fest vorkonfigurierte
-  HiDrive-Lesezeichen entfällt in der öffentlichen Version.
-- Für die Veröffentlichung **immer** `npm run tauri:build:public` verwenden.
 
 ## Mitgeliefertes `rclone`
 

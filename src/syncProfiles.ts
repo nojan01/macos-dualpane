@@ -9,20 +9,12 @@ export type SyncProfile = {
   ignorePatterns: string;
   mode: "oneWay" | "twoWay";
   verifyChecksums: boolean;
-  /** Dateisystem nutzt das eingebundene Ziel direkt. rsync überträgt per SSH. */
-  transport: "filesystem" | "rsync";
   /**
    * Obergrenze je Datei in MB. 0 bedeutet „keine Grenze“. Sehr große Dateien
    * (Datenträgerabbilder, Videoarchive) blockieren auf langsamen Zielen sonst
    * den gesamten Abgleich.
    */
   maxFileSizeMb: number;
-  /** Zugangsdaten ohne Passwort; dieses liegt ausschließlich im Schlüsselbund. */
-  rsync?: {
-    host: string;
-    username: string;
-    remotePath: string;
-  };
   /** Stabile Zuordnung für rclone-Laufwerke. Der lokale Mount-Pfad ist nur
    * eine Momentaufnahme und kann nach einem Neustart anders heißen. */
   remotePaths?: {
@@ -60,7 +52,6 @@ function load(): SyncProfile[] {
             : "",
         mode: profile.mode === "twoWay" ? "twoWay" : "oneWay",
         verifyChecksums: !!profile.verifyChecksums,
-        transport: profile.transport === "rsync" ? "rsync" : "filesystem",
         // Bestandsprofile kennen das Feld nicht; ebenso wenig sind negative,
         // gebrochene oder unendliche Werte sinnvoll. Alles Ungültige bedeutet
         // „keine Grenze“, damit ein beschädigter Eintrag nie stillschweigend
@@ -71,17 +62,6 @@ function load(): SyncProfile[] {
           profile.maxFileSizeMb > 0
             ? Math.floor(profile.maxFileSizeMb)
             : 0,
-        rsync:
-          profile.rsync &&
-          typeof profile.rsync.host === "string" &&
-          typeof profile.rsync.username === "string" &&
-          typeof profile.rsync.remotePath === "string"
-            ? {
-                host: profile.rsync.host,
-                username: profile.rsync.username,
-                remotePath: profile.rsync.remotePath,
-              }
-            : undefined,
         remotePaths:
           profile.remotePaths && typeof profile.remotePaths === "object"
             ? {
