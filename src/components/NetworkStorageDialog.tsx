@@ -4,10 +4,11 @@ import { bumpVolumes, loadPane, state } from "../state";
 import { errMsg, t } from "../i18n";
 import { emptyObjectStorageProfile } from "../objectStorageProfiles";
 import { openObjectStorageDialog } from "./ObjectStorageDialog";
+import { openNfsDialog } from "./NfsDialog";
 import { openRemoteDialog } from "./RemoteDialog";
 import { notifyError } from "./Dialogs";
 
-type Protocol = "webdav" | "smb" | "s3" | "swift" | "sftp" | "ftps";
+type Protocol = "webdav" | "smb" | "nfs" | "s3" | "swift" | "sftp" | "ftps";
 type DialogState = { protocol: Protocol; webdavUrl: string; busy: boolean };
 
 const [dialog, setDialog] = createSignal<DialogState | null>(null);
@@ -31,22 +32,36 @@ export function NetworkStorageDialog() {
     openObjectStorageDialog(profile);
   };
 
+  const continueToNfs = () => {
+    const current = dialog();
+    if (!current || current.busy) return;
+    close();
+    openNfsDialog();
+  };
+
   const continueToRemote = () => {
     const current = dialog();
     if (!current || current.busy) return;
     close();
-    openRemoteDialog({ protocol: current.protocol === "ftps" ? "ftpsExplicit" : "sftp" });
+    // SMB lief früher über den Finder („mount volume"). Der meldet für
+    // Windows-Freigaben nur den Sammelfehler -5016 und kommt nie bis zur
+    // Anmeldung. Deshalb geht SMB denselben Weg wie SFTP und FTPS.
+    openRemoteDialog({
+      protocol:
+        current.protocol === "ftps"
+          ? "ftpsExplicit"
+          : current.protocol === "smb"
+            ? "smb"
+            : "sftp",
+    });
   };
 
   const connectWebDav = async () => {
     const current = dialog();
     if (!current || current.busy) return;
     const url = current.webdavUrl.trim();
-    const valid = current.protocol === "webdav"
-      ? /^https:\/\/.+/i.test(url)
-      : /^smb:\/\/.+/i.test(url);
-    if (!valid) {
-      await notifyError(current.protocol === "smb" ? t("network.invalidSmb") : t("network.invalidWebdav"));
+    if (!/^https:\/\/.+/i.test(url)) {
+      await notifyError(t("network.invalidWebdav"));
       return;
     }
     update({ busy: true });
@@ -67,26 +82,27 @@ export function NetworkStorageDialog() {
 
   return <Show when={dialog()}>{(current) => <div class="modal-backdrop" onMouseDown={() => !current().busy && close()}>
     <div class="modal network-storage-modal" role="dialog" aria-modal="true" aria-label={t("network.addDrive")} onMouseDown={(event) => event.stopPropagation()}>
-      <h2>{current().webdavUrl === "https://" ? t("network.addDrive") : t("network.editWebdav")}</h2>
+      <h2>{current().webdavUrl === "https://" ? t("network.addDrive") : t(`network.title.${current().protocol}`)}</h2>
       <p>{t("network.chooseProtocol")}</p>
       <label>
         <span>Protokoll</span>
         <select value={current().protocol} disabled={current().busy} onChange={(event) => update({ protocol: event.currentTarget.value as Protocol })}>
           <option value="webdav">WebDAV</option>
           <option value="smb">SMB / Samba</option>
+          <option value="nfs">NFS</option>
           <option value="s3">S3 (Objekt-Speicher)</option>
           <option value="swift">OpenStack Swift</option>
           <option value="sftp">SFTP</option>
           <option value="ftps">FTPS</option>
         </select>
       </label>
-      <Show when={current().protocol === "webdav" || current().protocol === "smb"} fallback={<p class="network-storage-note">{t("network.nextCredentials")}</p>}>
+      <Show when={current().protocol === "webdav"} fallback={<p class="network-storage-note">{t(current().protocol === "nfs" ? "network.nextNfs" : "network.nextCredentials")}</p>}>
         <label>
-          <span>{current().protocol === "smb" ? t("network.smbAddress") : t("network.webdavAddress")}</span>
-          <input type="url" autofocus disabled={current().busy} placeholder={current().protocol === "smb" ? "smb://server/freigabe" : "https://webdav.example.net/"} value={current().webdavUrl} onInput={(event) => update({ webdavUrl: event.currentTarget.value })} onKeyDown={(event) => { if (event.key === "Enter") void connectWebDav(); }} />
+          <span>{t("network.webdavAddress")}</span>
+          <input type="url" autofocus disabled={current().busy} placeholder="https://webdav.example.net/" value={current().webdavUrl} onInput={(event) => update({ webdavUrl: event.currentTarget.value })} onKeyDown={(event) => { if (event.key === "Enter") void connectWebDav(); }} />
         </label>
       </Show>
-      <div class="modal-actions"><span /><button disabled={current().busy} onClick={() => (current().protocol === "webdav" || current().protocol === "smb") ? void connectWebDav() : (current().protocol === "s3" || current().protocol === "swift") ? continueToObjectProfile() : continueToRemote()}>{current().protocol === "webdav" || current().protocol === "smb" ? current().busy ? t("network.connecting") : t("network.connect") : t("network.next")}</button><button class="secondary" disabled={current().busy} onClick={close}>{t("common.cancel")}</button></div>
+      <div class="modal-actions"><span /><button disabled={current().busy} onClick={() => (current().protocol === "webdav") ? void connectWebDav() : current().protocol === "nfs" ? continueToNfs() : (current().protocol === "s3" || current().protocol === "swift") ? continueToObjectProfile() : continueToRemote()}>{current().protocol === "webdav" ? current().busy ? t("network.connecting") : t("network.connect") : t("network.next")}</button><button class="secondary" disabled={current().busy} onClick={close}>{t("common.cancel")}</button></div>
     </div>
   </div>}</Show>;
 }

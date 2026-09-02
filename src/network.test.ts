@@ -40,8 +40,20 @@ describe("remoteFromUrl", () => {
     expect(remoteFromUrl(new URL("sftp://[fe80::1]/"))?.host).toBe("fe80::1");
   });
 
+  it("erkennt SMB samt Freigabe – auch unter dem alten Namen cifs", () => {
+    expect(remoteFromUrl(new URL("smb://nas.fritz.box/Daten"))).toEqual({
+      protocol: "smb",
+      host: "nas.fritz.box",
+      port: "",
+      path: "/Daten",
+    });
+    expect(remoteFromUrl(new URL("cifs://10.211.55.3/Daten"))?.protocol).toBe(
+      "smb",
+    );
+  });
+
   it("lässt Protokolle unberührt, die macOS selbst einhängt", () => {
-    for (const url of ["smb://server/share", "https://dav.example.com/", "ftp://10.0.0.5/"]) {
+    for (const url of ["https://dav.example.com/", "ftp://10.0.0.5/", "afp://10.0.0.5/"]) {
       expect(remoteFromUrl(new URL(url))).toBeNull();
     }
   });

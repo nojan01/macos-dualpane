@@ -44,6 +44,15 @@ pub enum RemoteProtocol {
     FtpsExplicit,
     /// FTP, das von der ersten Sekunde an TLS spricht (üblicherweise Port 990).
     FtpsImplicit,
+    /// SMB/CIFS — das Protokoll von Windows-Freigaben, NAS-Geräten und Samba.
+    ///
+    /// Bewusst nicht über den Finder (`mount volume`): Der liefert für SMB nur
+    /// den nichtssagenden Sammelfehler -5016 („Server antwortet nicht"), noch
+    /// bevor er die Anmeldung versucht. Gemessen am selben Server meldet rclone
+    /// dagegen genau, was fehlt. Über rclone liegt die Freigabe zudem im
+    /// eigenen Ordner der App, womit Aushängen, Löschschutz und Übertragungen
+    /// unverändert greifen.
+    Smb,
 }
 
 impl RemoteProtocol {
@@ -52,6 +61,7 @@ impl RemoteProtocol {
             Self::Sftp => 22,
             Self::Ftp | Self::FtpsExplicit => 21,
             Self::FtpsImplicit => 990,
+            Self::Smb => 445,
         }
     }
 
@@ -61,10 +71,17 @@ impl RemoteProtocol {
         match self {
             Self::Sftp => "sftp",
             Self::Ftp | Self::FtpsExplicit | Self::FtpsImplicit => "ftp",
+            Self::Smb => "smb",
         }
     }
 
     /// Nur unverschlüsseltes FTP überträgt Kennwort und Inhalte im Klartext.
+    ///
+    /// SMB zählt hier als geschützt: Seit NTLMv2 wandert das Kennwort nie über
+    /// die Leitung, der Server stellt eine Rechenaufgabe. Die Inhalte sind
+    /// damit noch nicht verschlüsselt — darauf weist der Dialog hin. Eine
+    /// Beschränkung auf blanke IP-Adressen wäre hier verfehlt, weil
+    /// NAS-Geräte fast immer über ihren Namen angesprochen werden.
     pub fn is_encrypted(self) -> bool {
         !matches!(self, Self::Ftp)
     }
@@ -74,6 +91,7 @@ impl RemoteProtocol {
             Self::Sftp => "sftp",
             Self::Ftp => "ftp",
             Self::FtpsExplicit | Self::FtpsImplicit => "ftps",
+            Self::Smb => "smb",
         }
     }
 }
@@ -92,6 +110,10 @@ pub struct RemoteSpec {
     /// Anzeigename des Laufwerks. Leer bedeutet: aus dem Host ableiten.
     #[serde(default)]
     pub label: String,
+    /// Windows-Domäne oder Arbeitsgruppe. Nur für SMB, sonst leer. Wer sich
+    /// als `DOMAENE\benutzer` anmeldet, trägt hier `DOMAENE` ein.
+    #[serde(default)]
+    pub domain: String,
 }
 
 impl RemoteSpec {
@@ -255,6 +277,12 @@ fn validate(spec: &RemoteSpec, allow_insecure: bool) -> Result<(), String> {
     if !valid_remote_path(&spec.path) {
         return Err("err.remote.path".into());
     }
+    // Ohne Freigabe zeigt SMB nur auf die Liste der Freigaben. Der Finder kann
+    // daraus eine Auswahl anbieten, ein Einhängepunkt lässt sich daraus nicht
+    // bilden. Genau daran scheiterte bisher „smb://server" ohne Zusatz.
+    if spec.protocol == RemoteProtocol::Smb && spec.path.trim().trim_matches('/').is_empty() {
+        return Err("err.remote.shareMissing".into());
+    }
     if let Some(port) = spec.port {
         if port == 0 {
             return Err("err.remote.port".into());
@@ -349,6 +377,10 @@ fn rclone_executable() -> Result<PathBuf, String> {
         dir.join(format!("rclone-{triple}")),
         // Beim Entwickeln liegt das Programm zwei Ebenen über target/debug.
         dir.join("../../binaries").join(format!("rclone-{triple}")),
+        // Testbinäre liegen noch eine Ebene tiefer, in target/debug/deps.
+        // Ohne diesen Ort ließe sich kein Praxistest gegen einen echten
+        // Server fahren.
+        dir.join("../../../binaries").join(format!("rclone-{triple}")),
     ];
     candidates
         .iter()
@@ -776,7 +808,7 @@ fn obscure(rclone: &Path, password: &str) -> Result<String, String> {
 /// Der Vergleich der Geräte-IDs mit dem übergeordneten Ordner ist zuverlässiger
 /// als das Durchsuchen der Ausgabe von `mount`: Er kommt ohne Textzerlegung aus
 /// und funktioniert auch bei Namen mit Leerzeichen.
-fn is_mount_point(path: &Path) -> bool {
+pub(crate) fn is_mount_point(path: &Path) -> bool {
     use std::os::unix::fs::MetadataExt;
     let here = match std::fs::metadata(path) {
         Ok(meta) => meta.dev(),
@@ -788,7 +820,7 @@ fn is_mount_point(path: &Path) -> bool {
     }
 }
 
-fn unique_mount_dir(label: &str) -> Result<(PathBuf, String), String> {
+pub(crate) fn unique_mount_dir(label: &str) -> Result<(PathBuf, String), String> {
     let root = mount_root()?;
     for attempt in 0..50 {
         let name = if attempt == 0 {
@@ -854,6 +886,11 @@ fn rclone_env(
         RemoteProtocol::FtpsImplicit => env.push((env_key("tls"), "true".into())),
         RemoteProtocol::FtpsExplicit => env.push((env_key("explicit_tls"), "true".into())),
         RemoteProtocol::Ftp => {}
+        RemoteProtocol::Smb => {
+            if !spec.domain.trim().is_empty() {
+                env.push((env_key("domain"), spec.domain.trim().to_string()));
+            }
+        }
     }
     env
 }
@@ -862,6 +899,14 @@ fn remote_argument(spec: &RemoteSpec) -> String {
     let path = spec.path.trim();
     if path.is_empty() || path == "/" {
         format!("{RCLONE_REMOTE}:")
+    } else if spec.protocol == RemoteProtocol::Smb {
+        // Bei SMB ist der erste Pfadteil kein Ordner, sondern die Freigabe.
+        // Die Wurzel des Zugangs ist die Liste der Freigaben, deshalb darf hier
+        // kein führender Schrägstrich stehen.
+        format!(
+            "{RCLONE_REMOTE}:{path}",
+            path = path.trim_start_matches('/')
+        )
     } else if spec.protocol == RemoteProtocol::Sftp && !path.starts_with('/') {
         // Beim SFTP-Backend ist ein Pfad ohne führenden Slash relativ zum
         // angemeldeten SFTP-Home. Anbieter wie Infomaniak stellen dort etwa
@@ -3887,6 +3932,28 @@ fn release(path: &Path) {
     let _ = std::fs::remove_dir(&entry.path);
 }
 
+/// Nimmt ein selbst eingehängtes Laufwerk ohne Hilfsprozess in die Liste auf.
+///
+/// NFS spricht der Kernel unmittelbar; es gibt weder rclone noch SSHFS und
+/// damit keinen Kindprozess. Über diesen Eintrag greifen Anzeige, Aushängen
+/// und das Aufräumen beim Beenden trotzdem unverändert.
+pub(crate) fn register_plain_mount(path: PathBuf, label: String, descriptor: String) {
+    if let Ok(mut list) = registry().lock() {
+        list.push(ActiveMount {
+            path,
+            object_home: None,
+            label,
+            descriptor,
+            rc_socket: PathBuf::new(),
+            child: None,
+            log: PathBuf::new(),
+            remote_spec: None,
+            object_profile: None,
+            sshfs_askpass: None,
+        });
+    }
+}
+
 /// Alle derzeit von DualBeam eingehängten Netzlaufwerke.
 pub fn active_mounts() -> Vec<RemoteMountInfo> {
     let Ok(list) = registry().lock() else {
@@ -4122,6 +4189,7 @@ mod tests {
             username: "user".into(),
             path: "/data".into(),
             label: String::new(),
+            domain: String::new(),
         }
     }
 
@@ -4152,6 +4220,63 @@ mod tests {
         assert_eq!(RemoteProtocol::Ftp.default_port(), 21);
         assert_eq!(RemoteProtocol::FtpsExplicit.default_port(), 21);
         assert_eq!(RemoteProtocol::FtpsImplicit.default_port(), 990);
+        assert_eq!(RemoteProtocol::Smb.default_port(), 445);
+    }
+
+    /// Bei SMB ist der erste Pfadteil die Freigabe, kein Ordner. Ein führender
+    /// Schrägstrich würde auf die Wurzel des Zugangs zeigen — dort liegt bei
+    /// SMB nur die Liste der Freigaben, kein Inhalt.
+    #[test]
+    fn smb_addresses_the_share_without_a_leading_slash() {
+        let mut s = spec(RemoteProtocol::Smb);
+        s.path = "/Öffentliche Daten/unter".into();
+        assert_eq!(remote_argument(&s), "DUALBEAM:Öffentliche Daten/unter");
+        s.path = "Daten".into();
+        assert_eq!(remote_argument(&s), "DUALBEAM:Daten");
+    }
+
+    /// Ohne Freigabe zeigt SMB nur auf die Liste der Freigaben. Genau daran
+    /// scheiterte der frühere Weg über den Finder.
+    #[test]
+    fn smb_demands_a_share() {
+        let mut s = spec(RemoteProtocol::Smb);
+        for leer in ["", "/", "   ", "//"] {
+            s.path = leer.into();
+            assert_eq!(
+                validate(&s, false).unwrap_err(),
+                "err.remote.shareMissing",
+                "leer erkannt: {leer:?}"
+            );
+        }
+        s.path = "Daten".into();
+        assert!(validate(&s, false).is_ok());
+    }
+
+    /// Das Kennwort geht bei NTLMv2 nie über die Leitung, deshalb gilt SMB als
+    /// geschützt: keine Zustimmungspflicht, keine Beschränkung auf lokale
+    /// Adressen. NAS-Geräte werden fast immer über einen Namen angesprochen.
+    #[test]
+    fn smb_needs_no_confirmation_and_reaches_named_hosts() {
+        let mut s = spec(RemoteProtocol::Smb);
+        s.path = "Daten".into();
+        s.host = "nas.fritz.box".into();
+        assert!(validate(&s, false).is_ok());
+    }
+
+    /// Die Domäne ist bei Heimnetzen leer und darf dann nicht als leerer Wert
+    /// gesetzt werden — rclone würde sonst eine leere Domäne aushandeln.
+    #[test]
+    fn smb_passes_the_domain_only_when_filled() {
+        let mut s = spec(RemoteProtocol::Smb);
+        s.path = "Daten".into();
+        let ohne = rclone_env(&s, "geheim", None);
+        assert!(!ohne.iter().any(|(key, _)| key.ends_with("_DOMAIN")));
+        assert!(ohne.contains(&("RCLONE_CONFIG_DUALBEAM_TYPE".into(), "smb".into())));
+        assert!(ohne.contains(&("RCLONE_CONFIG_DUALBEAM_PASS".into(), "geheim".into())));
+
+        s.domain = "  FIRMA  ".into();
+        let mit = rclone_env(&s, "geheim", None);
+        assert!(mit.contains(&("RCLONE_CONFIG_DUALBEAM_DOMAIN".into(), "FIRMA".into())));
     }
 
     #[test]
@@ -4162,6 +4287,63 @@ mod tests {
         assert!(explicit.contains(&("RCLONE_CONFIG_DUALBEAM_EXPLICIT_TLS".into(), "true".into())));
         let plain = rclone_env(&spec(RemoteProtocol::Ftp), "x", None);
         assert!(!plain.iter().any(|(key, _)| key.contains("TLS")));
+    }
+
+    /// Hängt eine echte SMB-Freigabe ein, liest, schreibt und hängt wieder aus.
+    ///
+    /// Läuft nur auf Anforderung, weil dafür ein SMB-Server bereitstehen muss:
+    /// `cargo test --lib remote::tests::echter_smb_mount -- --ignored --nocapture`
+    ///
+    /// Gegenstelle beim Entwickeln: Windows 11 in Parallels.
+    /// ```powershell
+    /// New-Item -ItemType Directory C:\DualBeamTest -Force
+    /// New-SmbShare -Name "Daten" -Path C:\DualBeamTest -EncryptData $true
+    /// net user smbtest DualBeam-Test-2026 /add
+    /// Grant-SmbShareAccess -Name Daten -AccountName "$env:COMPUTERNAME\smbtest" `
+    ///   -AccessRight Full -Force
+    /// icacls C:\DualBeamTest /grant "smbtest:(OI)(CI)F"
+    /// Enable-NetFirewallRule -DisplayGroup "Datei- und Druckerfreigabe"
+    /// ```
+    /// Das Kennwort steht hier bewusst offen: Es gehört zu einem Wegwerf-Konto
+    /// auf einer Testfreigabe und darf nirgends sonst gelten.
+    #[test]
+    #[ignore = "benötigt eine erreichbare SMB-Freigabe"]
+    fn echter_smb_mount() {
+        let mut s = spec(RemoteProtocol::Smb);
+        s.host = std::env::var("DUALBEAM_SMB_HOST").unwrap_or("10.211.55.3".into());
+        s.username = std::env::var("DUALBEAM_SMB_USER").unwrap_or("smbtest".into());
+        s.path = std::env::var("DUALBEAM_SMB_SHARE").unwrap_or("Daten".into());
+        s.label = "SMB-Praxistest".into();
+        let kennwort =
+            std::env::var("DUALBEAM_SMB_PASS").unwrap_or("DualBeam-Test-2026".into());
+
+        let pfad = mount_blocking(s, kennwort, false).expect("Einhängen fehlgeschlagen");
+        let dir = Path::new(&pfad);
+        assert!(is_mount_point(dir), "kein Mountpunkt: {pfad}");
+
+        // Lesen: die Testdatei ist genau 512 KiB groß.
+        let gelesen = std::fs::read(dir.join("probe.bin")).expect("Lesen fehlgeschlagen");
+        assert_eq!(gelesen.len(), 524_288, "unerwartete Größe");
+
+        // Schreiben, wiederlesen, entfernen.
+        let ziel = dir.join("rust-probe.tmp");
+        std::fs::write(&ziel, b"DualBeam").expect("Schreiben fehlgeschlagen");
+        assert_eq!(std::fs::read(&ziel).unwrap(), b"DualBeam");
+        std::fs::remove_file(&ziel).expect("Löschen fehlgeschlagen");
+
+        // Unterordner müssen als solche erkannt werden, sonst greift die
+        // Ordner-Navigation nicht.
+        assert!(dir.join("unter").is_dir(), "Unterordner nicht erkannt");
+
+        // Das Laufwerk muss in der gemeinsamen Liste stehen; nur darüber
+        // findet die Oberfläche das Aushängen und den Löschschutz.
+        assert!(
+            active_mounts().iter().any(|m| m.path == pfad),
+            "nicht in der Liste der Netzlaufwerke"
+        );
+
+        unmount_owned(dir).expect("Aushängen fehlgeschlagen");
+        assert!(!is_mount_point(dir), "noch eingehängt");
     }
 
     #[test]

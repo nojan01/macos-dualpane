@@ -191,7 +191,12 @@ export async function importRemoteDeskObjectStorageProfiles(): Promise<ObjectSto
 }
 
 /** Protokolle, die DualBeam über das mitgelieferte rclone einhängt. */
-export type RemoteProtocol = "sftp" | "ftp" | "ftpsExplicit" | "ftpsImplicit";
+export type RemoteProtocol =
+  | "sftp"
+  | "ftp"
+  | "ftpsExplicit"
+  | "ftpsImplicit"
+  | "smb";
 
 export type RemoteSpec = {
   protocol: RemoteProtocol;
@@ -203,6 +208,8 @@ export type RemoteSpec = {
   path: string;
   /** Anzeigename. Leer bedeutet: aus dem Rechnernamen ableiten. */
   label: string;
+  /** Windows-Domäne oder Arbeitsgruppe. Nur bei SMB gefüllt. */
+  domain?: string;
 };
 
 export type HostKeyReport = {
@@ -254,6 +261,33 @@ export async function mountRemote(
   allowInsecure = false,
 ): Promise<string> {
   return invoke<string>("mount_remote", { spec, password, allowInsecure });
+}
+
+/** Fassung des NFS-Protokolls. macOS beherrscht höchstens 4.1. */
+export type NfsVersion = "auto" | "v2" | "v3" | "v4" | "v41";
+
+/** Sicherheitsverfahren. macOS kennt ausschließlich diese vier. */
+export type NfsSecurity = "auto" | "sys" | "krb5" | "krb5i" | "krb5p";
+
+export type NfsTransport = "auto" | "tcp" | "udp";
+
+export type NfsSpec = {
+  host: string;
+  path: string;
+  version: NfsVersion;
+  security: NfsSecurity;
+  /** Kerberos-Bereich; nur bei mehreren Zugängen nötig. */
+  realm: string;
+  transport: NfsTransport;
+  /** Für Server ohne `rpc.statd`, bei denen Zugriffe sonst hängen bleiben. */
+  noLocks: boolean;
+  label: string;
+  allowInsecure: boolean;
+};
+
+/** Hängt eine NFS-Freigabe ein und liefert den lokalen Pfad. */
+export async function mountNfs(spec: NfsSpec): Promise<string> {
+  return invoke<string>("mount_nfs", { spec });
 }
 
 export async function unmountRemote(path: string): Promise<void> {

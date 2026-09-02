@@ -470,11 +470,79 @@ export const de: Record<string, string> = {
     "Nur eingebundene Volumes unter /Volumes können ausgehängt werden.",
 
   // Netzlaufwerke über rclone (SFTP, FTPS)
+  // --- NFS ---
+  "nfs.title": "NFS-Freigabe verbinden",
+  "nfs.host": "Server",
+  "nfs.path": "Freigabepfad auf dem Server",
+  "nfs.version": "Protokollfassung",
+  "nfs.version.auto": "Automatisch aushandeln",
+  "nfs.version.v2": "NFS 2 (nur alte Geräte, max. 2 GB je Datei)",
+  "nfs.version.v3": "NFS 3",
+  "nfs.version.v4": "NFS 4",
+  "nfs.version.v41": "NFS 4.1",
+  "nfs.security": "Sicherheitsverfahren",
+  "nfs.security.auto": "Automatisch aushandeln",
+  "nfs.security.sys": "AUTH_SYS – Rechte über Benutzernummer",
+  "nfs.security.krb5": "Kerberos – Anmeldung",
+  "nfs.security.krb5i": "Kerberos – Anmeldung und Echtheitsschutz",
+  "nfs.security.krb5p": "Kerberos – verschlüsselt (krb5p)",
+  "nfs.realm": "Kerberos-Bereich (freiwillig)",
+  "nfs.realmHint":
+    "Der Name des Kerberos-Verbunds, meist die Firmendomäne in Großbuchstaben – etwa FIRMA.LOCAL. Ihre Systembetreuung kennt ihn; „klist“ im Terminal zeigt ihn ebenfalls. Leer lassen, wenn Sie nur einen Kerberos-Zugang haben: dann nimmt macOS ihn von allein. Das Ticket besorgen Sie vorher mit „kinit“ – NFS kennt kein eigenes Kennwort.",
+  "nfs.transport": "Übertragung",
+  "nfs.transport.auto": "Automatisch",
+  "nfs.transport.tcp": "TCP",
+  "nfs.transport.udp": "UDP (ältere Unix-Server und NAS-Geräte)",
+  "nfs.label": "Anzeigename",
+  "nfs.noLocks": "Dateisperren abschalten",
+  "nfs.noLocksHint":
+    "Hilft bei Servern ohne „rpc.statd“, bei denen Zugriffe sonst hängen bleiben.",
+  "nfs.insecureNote":
+    "AUTH_SYS überträgt alle Inhalte im Klartext und weist niemanden aus – der Server vertraut allein der Benutzernummer. Ohne Kerberos sind deshalb nur Server im eigenen lokalen Netz zugelassen.",
+  "nfs.kerberosPlainNote":
+    "Kerberos weist beide Seiten sicher aus, verschlüsselt die Dateiinhalte aber nicht. Für verschlüsselte Übertragung wählen Sie „krb5p“.",
+  "nfs.acceptInsecure": "Unverschlüsselte Übertragung zulassen",
+  "nfs.privilegedPortHint":
+    "DualBeam verbindet ohne Administratorrechte. Server, die einen privilegierten Port verlangen – bei Linux die Voreinstellung „secure“ –, müssen in ihrer Freigabe auf „insecure“ gestellt werden.",
+  "nfs.connect": "Verbinden",
+  "nfs.connecting": "Verbinde …",
+  "nfs.needHostAndPath":
+    "Bitte Server angeben und einen Freigabepfad, der mit „/“ beginnt.",
+  "err.nfs.host": "Ungültiger Servername.",
+  "err.nfs.path": "Ungültiger Freigabepfad. Er muss mit „/“ beginnen.",
+  "err.nfs.realm": "Ungültiger Kerberos-Bereich.",
+  "err.nfs.realmWithoutKerberos":
+    "Ein Kerberos-Bereich ist nur bei einem Kerberos-Verfahren möglich.",
+  "err.nfs.v2NeedsUdp": "NFS 2 läuft nur über UDP.",
+  "err.nfs.v4NeedsTcp": "NFS 4 läuft nur über TCP.",
+  "err.nfs.insecureNotConfirmed":
+    "Diese Verbindung überträgt unverschlüsselt. Bitte bestätigen Sie das im Dialog oder wählen Sie „krb5p“.",
+  "err.nfs.remoteNeedsKerberos":
+    "Ohne Kerberos sind nur Server im eigenen lokalen Netz zugelassen.",
+  "err.nfs.hostnameNeedsKerberos":
+    "Ohne Kerberos ist statt eines Namens die IP-Adresse eines Servers im eigenen lokalen Netz nötig.",
+  "err.nfs.privilegedPort":
+    "Der Server verlangt einen privilegierten Port. DualBeam verbindet ohne Administratorrechte und kann das nicht leisten. Stellen Sie die Freigabe auf dem Server auf „insecure“ (Linux: in „/etc/exports“).",
+  "err.nfs.versionUnavailable":
+    "Der Server bietet die gewählte Protokollfassung nicht an. Versuchen Sie eine andere Fassung oder „Automatisch aushandeln“.",
+  "err.nfs.notExported":
+    "Der Server weist diesen Mac ab. Meist ist die IP-Adresse in der Freigabe nicht eingetragen.",
+  "err.nfs.authentication":
+    "Der Server hat das Sicherheitsverfahren abgelehnt. Wählen Sie ein anderes Verfahren.",
+  "err.nfs.transport":
+    "Der Server hat die Verbindung zurückgesetzt. Meist passt die Protokollfassung oder die Übertragungsart nicht.",
+  "err.nfs.noSuchExport": "Diesen Freigabepfad gibt es auf dem Server nicht.",
+  "err.nfs.unknownHost": "Der Servername ließ sich nicht auflösen.",
+  "err.nfs.unreachable": "Der Server ist nicht erreichbar.",
+  "err.nfs.timeout": "Der Server hat nicht rechtzeitig geantwortet.",
+  "err.nfs.spawn": "Der Einhängevorgang ließ sich nicht starten: {0}",
+  "err.nfs.generic": "Einhängen fehlgeschlagen: {0}",
   "remote.title": "Netzlaufwerk verbinden",
   "remote.description":
     "Verbindet einen Server per SFTP oder FTPS. Das Ziel erscheint danach als gewöhnlicher Ordner in der Seitenleiste.",
   "remote.protocol": "Protokoll",
   "remote.protocol.sftp": "SFTP (über SSH)",
+  "remote.protocol.smb": "SMB / Samba (Windows-Freigabe)",
   "remote.protocol.ftpsExplicit": "FTPS – explizit (AUTH TLS)",
   "remote.protocol.ftpsImplicit": "FTPS – implizit",
   "remote.protocol.ftp": "FTP (unverschlüsselt)",
@@ -485,6 +553,12 @@ export const de: Record<string, string> = {
   "remote.username": "Benutzername",
   "remote.password": "Passwort",
   "remote.path": "Pfad auf dem Server",
+  "remote.share": "Freigabe",
+  "remote.domain": "Domäne oder Arbeitsgruppe (optional)",
+  "remote.smbNote":
+    "Das Passwort wird nicht im Klartext übertragen. Die Dateiinhalte selbst " +
+    "sind bei älteren Servern jedoch unverschlüsselt – im offenen Netz besser " +
+    "SFTP verwenden.",
   "remote.label": "Anzeigename",
   "remote.savePassword": "Passwort im macOS-Schlüsselbund speichern",
   "remote.loadPassword": "Passwort aus Schlüsselbund laden",
@@ -505,6 +579,8 @@ export const de: Record<string, string> = {
   "err.remote.username": "Ungültiger Benutzername.",
   "err.remote.path": "Ungültiger Pfad auf dem Server.",
   "err.remote.port": "Ungültiger Port.",
+  "err.remote.shareMissing":
+    "Bitte den Namen der Freigabe angeben, zum Beispiel „Daten“.",
   "err.remote.label": "Ungültiger Anzeigename.",
   "err.remote.noAppDir":
     "Der Arbeitsordner der App konnte nicht angelegt werden.",
@@ -545,14 +621,20 @@ export const de: Record<string, string> = {
 
   // Objekt-Speicher und Netzwerkdialog
   "network.addDrive": "Netzlaufwerk hinzufügen",
-  "network.editWebdav": "WebDAV-Laufwerk",
+  "network.title.webdav": "WebDAV-Laufwerk",
+  "network.title.smb": "SMB-Freigabe",
+  "network.title.nfs": "NFS-Freigabe",
+  "network.title.s3": "S3-Speicher",
+  "network.title.swift": "Swift-Speicher",
+  "network.title.sftp": "SFTP-Server",
+  "network.title.ftps": "FTPS-Server",
   "network.chooseProtocol":
     "Wähle das gewünschte Netzwerkprotokoll. Eingehängte Ziele stehen anschließend für Dateioperationen und Syncprofile bereit.",
+  "network.nextNfs":
+    "Im nächsten Schritt werden Freigabe und Protokollfassung eingestellt. NFS kennt kein Kennwort – der Server prüft die Berechtigung über die Adresse dieses Macs oder über Kerberos.",
   "network.nextCredentials":
     "Im nächsten Schritt werden die Zugangsdaten eingegeben. Geheimnisse bleiben im macOS-Schlüsselbund.",
-  "network.smbAddress": "SMB-Adresse",
   "network.webdavAddress": "WebDAV-Adresse",
-  "network.invalidSmb": "Bitte eine SMB-Adresse beginnend mit smb:// eingeben.",
   "network.invalidWebdav": "Bitte eine WebDAV-Adresse beginnend mit https:// eingeben.",
   "network.connecting": "Verbindet…",
   "network.next": "Weiter",

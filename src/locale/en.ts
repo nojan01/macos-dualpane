@@ -465,11 +465,79 @@ export const en: Record<string, string> = {
     "Only mounted volumes below /Volumes can be ejected.",
 
   // Network drives via rclone (SFTP, FTPS)
+  // --- NFS ---
+  "nfs.title": "Connect NFS share",
+  "nfs.host": "Server",
+  "nfs.path": "Exported path on the server",
+  "nfs.version": "Protocol version",
+  "nfs.version.auto": "Negotiate automatically",
+  "nfs.version.v2": "NFS 2 (legacy devices only, 2 GB file limit)",
+  "nfs.version.v3": "NFS 3",
+  "nfs.version.v4": "NFS 4",
+  "nfs.version.v41": "NFS 4.1",
+  "nfs.security": "Security flavour",
+  "nfs.security.auto": "Negotiate automatically",
+  "nfs.security.sys": "AUTH_SYS - permissions by user ID",
+  "nfs.security.krb5": "Kerberos - authentication",
+  "nfs.security.krb5i": "Kerberos - authentication and integrity",
+  "nfs.security.krb5p": "Kerberos - encrypted (krb5p)",
+  "nfs.realm": "Kerberos realm (optional)",
+  "nfs.realmHint":
+    "The name of the Kerberos realm, usually your company domain in capitals - for example COMPANY.LOCAL. Your administrator knows it; \u201cklist\u201d in Terminal shows it too. Leave empty if you hold only one Kerberos credential: macOS then picks it by itself. Obtain the ticket beforehand with \u201ckinit\u201d - NFS has no password of its own.",
+  "nfs.transport": "Transport",
+  "nfs.transport.auto": "Automatic",
+  "nfs.transport.tcp": "TCP",
+  "nfs.transport.udp": "UDP (older Unix servers and NAS devices)",
+  "nfs.label": "Display name",
+  "nfs.noLocks": "Disable file locking",
+  "nfs.noLocksHint":
+    "Helps with servers lacking \u201crpc.statd\u201d, where access would otherwise hang.",
+  "nfs.insecureNote":
+    "AUTH_SYS sends all content in the clear and proves nobody's identity - the server trusts the user ID alone. Without Kerberos only servers on your own local network are allowed.",
+  "nfs.kerberosPlainNote":
+    "Kerberos proves both identities securely but does not encrypt file content. Choose \u201ckrb5p\u201d for encrypted transfer.",
+  "nfs.acceptInsecure": "Allow unencrypted transfer",
+  "nfs.privilegedPortHint":
+    "DualBeam connects without administrator rights. Servers requiring a privileged port - the Linux default \u201csecure\u201d - must set their export to \u201cinsecure\u201d.",
+  "nfs.connect": "Connect",
+  "nfs.connecting": "Connecting ...",
+  "nfs.needHostAndPath":
+    "Please enter a server and an exported path starting with \u201c/\u201d.",
+  "err.nfs.host": "Invalid server name.",
+  "err.nfs.path": "Invalid exported path. It must start with \u201c/\u201d.",
+  "err.nfs.realm": "Invalid Kerberos realm.",
+  "err.nfs.realmWithoutKerberos":
+    "A Kerberos realm only applies to a Kerberos flavour.",
+  "err.nfs.v2NeedsUdp": "NFS 2 runs over UDP only.",
+  "err.nfs.v4NeedsTcp": "NFS 4 runs over TCP only.",
+  "err.nfs.insecureNotConfirmed":
+    "This connection transfers unencrypted. Please confirm in the dialog or choose \u201ckrb5p\u201d.",
+  "err.nfs.remoteNeedsKerberos":
+    "Without Kerberos only servers on your own local network are allowed.",
+  "err.nfs.hostnameNeedsKerberos":
+    "Without Kerberos an IP address of a server on your own local network is required instead of a name.",
+  "err.nfs.privilegedPort":
+    "The server requires a privileged port. DualBeam connects without administrator rights and cannot provide one. Set the export to \u201cinsecure\u201d on the server (Linux: in \u201c/etc/exports\u201d).",
+  "err.nfs.versionUnavailable":
+    "The server does not offer the selected protocol version. Try another version or \u201cNegotiate automatically\u201d.",
+  "err.nfs.notExported":
+    "The server rejected this Mac. Usually its IP address is missing from the export.",
+  "err.nfs.authentication":
+    "The server rejected the security flavour. Choose a different one.",
+  "err.nfs.transport":
+    "The server reset the connection. Usually the protocol version or transport does not match.",
+  "err.nfs.noSuchExport": "That exported path does not exist on the server.",
+  "err.nfs.unknownHost": "The server name could not be resolved.",
+  "err.nfs.unreachable": "The server is unreachable.",
+  "err.nfs.timeout": "The server did not answer in time.",
+  "err.nfs.spawn": "Could not start the mount: {0}",
+  "err.nfs.generic": "Mount failed: {0}",
   "remote.title": "Connect network drive",
   "remote.description":
     "Connects to a server over SFTP or FTPS. The target then appears as an ordinary folder in the sidebar.",
   "remote.protocol": "Protocol",
   "remote.protocol.sftp": "SFTP (over SSH)",
+  "remote.protocol.smb": "SMB / Samba (Windows share)",
   "remote.protocol.ftpsExplicit": "FTPS – explicit (AUTH TLS)",
   "remote.protocol.ftpsImplicit": "FTPS – implicit",
   "remote.protocol.ftp": "FTP (unencrypted)",
@@ -480,6 +548,11 @@ export const en: Record<string, string> = {
   "remote.username": "User name",
   "remote.password": "Password",
   "remote.path": "Path on the server",
+  "remote.share": "Share",
+  "remote.domain": "Domain or workgroup (optional)",
+  "remote.smbNote":
+    "The password is never sent in clear text. File contents themselves are " +
+    "unencrypted on older servers, so prefer SFTP on open networks.",
   "remote.label": "Display name",
   "remote.savePassword": "Save password in the macOS Keychain",
   "remote.loadPassword": "Load password from Keychain",
@@ -499,6 +572,8 @@ export const en: Record<string, string> = {
   "err.remote.username": "Invalid user name.",
   "err.remote.path": "Invalid path on the server.",
   "err.remote.port": "Invalid port.",
+  "err.remote.shareMissing":
+    "Please enter the name of the share, for example \u201cData\u201d.",
   "err.remote.label": "Invalid display name.",
   "err.remote.noAppDir": "The app's working folder could not be created.",
   "err.remote.rcloneMissing":
@@ -531,14 +606,20 @@ export const en: Record<string, string> = {
 
   // Object storage and network dialog
   "network.addDrive": "Add network drive",
-  "network.editWebdav": "WebDAV drive",
+  "network.title.webdav": "WebDAV drive",
+  "network.title.smb": "SMB share",
+  "network.title.nfs": "NFS share",
+  "network.title.s3": "S3 storage",
+  "network.title.swift": "Swift storage",
+  "network.title.sftp": "SFTP server",
+  "network.title.ftps": "FTPS server",
   "network.chooseProtocol":
     "Choose the network protocol. Once mounted, the target is available for file operations and sync profiles.",
+  "network.nextNfs":
+    "The next step configures the export and protocol version. NFS has no password - the server checks permission by this Mac's address or via Kerberos.",
   "network.nextCredentials":
     "The next step collects the credentials. Secrets remain in the macOS Keychain.",
-  "network.smbAddress": "SMB address",
   "network.webdavAddress": "WebDAV address",
-  "network.invalidSmb": "Please enter an SMB address beginning with smb://.",
   "network.invalidWebdav": "Please enter a WebDAV address beginning with https://.",
   "network.connecting": "Connecting…",
   "network.next": "Next",

@@ -6,6 +6,7 @@ use std::io::{Read, Write};
 use std::net::IpAddr;
 use std::process::{Command, Stdio};
 
+mod nfs;
 mod object_storage;
 mod promise_drag;
 mod rdp;
@@ -1714,14 +1715,55 @@ fn run_osascript_with_timeout(script: &str) -> Result<std::process::Output, Stri
     }
 }
 
+/// Rät den Einhängepunkt einer bereits verbundenen Freigabe aus ihrer Adresse.
+///
+/// macOS benennt das Band nach dem letzten Teil der Adresse. Das trifft nicht
+/// immer zu — bei Namenskonflikten hängt macOS eine Ziffer an. Deshalb wird das
+/// Ergebnis geprüft und im Zweifel nichts zurückgegeben.
+fn mounted_volume_for_url(url: &str) -> Option<String> {
+    let pfad = format!("/Volumes/{}", volume_name_from_url(url)?);
+    Path::new(&pfad).is_dir().then_some(pfad)
+}
+
+/// Der Bandname steckt im letzten Teil der Adresse. Getrennt gehalten, damit
+/// die Ableitung ohne eingehängtes Laufwerk prüfbar bleibt.
+fn volume_name_from_url(url: &str) -> Option<String> {
+    let ohne_schema = url.split("://").nth(1)?;
+    let letzter = ohne_schema
+        .split(['?', '#'])
+        .next()?
+        .trim_end_matches('/')
+        .rsplit('/')
+        .find(|teil| !teil.is_empty())?;
+    let name = percent_decode_segment(letzter);
+    (!name.is_empty() && !name.contains('/')).then_some(name)
+}
+
 #[tauri::command]
 async fn mount_network_url(url: String, allow_insecure_local: bool) -> Result<String, String> {
     let (url, is_web, is_ftp) = parse_mount_url(&url, allow_insecure_local)?;
     let escaped = escape_for_applescript(&url).map_err(|_| "err.network.badchars".to_string())?;
-    let script = format!(
-        "tell application \"Finder\" to activate\nmount volume \"{}\"",
-        escaped
-    );
+    // `mount volume` liefert eine AppleScript-Dateireferenz („file Name:"),
+    // keinen Pfad. Ungewandelt konnte die Oberfläche damit nichts anfangen und
+    // sprang nie zur frisch eingehängten Freigabe. `POSIX path of (… as alias)`
+    // macht daraus „/Volumes/Name/".
+    //
+    // Ist die Freigabe bereits eingehängt, gibt `mount volume` gar nichts
+    // zurück. Die Zuweisung bleibt dann leer und der Zugriff scheitert mit
+    // -2753 („Variable nicht definiert"). Das ist kein Fehler, sondern der
+    // Normalfall beim zweiten Verbinden — deshalb der eigene Zweig.
+    let script = [
+        "tell application \"Finder\" to activate",
+        "try",
+        &format!("\tset v to mount volume \"{escaped}\""),
+        "\treturn POSIX path of (v as alias)",
+        "on error errText number errNum",
+        "\tif errNum is -2753 then return \"\"",
+        "\terror errText number errNum",
+        "end try",
+    ]
+    .join("\n");
+    let volume_url = url.clone();
     tauri::async_runtime::spawn_blocking(move || -> Result<String, String> {
         let out = run_osascript_with_timeout(&script)?;
         if !out.status.success() {
@@ -1735,12 +1777,25 @@ async fn mount_network_url(url: String, allow_insecure_local: bool) -> Result<St
                 }
                 return Err("err.mount.unreachable".into());
             }
-            if err.contains("-1409") || err.contains("NSURLErrorDomain") {
+            // -5016 ist `afpNoServer` („Server not responding"). Der Finder
+            // meldet ihn auch dann, wenn er den Server gar nicht erst
+            // anspricht — bei SMB war das der Regelfall. Deshalb geht SMB
+            // heute über rclone und nicht mehr über diesen Weg.
+            if err.contains("-1409") || err.contains("-5016") || err.contains("NSURLErrorDomain")
+            {
                 return Err("err.mount.unreachable".into());
             }
             return Err("err.mount.failed".into());
         }
-        Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+        let gemeldet = String::from_utf8_lossy(&out.stdout);
+        let pfad = gemeldet.trim().trim_end_matches('/');
+        if !pfad.is_empty() && Path::new(pfad).is_dir() {
+            return Ok(pfad.to_string());
+        }
+        // War schon eingehängt: Der Bandname entspricht dem letzten Teil der
+        // Adresse. Findet sich dort nichts, wird kein Fehler gemeldet — die
+        // Freigabe ist ja verbunden, nur der Sprung dorthin entfällt.
+        Ok(mounted_volume_for_url(&volume_url).unwrap_or_default())
     })
     .await
     .map_err(|_| "err.mount.failed".to_string())?
@@ -7108,6 +7163,7 @@ pub fn run() {
             remote::remote_trust_host,
             remote::save_remote_password,
             remote::load_remote_password,
+            nfs::mount_nfs,
             remote::mount_remote,
             remote::unmount_remote,
             remote::remote_mounts,
@@ -7993,7 +8049,8 @@ mod copy_tests {
 #[cfg(all(test, target_os = "macos"))]
 mod webdav_listing_tests {
     use super::{
-        percent_decode_segment, webdav_href_file_name, webdav_propfind_entries, xml_unescape,
+        percent_decode_segment, volume_name_from_url, webdav_href_file_name,
+        webdav_propfind_entries, xml_unescape,
     };
 
     /// Nachbildung einer pCloud-Antwort auf `PROPFIND /Screenshots/` mit
@@ -8166,6 +8223,27 @@ mod webdav_listing_tests {
         // als ein fehlender Eintrag.
         assert_eq!(xml_unescape("&unbekannt;"), "&unbekannt;");
         assert_eq!(xml_unescape("100% & mehr"), "100% & mehr");
+    }
+
+    /// Beim zweiten Verbinden meldet der Finder keinen Pfad. Dann muss der
+    /// Bandname aus der Adresse kommen — auch mit Prozentzeichen im Namen.
+    #[test]
+    fn bandname_kommt_aus_der_adresse() {
+        assert_eq!(
+            volume_name_from_url("nfs://127.0.0.1/Users/Shared/dualbeam-nfs-test").as_deref(),
+            Some("dualbeam-nfs-test")
+        );
+        assert_eq!(
+            volume_name_from_url("https://webdav.example.net/Meine%20Daten/").as_deref(),
+            Some("Meine Daten")
+        );
+        // Ohne eigenen Teil hinter dem Rechnernamen gibt es nichts zu raten:
+        // Der Rechnername ist kein Bandname.
+        assert_eq!(
+            volume_name_from_url("smb://192.168.1.5").as_deref(),
+            Some("192.168.1.5")
+        );
+        assert_eq!(volume_name_from_url("kaputt").as_deref(), None);
     }
 
     #[test]

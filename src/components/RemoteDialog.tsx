@@ -17,6 +17,7 @@ import { remoteDescriptor, saveRemoteProfile } from "../remoteProfiles";
 /** Reihenfolge im Auswahlfeld: die sichere Voreinstellung zuerst. */
 const PROTOCOLS: RemoteProtocol[] = [
   "sftp",
+  "smb",
   "ftpsExplicit",
   "ftpsImplicit",
   "ftp",
@@ -27,6 +28,7 @@ const DEFAULT_PORTS: Record<RemoteProtocol, number> = {
   ftp: 21,
   ftpsExplicit: 21,
   ftpsImplicit: 990,
+  smb: 445,
 };
 
 type RemoteDialogState = {
@@ -38,6 +40,8 @@ type RemoteDialogState = {
   password: string;
   path: string;
   label: string;
+  /** Windows-Domäne oder Arbeitsgruppe. Nur für SMB von Belang. */
+  domain: string;
   savePassword: boolean;
   busy: boolean;
   error: string | null;
@@ -58,6 +62,7 @@ export function openRemoteDialog(preset: Partial<RemoteDialogState> = {}) {
     password: "",
     path: "",
     label: "",
+    domain: "",
     savePassword: true,
     busy: false,
     error: null,
@@ -90,6 +95,20 @@ function isInsecure(protocol: RemoteProtocol): boolean {
   return protocol === "ftp";
 }
 
+/** Räumt eine eingetippte SMB-Freigabe auf. Viele Leute fügen die komplette
+ * Adresse ein — „smb://server/freigabe" oder den Windows-Weg
+ * „\\\\server\\freigabe". Beides führt sonst zu einer doppelten Serverangabe.
+ * Für alle anderen Protokolle bleibt der Pfad unangetastet. */
+export function normalizeShare(protocol: RemoteProtocol, value: string): string {
+  const trimmed = value.trim();
+  if (protocol !== "smb") return trimmed;
+  let rest = trimmed.replace(/\\/g, "/");
+  const scheme = /^(?:smb|cifs):\/\//i.exec(rest);
+  if (scheme) rest = rest.slice(scheme[0].length).replace(/^[^/]*\//, "");
+  else if (trimmed.startsWith("\\\\")) rest = rest.replace(/^\/+/, "").replace(/^[^/]*\//, "");
+  return rest.replace(/^\/+/, "").replace(/\/+$/, "");
+}
+
 function toSpec(current: RemoteDialogState): RemoteSpec {
   const port = current.port.trim();
   return {
@@ -97,8 +116,9 @@ function toSpec(current: RemoteDialogState): RemoteSpec {
     host: current.host.trim(),
     port: port ? Number(port) : null,
     username: current.username.trim(),
-    path: current.path.trim(),
+    path: normalizeShare(current.protocol, current.path),
     label: current.label.trim(),
+    domain: current.domain.trim(),
   };
 }
 
@@ -126,6 +146,13 @@ export function RemoteDialog() {
     }
     if (current.port.trim() && !/^\d{1,5}$/.test(current.port.trim())) {
       update({ error: t("err.remote.port") });
+      return;
+    }
+    if (
+      current.protocol === "smb" &&
+      !normalizeShare("smb", current.path)
+    ) {
+      update({ error: t("err.remote.shareMissing") });
       return;
     }
     update({ busy: true, error: null });
@@ -269,11 +296,18 @@ export function RemoteDialog() {
                   <Show when={isInsecure(current().protocol)}>
                     <p class="warning">{t("remote.insecureNote")}</p>
                   </Show>
+                  <Show when={current().protocol === "smb"}>
+                    <p class="network-storage-note">{t("remote.smbNote")}</p>
+                  </Show>
                   <label>
                     {t("remote.host")}
                     <input
                       type="text"
-                      placeholder="sftp.example.com"
+                      placeholder={
+                        current().protocol === "smb"
+                          ? "nas.local"
+                          : "sftp.example.com"
+                      }
                       value={current().host}
                       disabled={current().busy}
                       onInput={(event) =>
@@ -323,10 +357,14 @@ export function RemoteDialog() {
                     />
                   </label>
                   <label>
-                    {t("remote.path")}
+                    {current().protocol === "smb"
+                      ? t("remote.share")
+                      : t("remote.path")}
                     <input
                       type="text"
-                      placeholder="/"
+                      placeholder={
+                        current().protocol === "smb" ? "Freigabe" : "/"
+                      }
                       value={current().path}
                       disabled={current().busy}
                       onInput={(event) =>
@@ -334,6 +372,20 @@ export function RemoteDialog() {
                       }
                     />
                   </label>
+                  <Show when={current().protocol === "smb"}>
+                    <label>
+                      {t("remote.domain")}
+                      <input
+                        type="text"
+                        placeholder="WORKGROUP"
+                        value={current().domain}
+                        disabled={current().busy}
+                        onInput={(event) =>
+                          update({ domain: event.currentTarget.value })
+                        }
+                      />
+                    </label>
+                  </Show>
                   <label>
                     {t("remote.label")}
                     <input

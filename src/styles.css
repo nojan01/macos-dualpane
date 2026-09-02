@@ -857,8 +857,8 @@ body.col-resizing * {
 }
 .remote-dialog label:not(.check-line) {
   display: grid;
-  gap: 4px;
-  margin: 10px 0;
+  gap: 5px;
+  margin: 12px 0;
   color: var(--text-dim);
   font-size: 12px;
 }

@@ -32,6 +32,7 @@ import { SyncDialog } from "./components/SyncDialog";
 import { PropertiesDialog } from "./components/PropertiesDialog";
 import { JobBar } from "./components/JobBar";
 import { AboutDialog, openAbout } from "./components/AboutDialog";
+import { NfsDialog } from "./components/NfsDialog";
 import { RemoteDialog } from "./components/RemoteDialog";
 import { ObjectStorageDialog } from "./components/ObjectStorageDialog";
 import { NetworkStorageDialog } from "./components/NetworkStorageDialog";
@@ -924,6 +925,7 @@ export function App() {
       <SearchDialog />
       <SyncDialog />
       <RemoteDialog />
+      <NfsDialog />
       <NetworkStorageDialog />
       <ObjectStorageDialog />
       <Dialogs />

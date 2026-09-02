@@ -4,22 +4,22 @@ import { askPrompt, askConfirm } from "./components/Dialogs";
 import { t, errMsg } from "./i18n";
 import { openRemoteDialog } from "./components/RemoteDialog";
 
-const SECURE_SCHEMES = new Set(["https:", "smb:"]);
-const INSECURE_SCHEMES = new Set([
-  "http:",
-  "ftp:",
-  "afp:",
-  "nfs:",
-  "cifs:",
-]);
+// `smb:` und `cifs:` stehen hier bewusst nicht mehr: Sie gehen über rclone und
+// werden weiter unten vor dieser Prüfung abgefangen.
+const SECURE_SCHEMES = new Set(["https:"]);
+const INSECURE_SCHEMES = new Set(["http:", "ftp:", "afp:", "nfs:"]);
 /** Protokolle, die DualBeam über das mitgelieferte rclone einhängt statt über
  * macOS. Sie führen in den eigenen Verbindungsdialog, weil dafür Benutzername
  * und Kennwort einzeln gebraucht werden. */
-const RCLONE_SCHEMES: Record<string, "sftp" | "ftps" | "ftpes"> = {
+const RCLONE_SCHEMES: Record<string, "sftp" | "ftps" | "ftpes" | "smb"> = {
   "sftp:": "sftp",
   "ssh:": "sftp",
   "ftps:": "ftps",
   "ftpes:": "ftpes",
+  // SMB lief früher über den Finder. Der meldete für Windows-Freigaben nur
+  // „Server antwortet nicht" (-5016) und kam nie bis zur Anmeldung.
+  "smb:": "smb",
+  "cifs:": "smb",
 };
 let connecting = false;
 
@@ -53,7 +53,7 @@ function isDirectLocalIp(hostname: string): boolean {
  * Liefert `null`, wenn das Schema nicht zu rclone gehört. Exportiert, damit es
  * sich einzeln prüfen lässt. */
 export function remoteFromUrl(parsed: URL): {
-  protocol: "sftp" | "ftpsExplicit" | "ftpsImplicit";
+  protocol: "sftp" | "ftpsExplicit" | "ftpsImplicit" | "smb";
   host: string;
   port: string;
   path: string;
@@ -65,9 +65,11 @@ export function remoteFromUrl(parsed: URL): {
   const protocol =
     kind === "sftp"
       ? "sftp"
-      : kind === "ftps"
-        ? "ftpsImplicit"
-        : "ftpsExplicit";
+      : kind === "smb"
+        ? "smb"
+        : kind === "ftps"
+          ? "ftpsImplicit"
+          : "ftpsExplicit";
   return {
     protocol,
     host: parsed.hostname.replace(/^\[|\]$/g, ""),
