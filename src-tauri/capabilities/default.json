@@ -2,7 +2,7 @@
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
   "description": "Default permissions for Dual Pane",
-  "windows": ["main"],
+  "windows": ["main", "win-*"],
   "permissions": [
     "core:default",
     "core:window:allow-set-size",
@@ -12,6 +12,9 @@
     "core:window:allow-inner-size",
     "core:window:allow-inner-position",
     "core:window:allow-scale-factor",
-    "drag:default"
+    "core:window:allow-title",
+    "core:window:allow-set-title",
+    "drag:default",
+    "updater:default"
   ]
 }

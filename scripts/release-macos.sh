@@ -113,6 +113,20 @@ export APPLE_ID="$apple_id"
 export APPLE_PASSWORD="$apple_password"
 export APPLE_TEAM_ID="$team"
 
+# Schluessel fuer die Updater-Signatur. Er ist unabhaengig vom Apple-Zertifikat
+# und beweist der installierten App, dass ein Update wirklich von hier stammt.
+# Ohne diese Variable baut Tauri zwar, erzeugt aber keine .sig-Datei.
+# Tauri erwartet den Schluessel in TAURI_SIGNING_PRIVATE_KEY und akzeptiert
+# dort auch einen Dateipfad; die Variante mit _PATH allein genuegt nicht.
+updater_key="$HOME/.tauri/dualbeam-updater.key"
+if [ ! -f "$updater_key" ]; then
+  echo "Updater-Schluessel fehlt: $updater_key" >&2
+  echo "Neu erzeugen mit: npx tauri signer generate --write-keys \"$updater_key\"" >&2
+  exit 1
+fi
+export TAURI_SIGNING_PRIVATE_KEY="$updater_key"
+export TAURI_SIGNING_PRIVATE_KEY_PASSWORD=""
+
 # shellcheck disable=SC2086
 npm run "$npm_script"
 
@@ -219,3 +233,30 @@ fi
 
 echo "Fertig signiert und notarisiert:"
 echo "  $dmg"
+
+# Updater-Manifest nur fuer die oeffentliche Variante. Die persoenliche
+# Variante enthaelt HiDrive-Funktionen; wuerde sie als Update ausgeliefert,
+# bekaemen alle Nutzer eine Fassung, die so nicht vorgesehen ist. Umgekehrt
+# wuerde ein Update mit der oeffentlichen Fassung einer persoenlichen
+# Installation stillschweigend Funktionen entziehen.
+updater_archive="src-tauri/target/release/bundle/macos/DualBeam.app.tar.gz"
+if [ "$variant" = "oeffentlich" ]; then
+  if [ ! -f "$updater_archive" ]; then
+    echo
+    echo "Updater-Archiv fehlt: $updater_archive" >&2
+    echo "Ist \"createUpdaterArtifacts\" in $conf aktiviert?" >&2
+    exit 1
+  fi
+  npm run --silent make-updater-manifest -- \
+    "$version" darwin-aarch64 "$updater_archive" latest.json
+  echo
+  echo "Fuer das GitHub-Release hochladen:"
+  echo "  $dmg"
+  echo "  $updater_archive"
+  echo "  ${updater_archive}.sig"
+  echo "  latest.json"
+else
+  echo
+  echo "Hinweis: Variante \"$variant\" – es wurde kein Updater-Manifest erzeugt."
+  echo "Fuer ein veroeffentlichtes Update: scripts/release-macos.sh --public"
+fi

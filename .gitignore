@@ -29,3 +29,7 @@ src-tauri/binaries
 src-tauri/resources/licenses/DUALBEAM-LICENSE.txt
 src-tauri/resources/licenses/THIRD-PARTY-LICENSES.txt
 src-tauri/resources/licenses/RCLONE-LICENSE.txt
+
+# Updater-Manifest, bei jedem Release aus dem Build erzeugt
+# (scripts/create-updater-manifest.mjs) und als Asset hochgeladen.
+latest.json

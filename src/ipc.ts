@@ -268,6 +268,11 @@ export async function appVersion(): Promise<string> {
   return invoke<string>("app_version");
 }
 
+/** Startet die Anwendung neu, etwa nach einem eingespielten Update. */
+export async function restartApplication(): Promise<void> {
+  return invoke<void>("restart_application");
+}
+
 export async function setMenuLanguage(lang: string): Promise<void> {
   return invoke<void>("set_menu_language", { lang });
 }

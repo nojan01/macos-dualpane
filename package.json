@@ -1,7 +1,7 @@
 {
   "name": "dualbeam",
   "private": true,
-  "version": "0.4.32",
+  "version": "0.5.0",
   "license": "MIT",
   "author": "N.J.",
   "type": "module",
@@ -15,11 +15,13 @@
     "tauri:build:public": "bash scripts/fetch-rclone.sh && bash scripts/sync-licenses.sh && tauri build",
     "test": "vitest run",
     "rclone:fetch": "bash scripts/fetch-rclone.sh",
-    "licenses:sync": "bash scripts/sync-licenses.sh"
+    "licenses:sync": "bash scripts/sync-licenses.sh",
+    "make-updater-manifest": "node scripts/create-updater-manifest.mjs"
   },
   "dependencies": {
     "@crabnebula/tauri-plugin-drag": "^2.1.0",
     "@tauri-apps/api": "^2",
+    "@tauri-apps/plugin-updater": "^2.11.0",
     "solid-js": "^1.9.3"
   },
   "devDependencies": {

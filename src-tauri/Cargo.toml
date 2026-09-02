@@ -1,6 +1,6 @@
 [package]
 name = "dualbeam"
-version = "0.4.32"
+version = "0.5.0"
 description = "DualBeam — Dual-Pane File Manager für macOS"
 authors = ["N.J."]
 license = "MIT"
@@ -24,6 +24,7 @@ cc = "1"
 [dependencies]
 tauri = { version = "2", features = [] }
 tauri-plugin-drag = "2"
+tauri-plugin-updater = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 dirs = "5"

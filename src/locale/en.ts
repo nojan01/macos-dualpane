@@ -618,4 +618,17 @@ export const en: Record<string, string> = {
   "err.objectStorage.noAppDir": "The Application Support folder could not be found.",
   "err.objectStorage.import": "The object-storage profiles from RemoteDeskRDP could not be read.",
   "err.update.failed": "Update check failed.",
+
+  // Software update
+  "update.title": "Software Update",
+  "update.upToDate": "DualBeam {version} is up to date.",
+  "update.available": "Version {version} is available. You have {current}.",
+  "update.question": "Download and install now?",
+  "update.install": "Download and Install",
+  "update.later": "Later",
+  "update.downloading": "DualBeam – Downloading update … {percent} %",
+  "update.preparing": "DualBeam – Preparing update …",
+  "update.installing": "DualBeam – Installing update …",
+  "update.done": "Version {version} has been installed. DualBeam will now restart.",
+  "update.restart": "Restart",
 };

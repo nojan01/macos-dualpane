@@ -38,6 +38,7 @@ import { ObjectStorageDialog } from "./components/ObjectStorageDialog";
 import { NetworkStorageDialog } from "./components/NetworkStorageDialog";
 import { HelpDialog, openHelp } from "./components/HelpDialog";
 import { LicenseDialog, openLicense } from "./components/LicenseDialog";
+import { checkForUpdates } from "./updater";
 import {
   loadPane,
   state,
@@ -432,8 +433,17 @@ export function App() {
         void openHelp();
       }),
     );
+    // Update-Prüfung via macOS-Menü: meldet sich auch, wenn alles aktuell ist.
+    addUnlisten(
+      await listen("dualbeam://check-updates", () => {
+        void checkForUpdates(true);
+      }),
+    );
     // Natives Menü initial auf die aktuelle Sprache setzen.
     void setMenuLanguage(getResolvedLang()).catch(() => {});
+    // Stille Prüfung kurz nach dem Start. Verzögert, damit der Programmstart
+    // nicht auf die Netzwerkantwort warten muss.
+    window.setTimeout(() => void checkForUpdates(false), 3000);
   });
 
   return (

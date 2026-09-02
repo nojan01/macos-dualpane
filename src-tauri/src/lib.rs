@@ -7018,8 +7018,14 @@ fn build_and_set_menu(app: &tauri::AppHandle, lang: &str) -> tauri::Result<()> {
     let hide_item = PredefinedMenuItem::hide(app, Some(s("DualBeam ausblenden", "Hide DualBeam")))?;
     let quit_item = PredefinedMenuItem::quit(app, Some(s("DualBeam beenden", "Quit DualBeam")))?;
 
+    let update_item = MenuItemBuilder::new(s("Nach Updates suchen …", "Check for Updates…"))
+        .id("check-updates")
+        .build(app)?;
+
     let app_menu = SubmenuBuilder::new(app, "DualBeam")
         .item(&about_item)
+        .separator()
+        .item(&update_item)
         .separator()
         .item(&hide_item)
         .separator()
@@ -7113,10 +7119,19 @@ fn set_menu_language(app: tauri::AppHandle, lang: String) -> Result<(), String> 
     Ok(())
 }
 
+// Startet die Anwendung neu. Wird nach einem eingespielten Update gebraucht:
+// Der Updater tauscht das Programmverzeichnis aus, der laufende Prozess arbeitet
+// aber weiter mit dem alten Stand im Speicher.
+#[tauri::command]
+fn restart_application(app: tauri::AppHandle) {
+    app.restart();
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_drag::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(JobManager::default())
         .manage(WatcherManager::default())
         .setup(|app| {
@@ -7139,6 +7154,24 @@ pub fn run() {
                     }
                     if id == "help" {
                         let _ = app_handle.emit("dualbeam://help", ());
+                        return;
+                    }
+                    if id == "check-updates" {
+                        // Gezielt an das vordere Fenster. Ein Rundruf an alle
+                        // Fenster oeffnete bei mehreren offenen Fenstern
+                        // ebenso viele Update-Dialoge.
+                        let focused = app_handle
+                            .webview_windows()
+                            .into_values()
+                            .find(|w| w.is_focused().unwrap_or(false));
+                        match focused {
+                            Some(window) => {
+                                let _ = window.emit("dualbeam://check-updates", ());
+                            }
+                            None => {
+                                let _ = app_handle.emit("dualbeam://check-updates", ());
+                            }
+                        }
                         return;
                     }
                     let theme = match id {
@@ -7165,6 +7198,7 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            restart_application,
             home_dir,
             list_dir,
             open_default,
