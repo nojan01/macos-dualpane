@@ -309,12 +309,10 @@ fn list_dir_blocking(path: String, show_hidden: bool) -> Result<Vec<Entry>, Stri
     const RCLONE_VIRTUAL_DIRECTORY_TIME: i64 = 946_684_800;
     let is_object_storage = remote::is_object_storage_mount(&p);
     let remembered_object_directory_times = remote::object_directory_times_in(&p);
-    // webdavfs kann nach einem direkten HTTP-Upload noch für einige Sekunden
-    // eine lokale 0-Byte-Cachedatei ausliefern. Die Dateiliste würde dann
-    // fälschlich suggerieren, dass die Kopie fehlgeschlagen ist. Für solche
-    // Werte fragen wir die tatsächliche Größe gezielt beim Server ab.
-    #[cfg(target_os = "macos")]
-    let webdav_listing = webdav_listing_context(&p);
+    // webdavfs kann nach einem Schreibvorgang Einträge ausliefern, deren
+    // Metadaten noch nicht auflösbar sind – bis hin zu einem `stat()`, das
+    // „No such file or directory" meldet, obwohl der Name im Verzeichnis steht.
+    // Solche Lücken werden nach der Schleife aus einer Serverabfrage gefüllt.
 
     use std::os::unix::fs::MetadataExt;
     let mut out: Vec<Entry> = Vec::new();
@@ -382,19 +380,11 @@ fn list_dir_blocking(path: String, show_hidden: bool) -> Result<Vec<Entry>, Stri
             .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
             .map(|d| d.as_secs() as i64)
             .unwrap_or(0);
-        let mut size = if is_dir {
+        let size = if is_dir {
             0
         } else {
             meta.as_ref().map(|m| m.len()).unwrap_or(0)
         };
-        #[cfg(target_os = "macos")]
-        if size == 0 && !is_dir && !is_symlink {
-            if let Some(context) = webdav_listing.as_ref() {
-                if let Some(server_size) = webdav_server_file_size(context, &path) {
-                    size = server_size;
-                }
-            }
-        }
         let kind = ext_to_kind(&ext, is_dir, is_symlink);
         out.push(Entry {
             name,
@@ -412,7 +402,73 @@ fn list_dir_blocking(path: String, show_hidden: bool) -> Result<Vec<Entry>, Stri
             mode_str,
         });
     }
+    repair_webdav_entries(&mut out, &p);
     Ok(out)
+}
+
+/// Füllt Lücken, die `webdavfs` hinterlässt, aus einer Serverabfrage auf.
+///
+/// Nach einem Schreibvorgang kann der Treiber Einträge liefern, die zwar im
+/// Verzeichnis stehen, deren `stat()` aber `ENOENT` meldet. Größe, Datum,
+/// Eigentümer und Rechte fehlen dann – die Datei sieht leer aus, obwohl sie am
+/// Server vollständig vorliegt. Ein Neu-Einhängen räumt den Zwischenspeicher
+/// auf; bis dahin liefert der Server die richtigen Werte.
+///
+/// Alles Teure geschieht erst, wenn tatsächlich etwas fehlt: sowohl das
+/// Beschaffen der Zugangsdaten – das `/sbin/mount` ausführt und den
+/// Schlüsselbund befragt – als auch die Abfrage selbst. Im Normalfall kostet
+/// die Anzeige damit keinen einzigen zusätzlichen Zugriff, im Störfall genau
+/// eine Abfrage für den gesamten Ordner statt einer je Datei.
+fn repair_webdav_entries(entries: &mut [Entry], directory: &Path) {
+    let incomplete = entries
+        .iter()
+        .any(|entry| !entry.is_dir && !entry.is_symlink && (entry.size == 0 || entry.mtime == 0));
+    if !incomplete {
+        return;
+    }
+    let Some(context) = webdav_listing_context(directory) else {
+        return;
+    };
+    let Some(server) = webdav_server_directory_entries(&context, directory) else {
+        return;
+    };
+    // Eigentümer und Rechte kennt WebDAV nicht. `webdavfs` vergibt für alle
+    // Einträge eines Mounts dieselben Werte (der einhängende Benutzer, Zugriff
+    // nur für ihn), weshalb das Verzeichnis selbst als Vorlage taugt.
+    use std::os::unix::fs::MetadataExt;
+    let directory_meta = std::fs::metadata(directory).ok();
+    for entry in entries.iter_mut() {
+        if entry.is_dir || entry.is_symlink {
+            continue;
+        }
+        let Some(metadata) = server.get(&entry.name) else {
+            continue;
+        };
+        if entry.size == 0 {
+            entry.size = metadata.size;
+        }
+        if entry.mtime == 0 {
+            if let Some(modified) = metadata.modified {
+                entry.mtime = modified;
+            }
+        }
+        if entry.birth_time == 0 {
+            // Fällt der Server ohne Erstellungsdatum aus, ist der
+            // Änderungszeitpunkt die nächstbeste Auskunft.
+            entry.birth_time = metadata.created.or(metadata.modified).unwrap_or(0);
+        }
+        if let Some(meta) = directory_meta.as_ref() {
+            if entry.owner.is_empty() {
+                entry.owner = uid_to_name(meta.uid());
+            }
+            if entry.group.is_empty() {
+                entry.group = gid_to_name(meta.gid());
+            }
+            if entry.mode_str.is_empty() {
+                entry.mode_str = mode_to_rwx(meta.mode());
+            }
+        }
+    }
 }
 
 #[tauri::command]
@@ -2497,6 +2553,35 @@ fn percent_encode_segment(segment: &str) -> String {
     out
 }
 
+/// Gegenstück zu [`percent_encode_segment`]: löst Prozentsequenzen wieder auf.
+/// Wird für die `href`-Werte einer PROPFIND-Antwort gebraucht, denn dort stehen
+/// Dateinamen stets kodiert (`%20`, `%C3%84`).
+///
+/// Unvollständige oder ungültige Sequenzen bleiben unverändert stehen, statt
+/// den Namen zu verwerfen: ein Eintrag mit merkwürdigem Namen ist immer noch
+/// besser als ein fehlender Eintrag. Das Ergebnis wird als UTF-8 gelesen;
+/// schlägt das fehl, gilt derselbe Grundsatz und der Rohwert bleibt erhalten.
+fn percent_decode_segment(segment: &str) -> String {
+    let bytes = segment.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%' && index + 2 < bytes.len() {
+            let hex = std::str::from_utf8(&bytes[index + 1..index + 3])
+                .ok()
+                .and_then(|part| u8::from_str_radix(part, 16).ok());
+            if let Some(byte) = hex {
+                out.push(byte);
+                index += 3;
+                continue;
+            }
+        }
+        out.push(bytes[index]);
+        index += 1;
+    }
+    String::from_utf8(out).unwrap_or_else(|_| segment.to_string())
+}
+
 /// Übersetzt einen lokalen WebDAV-Mountpfad in seine entfernte URL. Für Ordner
 /// wird ein abschließender Schrägstrich gesetzt, sodass der Server das Element
 /// als Collection (rekursiv) löscht.
@@ -2725,10 +2810,174 @@ fn webdav_propfind_last_modified(response: &str) -> Option<i64> {
     webdav_http_date_epoch(webdav_propfind_tag_value(response, "getlastmodified")?)
 }
 
+/// Sucht ab `from` das nächste XML-Tag mit dem lokalen Namen `name`.
+///
+/// Der Namensraumpräfix ist serverabhängig (`<D:response>`, `<response>`,
+/// `<ns0:response>`), deshalb wird nur der Teil hinter dem letzten Doppelpunkt
+/// verglichen. `lower` muss die kleingeschriebene Fassung des Originals sein;
+/// `to_ascii_lowercase` lässt die Bytelänge unverändert, sodass die
+/// zurückgegebene Position auch im Original gilt.
+fn find_local_tag(lower: &str, from: usize, name: &str, closing: bool) -> Option<usize> {
+    let bytes = lower.as_bytes();
+    let mut cursor = from;
+    while let Some(relative) = lower.get(cursor..)?.find('<') {
+        let open = cursor + relative;
+        let mut scan = open + 1;
+        if closing {
+            if bytes.get(scan) != Some(&b'/') {
+                cursor = open + 1;
+                continue;
+            }
+            scan += 1;
+        } else if bytes.get(scan) == Some(&b'/') {
+            cursor = open + 1;
+            continue;
+        }
+        let relative = lower
+            .get(scan..)
+            .and_then(|rest| rest.find(|c: char| c == '>' || c == '/' || c.is_whitespace()))?;
+        let end = scan + relative;
+        let tag = lower.get(scan..end)?;
+        if tag.rsplit(':').next().unwrap_or(tag) == name {
+            return Some(open);
+        }
+        cursor = open + 1;
+    }
+    None
+}
+
+/// Zerlegt eine PROPFIND-Antwort in die Rümpfe ihrer `<response>`-Elemente.
+///
+/// Nötig, weil [`webdav_propfind_tag_value`] stets den ersten Treffer im
+/// gesamten Text liefert. Bei `Depth: 0` ist das richtig, bei einem
+/// Verzeichnislisting (`Depth: 1`) bekäme man sonst für jede Datei die Werte
+/// des Verzeichnisses selbst.
+fn webdav_propfind_response_blocks(response: &str) -> Vec<&str> {
+    let lower = response.to_ascii_lowercase();
+    let mut blocks = Vec::new();
+    let mut cursor = 0;
+    while let Some(open) = find_local_tag(&lower, cursor, "response", false) {
+        let Some(body_start) = response[open..].find('>').map(|offset| open + offset + 1) else {
+            break;
+        };
+        let Some(close) = find_local_tag(&lower, body_start, "response", true) else {
+            break;
+        };
+        blocks.push(&response[body_start..close]);
+        cursor = close + 1;
+    }
+    blocks
+}
+
+/// Löst die fünf vordefinierten XML-Entitäten sowie numerische Referenzen auf.
+/// Unbekannte Sequenzen bleiben unverändert, damit ein ungewöhnlicher Name den
+/// Eintrag nicht verliert.
+fn xml_unescape(value: &str) -> String {
+    if !value.contains('&') {
+        return value.to_string();
+    }
+    let mut out = String::with_capacity(value.len());
+    let mut rest = value;
+    while let Some(position) = rest.find('&') {
+        out.push_str(&rest[..position]);
+        let tail = &rest[position..];
+        let resolved = tail.find(';').and_then(|end| {
+            let entity = &tail[1..end];
+            let character = match entity {
+                "amp" => Some('&'),
+                "lt" => Some('<'),
+                "gt" => Some('>'),
+                "quot" => Some('"'),
+                "apos" => Some('\''),
+                _ => entity.strip_prefix('#').and_then(|number| {
+                    let code = match number.strip_prefix(['x', 'X']) {
+                        Some(hex) => u32::from_str_radix(hex, 16).ok()?,
+                        None => number.parse().ok()?,
+                    };
+                    char::from_u32(code)
+                }),
+            }?;
+            Some((character, end + 1))
+        });
+        match resolved {
+            Some((character, consumed)) => {
+                out.push(character);
+                rest = &tail[consumed..];
+            }
+            None => {
+                out.push('&');
+                rest = &tail[1..];
+            }
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+/// Zieht den Dateinamen aus einem `href`. Der Wert ist prozentkodiert und je
+/// nach Server absolut (`/ordner/datei.png`) oder vollständig
+/// (`https://host/ordner/datei.png`); für beide Formen genügt das letzte
+/// Segment, da ein `Depth: 1`-Listing nur direkte Kinder enthält.
+fn webdav_href_file_name(href: &str) -> Option<String> {
+    let trimmed = xml_unescape(href.trim());
+    let trimmed = trimmed.trim_end_matches('/');
+    let last = trimmed.rsplit('/').next()?;
+    if last.is_empty() {
+        return None;
+    }
+    let decoded = percent_decode_segment(last);
+    if decoded.is_empty() {
+        None
+    } else {
+        Some(decoded)
+    }
+}
+
 #[derive(Clone, Copy)]
 struct WebDavFileMetadata {
     size: u64,
     modified: Option<i64>,
+    created: Option<i64>,
+}
+
+/// Liest `creationdate`. WebDAV schreibt hier – anders als bei
+/// `getlastmodified` – einen ISO-8601-Zeitstempel.
+fn webdav_propfind_created(response: &str) -> Option<i64> {
+    let value = webdav_propfind_tag_value(response, "creationdate")?;
+    chrono::DateTime::parse_from_rfc3339(value)
+        .ok()
+        .map(|time| time.timestamp())
+}
+
+/// Wertet ein `Depth: 1`-Listing aus und ordnet jedem Dateinamen die vom
+/// Server gemeldeten Werte zu. Ordner werden übersprungen – für sie liefert
+/// WebDAV keine Größe, und ihr Zeitstempel ist für die Anzeige belanglos.
+fn webdav_propfind_entries(response: &str) -> HashMap<String, WebDavFileMetadata> {
+    let mut entries = HashMap::new();
+    for block in webdav_propfind_response_blocks(response) {
+        let lower = block.to_ascii_lowercase();
+        if find_local_tag(&lower, 0, "collection", false).is_some() {
+            continue;
+        }
+        let Some(href) = webdav_propfind_tag_value(block, "href") else {
+            continue;
+        };
+        let Some(name) = webdav_href_file_name(href) else {
+            continue;
+        };
+        let Some(size) = webdav_propfind_content_length(block) else {
+            continue;
+        };
+        entries.insert(
+            name,
+            WebDavFileMetadata {
+                size,
+                modified: webdav_propfind_last_modified(block),
+                created: webdav_propfind_created(block),
+            },
+        );
+    }
+    entries
 }
 
 #[cfg(target_os = "macos")]
@@ -2738,8 +2987,21 @@ fn webdav_propfind_response(
     password: &str,
     cancel: &AtomicBool,
 ) -> std::io::Result<(Vec<u8>, u16)> {
+    webdav_propfind_response_with_depth(url, user, password, 0, cancel)
+}
+
+/// `depth` entspricht dem gleichnamigen WebDAV-Header: 0 fragt genau ein
+/// Element ab, 1 zusätzlich dessen direkte Kinder.
+#[cfg(target_os = "macos")]
+fn webdav_propfind_response_with_depth(
+    url: &str,
+    user: &str,
+    password: &str,
+    depth: u8,
+    cancel: &AtomicBool,
+) -> std::io::Result<(Vec<u8>, u16)> {
     let config = format!(
-        "silent\nshow-error\nrequest = \"PROPFIND\"\nheader = \"Depth: 0\"\noutput = \"-\"\nwrite-out = \"\\n__DUALBEAM_HTTP_CODE__:%{{http_code}}\\n\"\nurl = \"{}\"\nuser = \"{}:{}\"\n",
+        "silent\nshow-error\nrequest = \"PROPFIND\"\nheader = \"Depth: {depth}\"\noutput = \"-\"\nwrite-out = \"\\n__DUALBEAM_HTTP_CODE__:%{{http_code}}\\n\"\nurl = \"{}\"\nuser = \"{}:{}\"\n",
         escape_curl_value(url),
         escape_curl_value(user),
         escape_curl_value(password),
@@ -2783,6 +3045,7 @@ fn webdav_file_metadata_optional(
     Ok(Some(WebDavFileMetadata {
         size,
         modified: webdav_propfind_last_modified(body),
+        created: webdav_propfind_created(body),
     }))
 }
 
@@ -2853,15 +3116,59 @@ fn webdav_listing_context(_directory: &Path) -> Option<WebDavListingContext> {
     None
 }
 
-/// Ermittelt die Länge einer als 0 Byte gemeldeten Datei am WebDAV-Server.
-/// Ein Fehler bleibt bewusst unsichtbar: die Pane kann dann weiterhin den
-/// vom Betriebssystem gelieferten Wert zeigen, ohne dass ein einzelner
-/// vorübergehend nicht erreichbarer Eintrag die ganze Ansicht blockiert.
+/// Baut die URL eines Verzeichnisses für ein Listing.
+///
+/// Anders als [`webdav_remote_url`] ist die Mount-Wurzel hier ausdrücklich
+/// erlaubt: jene Funktion verweigert sie, weil ein Löschbefehl auf die Wurzel
+/// das gesamte Laufwerk träfe. Ein Lesezugriff ist dagegen harmlos.
 #[cfg(target_os = "macos")]
-fn webdav_server_file_size(context: &WebDavListingContext, path: &Path) -> Option<u64> {
-    let url = webdav_remote_url(&context.source_url, &context.mountpoint, path, false)?;
+fn webdav_directory_url(context: &WebDavListingContext, directory: &Path) -> Option<String> {
+    if directory == context.mountpoint {
+        return Some(format!("{}/", context.source_url.trim_end_matches('/')));
+    }
+    webdav_remote_url(&context.source_url, &context.mountpoint, directory, true)
+}
+
+/// Holt die Serverwerte für ein ganzes Verzeichnis in einer einzigen Abfrage.
+///
+/// Hintergrund: `webdavfs` kann nach einem Schreibvorgang Einträge liefern, die
+/// zwar im Verzeichnis stehen, deren `stat()` aber „No such file or directory"
+/// meldet. Größe und Datum fehlen dann. Ein `Depth: 1`-PROPFIND beantwortet den
+/// gesamten Ordner mit einem Roundtrip – deutlich günstiger, als jede Datei
+/// einzeln nachzufragen.
+///
+/// Ein Fehler bleibt bewusst unsichtbar: die Pane zeigt dann weiterhin die
+/// Werte des Betriebssystems, statt dass ein Serverproblem die Ansicht
+/// blockiert.
+#[cfg(target_os = "macos")]
+fn webdav_server_directory_entries(
+    context: &WebDavListingContext,
+    directory: &Path,
+) -> Option<HashMap<String, WebDavFileMetadata>> {
+    let url = webdav_directory_url(context, directory)?;
     let cancel = AtomicBool::new(false);
-    webdav_file_size(&url, &context.user, &context.password, &cancel).ok()
+    let (stdout, code) =
+        webdav_propfind_response_with_depth(&url, &context.user, &context.password, 1, &cancel)
+            .ok()?;
+    if code != 207 {
+        return None;
+    }
+    let body = String::from_utf8_lossy(&stdout);
+    let body = body
+        .rsplit_once("__DUALBEAM_HTTP_CODE__:")
+        .map(|(body, _)| body)
+        .unwrap_or(&body);
+    // Ein Verzeichnis ohne Dateien liefert eine leere Auskunft – das ist ein
+    // gültiges Ergebnis und kein Fehler.
+    Some(webdav_propfind_entries(body))
+}
+
+#[cfg(not(target_os = "macos"))]
+fn webdav_server_directory_entries(
+    _context: &WebDavListingContext,
+    _directory: &Path,
+) -> Option<HashMap<String, WebDavFileMetadata>> {
+    None
 }
 
 #[cfg(target_os = "macos")]
@@ -7672,5 +7979,416 @@ mod copy_tests {
         for fstype in ["apfs", "hfs", "exfat", "msdos"] {
             assert!(!is_network_fstype(fstype), "{fstype} ist kein Netzwerk");
         }
+    }
+}
+
+/// Prüfungen für die Sammelabfrage von Dateiwerten am WebDAV-Server.
+///
+/// Grundlage ist eine echte Antwort von pCloud: gemischte Namensraumpräfixe
+/// (`D:` für die Struktur, `lp1:`/`lp2:` für die Eigenschaften), Attribute im
+/// `response`-Tag und ein selbstschließendes `resourcetype` bei Dateien. Ein
+/// selbst erdachtes XML hätte genau die Eigenheiten verfehlt, die den Parser
+/// schwierig machen – der erste Auswerteversuch scheiterte an eben diesen
+/// Attributen.
+#[cfg(all(test, target_os = "macos"))]
+mod webdav_listing_tests {
+    use super::{
+        percent_decode_segment, webdav_href_file_name, webdav_propfind_entries, xml_unescape,
+    };
+
+    /// Nachbildung einer pCloud-Antwort auf `PROPFIND /Screenshots/` mit
+    /// `Depth: 1`: das Verzeichnis selbst, zwei Dateien und ein Unterordner.
+    const PCLOUD_LISTING: &str = r#"<?xml version="1.0" encoding="utf-8"?>
+<D:multistatus xmlns:D="DAV:">
+<D:response xmlns:lp1="DAV:" xmlns:lp2="http://apache.org/dav/props/">
+<D:href>/Screenshots/</D:href>
+<D:propstat>
+<D:prop>
+<lp1:resourcetype><D:collection/></lp1:resourcetype>
+<lp1:creationdate>2026-09-02T10:29:51Z</lp1:creationdate>
+<lp1:getlastmodified>Wed, 02 Sep 2026 10:29:51 GMT</lp1:getlastmodified>
+<D:getcontenttype>httpd/unix-directory</D:getcontenttype>
+</D:prop>
+<D:status>HTTP/1.1 200 OK</D:status>
+</D:propstat>
+</D:response>
+<D:response xmlns:lp1="DAV:" xmlns:lp2="http://apache.org/dav/props/">
+<D:href>/Screenshots/Hardware-Test-Icon.png</D:href>
+<D:propstat>
+<D:prop>
+<lp1:resourcetype/>
+<lp1:creationdate>2026-09-02T10:24:53Z</lp1:creationdate>
+<lp1:getcontentlength>6397</lp1:getcontentlength>
+<lp1:getlastmodified>Wed, 02 Sep 2026 10:24:53 GMT</lp1:getlastmodified>
+<lp2:executable>F</lp2:executable>
+</D:prop>
+<D:status>HTTP/1.1 200 OK</D:status>
+</D:propstat>
+</D:response>
+<D:response xmlns:lp1="DAV:">
+<D:href>/Screenshots/Bild%20mit%20Leerzeichen%20%26%20Zeichen.png</D:href>
+<D:propstat>
+<D:prop>
+<lp1:resourcetype/>
+<lp1:creationdate>2026-09-02T11:00:00Z</lp1:creationdate>
+<lp1:getcontentlength>396345</lp1:getcontentlength>
+<lp1:getlastmodified>Wed, 02 Sep 2026 11:00:00 GMT</lp1:getlastmodified>
+</D:prop>
+<D:status>HTTP/1.1 200 OK</D:status>
+</D:propstat>
+</D:response>
+<D:response xmlns:lp1="DAV:">
+<D:href>/Screenshots/Unterordner/</D:href>
+<D:propstat>
+<D:prop>
+<lp1:resourcetype><D:collection/></lp1:resourcetype>
+<lp1:getlastmodified>Wed, 02 Sep 2026 09:00:00 GMT</lp1:getlastmodified>
+</D:prop>
+<D:status>HTTP/1.1 200 OK</D:status>
+</D:propstat>
+</D:response>
+</D:multistatus>"#;
+
+    #[test]
+    fn liest_alle_dateien_eines_verzeichnisses() {
+        let entries = webdav_propfind_entries(PCLOUD_LISTING);
+        // Nur die beiden Dateien: das Verzeichnis selbst und der Unterordner
+        // sind keine Einträge, für die Größe oder Datum ergänzt werden müssten.
+        assert_eq!(entries.len(), 2, "Ordner dürfen nicht enthalten sein");
+        assert!(!entries.contains_key("Screenshots"));
+        assert!(!entries.contains_key("Unterordner"));
+
+        let icon = entries
+            .get("Hardware-Test-Icon.png")
+            .expect("Datei fehlt in der Auswertung");
+        assert_eq!(icon.size, 6397);
+        assert!(icon.modified.is_some(), "Änderungsdatum fehlt");
+        assert!(icon.created.is_some(), "Erstellungsdatum fehlt");
+    }
+
+    #[test]
+    fn loest_prozentkodierung_im_dateinamen_auf() {
+        let entries = webdav_propfind_entries(PCLOUD_LISTING);
+        // Der Server liefert den Namen kodiert; verglichen wird später mit dem
+        // Klarnamen aus dem Verzeichniseintrag.
+        let key = "Bild mit Leerzeichen & Zeichen.png";
+        assert!(
+            entries.contains_key(key),
+            "erwarteter Schlüssel {key:?} fehlt, vorhanden: {:?}",
+            entries.keys().collect::<Vec<_>>()
+        );
+        assert_eq!(entries[key].size, 396345);
+    }
+
+    #[test]
+    fn ordnet_jedem_eintrag_die_eigenen_werte_zu() {
+        // Der eigentliche Grund für die Zerlegung in Blöcke: würde man im
+        // gesamten Text nach dem ersten Treffer suchen, bekäme jede Datei die
+        // Werte des zuerst genannten Eintrags.
+        let entries = webdav_propfind_entries(PCLOUD_LISTING);
+        let a = entries["Hardware-Test-Icon.png"].size;
+        let b = entries["Bild mit Leerzeichen & Zeichen.png"].size;
+        assert_ne!(a, b, "beide Dateien haben dieselbe Größe bekommen");
+    }
+
+    #[test]
+    fn liefert_nichts_bei_unbrauchbarer_antwort() {
+        // Abgeschnittene oder fremde Antworten dürfen nicht in einen Absturz
+        // münden; die Anzeige behält dann schlicht die Werte des Systems.
+        for body in ["", "<html>Fehler</html>", "<D:multistatus><D:response>"] {
+            assert!(
+                webdav_propfind_entries(body).is_empty(),
+                "unerwartete Einträge bei {body:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn erkennt_ordner_auch_mit_gemeldeter_laenge() {
+        // Manche Server melden für Ordner zusätzlich eine Länge. Ohne die
+        // Auswertung von `collection` liefe ein Ordner dann als Datei mit und
+        // bekäme beim Auffüllen falsche Werte zugewiesen.
+        let xml = r#"<D:multistatus xmlns:D="DAV:">
+<D:response>
+<D:href>/pfad/Ordner/</D:href>
+<D:propstat><D:prop>
+<D:resourcetype><D:collection/></D:resourcetype>
+<D:getcontentlength>0</D:getcontentlength>
+<D:getlastmodified>Wed, 02 Sep 2026 09:00:00 GMT</D:getlastmodified>
+</D:prop><D:status>HTTP/1.1 200 OK</D:status></D:propstat>
+</D:response>
+</D:multistatus>"#;
+        let entries = webdav_propfind_entries(xml);
+        assert!(
+            entries.is_empty(),
+            "Ordner wurde als Datei geführt: {:?}",
+            entries.keys().collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn liest_werte_trotz_zusaetzlichem_404_abschnitt() {
+        // Server antworten häufig mit zwei `propstat`-Abschnitten: einem mit
+        // den vorhandenen Eigenschaften (200) und einem mit den nicht
+        // unterstützten (404). Die Auswertung darf sich davon nicht beirren
+        // lassen.
+        let xml = r#"<D:multistatus xmlns:D="DAV:">
+<D:response>
+<D:href>/pfad/Datei.bin</D:href>
+<D:propstat><D:prop>
+<D:resourcetype/>
+<D:getcontentlength>12345</D:getcontentlength>
+<D:getlastmodified>Wed, 02 Sep 2026 09:00:00 GMT</D:getlastmodified>
+</D:prop><D:status>HTTP/1.1 200 OK</D:status></D:propstat>
+<D:propstat><D:prop>
+<D:creationdate/>
+<D:getcontentlanguage/>
+</D:prop><D:status>HTTP/1.1 404 Not Found</D:status></D:propstat>
+</D:response>
+</D:multistatus>"#;
+        let entries = webdav_propfind_entries(xml);
+        let file = entries.get("Datei.bin").expect("Datei fehlt");
+        assert_eq!(file.size, 12345);
+        assert!(file.modified.is_some(), "Änderungsdatum fehlt");
+        // Das Erstellungsdatum war leer – es darf schlicht fehlen, ohne dass
+        // der ganze Eintrag verworfen wird.
+        assert!(file.created.is_none());
+    }
+
+    #[test]
+    fn loest_xml_entitaeten_auf() {
+        assert_eq!(xml_unescape("a &amp; b"), "a & b");
+        assert_eq!(xml_unescape("&lt;tag&gt;"), "<tag>");
+        assert_eq!(xml_unescape("&quot;x&apos;y&quot;"), "\"x'y\"");
+        assert_eq!(xml_unescape("&#38;"), "&");
+        assert_eq!(xml_unescape("&#x26;"), "&");
+        // Unbekanntes bleibt unverändert – ein merkwürdiger Name ist besser
+        // als ein fehlender Eintrag.
+        assert_eq!(xml_unescape("&unbekannt;"), "&unbekannt;");
+        assert_eq!(xml_unescape("100% & mehr"), "100% & mehr");
+    }
+
+    #[test]
+    fn dekodiert_prozentsequenzen() {
+        assert_eq!(percent_decode_segment("Bild%20mit%20Leer"), "Bild mit Leer");
+        assert_eq!(percent_decode_segment("Gr%C3%BC%C3%9Fe"), "Grüße");
+        assert_eq!(percent_decode_segment("ohne"), "ohne");
+        // Ungültige oder unvollständige Sequenzen bleiben stehen, statt den
+        // Namen zu verwerfen.
+        assert_eq!(percent_decode_segment("100%"), "100%");
+        assert_eq!(percent_decode_segment("50%zz"), "50%zz");
+        assert_eq!(percent_decode_segment("a%2"), "a%2");
+    }
+
+    /// Prüft den vollständigen Weg gegen einen tatsächlich eingehängten
+    /// WebDAV-Server: Kontext beschaffen, URL bilden, `PROPFIND` absetzen,
+    /// Antwort auswerten.
+    ///
+    /// Standardmäßig übersprungen, weil dafür ein Mount und Zugangsdaten im
+    /// Schlüsselbund nötig sind. Aufruf:
+    /// `cargo test --lib gegen_echten_server -- --ignored --nocapture`
+    #[test]
+    #[ignore = "benötigt einen eingehängten WebDAV-Server"]
+    fn gegen_echten_server() {
+        use super::{webdav_listing_context, webdav_server_directory_entries};
+        use std::path::Path;
+
+        let mount = std::env::var("DUALBEAM_WEBDAV_MOUNT")
+            .unwrap_or_else(|_| "/Volumes/ewebdav.pcloud.com".to_string());
+        let directory = Path::new(&mount);
+        assert!(directory.is_dir(), "{mount} ist nicht eingehängt");
+
+        let context = webdav_listing_context(directory).expect("kein WebDAV-Kontext");
+
+        // Ein Verzeichnis mit Dateien suchen: die Wurzel eines Mounts enthält
+        // oft ausschließlich Ordner, dort wäre nichts zu vergleichen.
+        let mut ziel = directory.to_path_buf();
+        let mut entries = webdav_server_directory_entries(&context, &ziel)
+            .expect("keine Serverantwort für die Wurzel");
+        if entries.is_empty() {
+            let unterordner = std::fs::read_dir(directory)
+                .expect("Wurzel nicht lesbar")
+                .flatten()
+                .filter(|e| e.path().is_dir())
+                .find_map(|e| {
+                    let pfad = e.path();
+                    let gefunden = webdav_server_directory_entries(&context, &pfad)
+                        .filter(|treffer| !treffer.is_empty())?;
+                    Some((pfad, gefunden))
+                });
+            let (pfad, gefunden) = unterordner.expect("kein Verzeichnis mit Dateien gefunden");
+            ziel = pfad;
+            entries = gefunden;
+        }
+        println!("geprüftes Verzeichnis: {}", ziel.display());
+        let directory = ziel.as_path();
+
+        // Gegenprobe mit dem Dateisystem: Was der Server meldet, muss zu dem
+        // passen, was der Treiber im selben Verzeichnis zeigt.
+        let mut geprueft = 0usize;
+        for eintrag in std::fs::read_dir(directory)
+            .expect("Verzeichnis nicht lesbar")
+            .flatten()
+        {
+            let name = eintrag.file_name().to_string_lossy().into_owned();
+            let Some(server) = entries.get(&name) else {
+                continue;
+            };
+            if let Ok(meta) = eintrag.metadata() {
+                if meta.is_file() && meta.len() > 0 {
+                    assert_eq!(meta.len(), server.size, "Größe weicht ab bei {name}");
+                    geprueft += 1;
+                }
+            }
+        }
+        println!(
+            "{} Servereinträge, {geprueft} gegen das Dateisystem geprüft",
+            entries.len()
+        );
+        assert!(geprueft > 0, "keine Datei konnte gegengeprüft werden");
+    }
+
+    /// Belegt den Kern des Entwurfs: Sind die Werte des Treibers vollständig,
+    /// darf die Anzeige keinen einzigen zusätzlichen Serverzugriff kosten.
+    ///
+    /// Aufruf:
+    /// `cargo test --lib normalfall_ohne_zusatzabfrage -- --ignored --nocapture`
+    #[test]
+    #[ignore = "benötigt einen eingehängten WebDAV-Server"]
+    fn normalfall_ohne_zusatzabfrage() {
+        use super::list_dir_blocking;
+        use std::path::Path;
+
+        let mount = std::env::var("DUALBEAM_WEBDAV_MOUNT")
+            .unwrap_or_else(|_| "/Volumes/ewebdav.pcloud.com".to_string());
+        let verzeichnis = Path::new(&mount).join("Screenshots");
+        if !verzeichnis.is_dir() {
+            println!("{} fehlt – übersprungen", verzeichnis.display());
+            return;
+        }
+
+        let start = std::time::Instant::now();
+        let eintraege =
+            list_dir_blocking(verzeichnis.to_string_lossy().into_owned(), true).expect("Listing");
+        let dauer = start.elapsed();
+
+        let dateien: Vec<_> = eintraege
+            .iter()
+            .filter(|e| !e.is_dir && !e.is_symlink)
+            .collect();
+        assert!(!dateien.is_empty(), "keine Dateien im Prüfverzeichnis");
+        for eintrag in &dateien {
+            assert!(
+                eintrag.mtime > 0,
+                "Änderungsdatum fehlt bei {}",
+                eintrag.name
+            );
+            assert!(
+                !eintrag.mode_str.is_empty(),
+                "Rechte fehlen bei {}",
+                eintrag.name
+            );
+        }
+        println!("{} Dateien in {dauer:?}", dateien.len());
+        // Ein Roundtrip zu pCloud liegt bei mehreren hundert Millisekunden.
+        // Bleibt die Anzeige deutlich darunter, hat keine Serverabfrage
+        // stattgefunden.
+        assert!(
+            dauer < std::time::Duration::from_millis(150),
+            "Anzeige dauerte {dauer:?} – vermutlich lief eine unnötige Serverabfrage"
+        );
+    }
+
+    /// Der eigentliche Zweck der Änderung: fehlende Werte werden aus der
+    /// Serverauskunft wiederhergestellt.
+    ///
+    /// Der Störfall lässt sich nicht auf Zuruf herbeiführen – er entsteht durch
+    /// einen Zwischenspeicher, den der Treiber selbst verwaltet. Deshalb wird
+    /// hier ein echtes Listing genommen und künstlich um genau die Werte
+    /// gebracht, die `webdavfs` in jenem Fall verschluckt.
+    ///
+    /// Aufruf:
+    /// `cargo test --lib stellt_fehlende_werte_wieder_her -- --ignored --nocapture`
+    #[test]
+    #[ignore = "benötigt einen eingehängten WebDAV-Server"]
+    fn stellt_fehlende_werte_wieder_her() {
+        use super::{list_dir_blocking, repair_webdav_entries};
+        use std::path::Path;
+
+        let mount = std::env::var("DUALBEAM_WEBDAV_MOUNT")
+            .unwrap_or_else(|_| "/Volumes/ewebdav.pcloud.com".to_string());
+        let verzeichnis = Path::new(&mount).join("Screenshots");
+        if !verzeichnis.is_dir() {
+            println!("{} fehlt – übersprungen", verzeichnis.display());
+            return;
+        }
+
+        // Zwei getrennte Abfragen statt einer Kopie: `Entry` soll nicht allein
+        // für diese Prüfung klonbar werden müssen.
+        let pfad = verzeichnis.to_string_lossy().into_owned();
+        let echt = list_dir_blocking(pfad.clone(), true).expect("Listing");
+        let mut beschaedigt = list_dir_blocking(pfad, true).expect("Listing");
+        for eintrag in beschaedigt.iter_mut() {
+            if !eintrag.is_dir && !eintrag.is_symlink {
+                eintrag.size = 0;
+                eintrag.mtime = 0;
+                eintrag.birth_time = 0;
+                eintrag.owner.clear();
+                eintrag.group.clear();
+                eintrag.mode_str.clear();
+            }
+        }
+
+        repair_webdav_entries(&mut beschaedigt, &verzeichnis);
+
+        let mut wiederhergestellt = 0usize;
+        for (vorher, nachher) in echt.iter().zip(beschaedigt.iter()) {
+            if vorher.is_dir || vorher.is_symlink || vorher.size == 0 {
+                continue;
+            }
+            assert_eq!(
+                nachher.size, vorher.size,
+                "Größe nicht wiederhergestellt bei {}",
+                vorher.name
+            );
+            assert!(
+                nachher.mtime > 0,
+                "Datum fehlt weiterhin bei {}",
+                vorher.name
+            );
+            assert_eq!(
+                nachher.mode_str, vorher.mode_str,
+                "Rechte weichen ab bei {}",
+                vorher.name
+            );
+            assert_eq!(
+                nachher.owner, vorher.owner,
+                "Eigentümer weicht ab bei {}",
+                vorher.name
+            );
+            wiederhergestellt += 1;
+        }
+        println!("{wiederhergestellt} Einträge wiederhergestellt");
+        assert!(wiederhergestellt > 0, "nichts zu prüfen");
+    }
+
+    #[test]
+    fn holt_den_dateinamen_aus_dem_href() {
+        assert_eq!(
+            webdav_href_file_name("/Screenshots/Bild.png").as_deref(),
+            Some("Bild.png")
+        );
+        // Vollständige URL statt Pfad – beides ist nach RFC 4918 zulässig.
+        assert_eq!(
+            webdav_href_file_name("https://example.org/pfad/Datei%20A.txt").as_deref(),
+            Some("Datei A.txt")
+        );
+        // Ein Ordner endet auf einen Schrägstrich.
+        assert_eq!(
+            webdav_href_file_name("/Screenshots/Unterordner/").as_deref(),
+            Some("Unterordner")
+        );
+        assert_eq!(webdav_href_file_name("/"), None);
+        assert_eq!(webdav_href_file_name(""), None);
     }
 }
