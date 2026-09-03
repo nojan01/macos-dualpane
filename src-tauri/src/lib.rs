@@ -303,6 +303,48 @@ fn list_dir_blocking(path: String, show_hidden: bool) -> Result<Vec<Entry>, Stri
                 .collect()
         });
     }
+    // WebDAV, SMB und FTP werden ebenfalls unmittelbar am Server gelesen. Ihre
+    // Dateioperationen laufen seit 0.5.10 direkt dorthin; würde die Anzeige
+    // weiterhin den eingehängten Pfad auflisten, zeigte sie dessen
+    // Zwischenspeicher – und damit einen Stand, der erst beim Neuverbinden
+    // aufholt.
+    if let Some(result) = remote::list_rclone_dir(&p) {
+        return result.map(|entries| {
+            entries
+                .into_iter()
+                .filter(|entry| {
+                    (show_hidden || !entry.name.starts_with('.')) && entry.name != ".DualBeamUndo"
+                })
+                .map(|entry| {
+                    let hidden = entry.name.starts_with('.');
+                    let ext = if entry.is_dir {
+                        String::new()
+                    } else {
+                        Path::new(&entry.name)
+                            .extension()
+                            .and_then(|part| part.to_str())
+                            .map(|part| part.to_ascii_lowercase())
+                            .unwrap_or_default()
+                    };
+                    Entry {
+                        name: entry.name,
+                        path: entry.path.to_string_lossy().into_owned(),
+                        is_dir: entry.is_dir,
+                        is_symlink: false,
+                        size: if entry.is_dir { 0 } else { entry.size },
+                        mtime: entry.mtime,
+                        ext: ext.clone(),
+                        hidden,
+                        birth_time: entry.mtime,
+                        kind: classify(&ext, entry.is_dir).to_string(),
+                        owner: String::new(),
+                        group: String::new(),
+                        mode_str: String::new(),
+                    }
+                })
+                .collect()
+        });
+    }
     let read = std::fs::read_dir(&p).map_err(|e| format!("{}: {}", p.display(), e))?;
     // S3/Swift haben keine echten Ordnerobjekte. rclone liefert für virtuelle
     // Präfixe den Default 2000-01-01; das ist kein Erstellungsdatum und wird
@@ -5851,7 +5893,10 @@ fn collect_direct_sync_tree(
     root: &Path,
     ignore_patterns: &[String],
 ) -> Result<HashMap<String, DirectSyncPathInfo>, String> {
-    if let Some(result) = remote::list_object_storage_tree(root) {
+    // Beide Wege liefern dieselbe Form: den Baum unmittelbar vom Server statt
+    // von einem zwischengespeicherten Mount.
+    let direct = remote::list_object_storage_tree(root).or_else(|| remote::list_rclone_tree(root));
+    if let Some(result) = direct {
         let mut entries = HashMap::new();
         for entry in result? {
             check_sync_preview_cancelled()?;

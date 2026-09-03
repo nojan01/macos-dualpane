@@ -2276,6 +2276,127 @@ pub fn copy_rclone_storage(
     }
 }
 
+/// Setzt einen rclone-Befehl unmittelbar gegen den Server ab, ohne den
+/// eingehängten Pfad zu berühren.
+///
+/// Gegenstück zu `direct_object_storage_command`, nur für die Laufwerke mit
+/// [`RemoteSpec`] statt einem Objekt-Speicher-Profil.
+fn direct_rclone_command(spec: &RemoteSpec, args: &[String]) -> Result<std::process::Output, String> {
+    let password = remote_password(spec)?.ok_or_else(|| "err.remote.emptyPassword".to_string())?;
+    let rclone = rclone_executable()?;
+    let obscured = obscure(&rclone, &password)?;
+    let mut command = Command::new(&rclone);
+    command.args(args).stdin(Stdio::null());
+    for (key, value) in rclone_env(spec, &obscured, None) {
+        command.env(key, value);
+    }
+    command
+        .output()
+        .map_err(|_| "Das Netzlaufwerk konnte nicht abgefragt werden".to_string())
+}
+
+/// Liest ein Verzeichnis eines rclone-Laufwerks direkt vom Server.
+///
+/// Liefert `None`, wenn der Pfad zu keinem solchen Laufwerk gehört – dann
+/// bleibt es beim gewöhnlichen Lesen von der Platte.
+///
+/// Warum nicht einfach den eingehängten Pfad auflisten: Der Mount führt einen
+/// Verzeichnis-Zwischenspeicher. Wird daneben unmittelbar am Server gearbeitet
+/// – und genau das tun Löschen, Kopieren und Abgleich –, zeigt er weiterhin
+/// den alten Stand. Gemessen blieben sechs gelöschte Dateien auch nach zwei
+/// Minuten sichtbar. Objekt-Speicher liest aus demselben Grund seit jeher
+/// unmittelbar.
+pub fn list_rclone_dir(path: &Path) -> Option<Result<Vec<ObjectStorageEntry>, String>> {
+    let context = rclone_transfer_context(path)?;
+    Some((|| {
+        let target = rclone_transfer_target(path, &context.mount_path, &context.spec)?;
+        let real_path = canonicalize_with_missing_suffix(path);
+        let output = direct_rclone_command(
+            &context.spec,
+            &[
+                "lsjson".to_string(),
+                "--no-mimetype".to_string(),
+                "--contimeout".to_string(),
+                "15s".to_string(),
+                "--timeout".to_string(),
+                "2m".to_string(),
+                "--retries".to_string(),
+                "2".to_string(),
+                target,
+            ],
+        )?;
+        if !output.status.success() {
+            let password = remote_password(&context.spec)?.unwrap_or_default();
+            return Err(sftp_client_error(&output.stderr, &password));
+        }
+        let entries: Vec<RcloneListEntry> = serde_json::from_slice(&output.stdout)
+            .map_err(|_| "Die Antwort des Netzlaufwerks konnte nicht gelesen werden".to_string())?;
+        Ok(entries
+            .into_iter()
+            .map(|entry| ObjectStorageEntry {
+                path: real_path.join(&entry.name),
+                is_dir: entry.is_dir,
+                size: entry.size,
+                mtime: chrono::DateTime::parse_from_rfc3339(&entry.modified)
+                    .map(|time| time.timestamp())
+                    .unwrap_or(0),
+                name: entry.name,
+            })
+            .collect())
+    })())
+}
+
+/// Rekursives Listing für die Vorschau des Abgleichs, ebenfalls unmittelbar
+/// vom Server.
+pub fn list_rclone_tree(path: &Path) -> Option<Result<Vec<ObjectStorageEntry>, String>> {
+    let context = rclone_transfer_context(path)?;
+    Some((|| {
+        let target = rclone_transfer_target(path, &context.mount_path, &context.spec)?;
+        let real_path = canonicalize_with_missing_suffix(path);
+        let output = direct_rclone_command(
+            &context.spec,
+            &[
+                "lsjson".to_string(),
+                "--recursive".to_string(),
+                "--no-mimetype".to_string(),
+                "--contimeout".to_string(),
+                "15s".to_string(),
+                "--timeout".to_string(),
+                "5m".to_string(),
+                "--retries".to_string(),
+                "2".to_string(),
+                target,
+            ],
+        )?;
+        if !output.status.success() {
+            let password = remote_password(&context.spec)?.unwrap_or_default();
+            return Err(sftp_client_error(&output.stderr, &password));
+        }
+        let entries: Vec<RcloneListEntry> = serde_json::from_slice(&output.stdout)
+            .map_err(|_| "Die Antwort des Netzlaufwerks konnte nicht gelesen werden".to_string())?;
+        Ok(entries
+            .into_iter()
+            .map(|entry| {
+                // Bei `--recursive` ist `Path` der Pfad unterhalb des Ordners.
+                let relative = if entry.path.is_empty() {
+                    entry.name.clone()
+                } else {
+                    entry.path.clone()
+                };
+                ObjectStorageEntry {
+                    path: real_path.join(&relative),
+                    is_dir: entry.is_dir,
+                    size: entry.size,
+                    mtime: chrono::DateTime::parse_from_rfc3339(&entry.modified)
+                        .map(|time| time.timestamp())
+                        .unwrap_or(0),
+                    name: relative,
+                }
+            })
+            .collect())
+    })())
+}
+
 /// Extrahiert die Prozentzahl aus rclone `--stats-one-line`, zum Beispiel
 /// `12.3 MiB / 45.6 MiB, 27%, 1.0 MiB/s`. Fehlermeldungen haben kein solches
 /// Suffix und werden bewusst ignoriert.
