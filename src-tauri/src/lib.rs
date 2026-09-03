@@ -2274,17 +2274,25 @@ fn terminate_process_group(pid: u32) {
 }
 
 #[tauri::command]
-fn check_conflicts(items: Vec<JobItem>) -> Vec<String> {
-    items
-        .iter()
-        .filter(|item| {
-            let path = expand_tilde(&item.dst);
-            remote::object_storage_path_exists(&path)
-                .map(|result| result.unwrap_or(false))
-                .unwrap_or_else(|| path_occupied_no_follow(&path))
-        })
-        .map(|i| i.dst.clone())
-        .collect()
+fn check_conflicts(items: Vec<JobItem>) -> Result<Vec<String>, String> {
+    let mut conflicts = Vec::new();
+    for item in items {
+        let path = expand_tilde(&item.dst);
+        let exists = if let Some(result) = remote::object_storage_path_exists(&path) {
+            result?
+        } else if let Some(result) = remote::rclone_path_exists(&path) {
+            // Die Antwort des Servers ist für einen Remote-Konflikt bindend.
+            // Bei einem Fehler ist ein lokaler, möglicherweise alter
+            // Mount-Cache keine sichere Alternative.
+            result?
+        } else {
+            path_occupied_no_follow(&path)
+        };
+        if exists {
+            conflicts.push(item.dst);
+        }
+    }
+    Ok(conflicts)
 }
 
 struct JobCtx<'a> {
@@ -5934,9 +5942,10 @@ fn collect_direct_sync_tree(
     collect_filesystem_sync_tree(root, ignore_patterns)
 }
 
-/// Direkte Einweg-Sync-Vorschau, sobald mindestens eine Seite S3 oder Swift
-/// ist. Die Objektseite wird ausschließlich mit `rclone lsjson` erfasst; kein
-/// NFS-Mount und keine Dateiübertragung werden für die Vorschau benötigt.
+/// Direkte Einweg-Sync-Vorschau, sobald mindestens eine Seite ein rclone-
+/// erreichbares Laufwerk ist. Die entfernte Seite wird ausschließlich mit
+/// `rclone lsjson` erfasst; kein NFS-Mount und keine Dateiübertragung werden
+/// für die Vorschau benötigt.
 fn direct_object_storage_sync_preview(
     src_root: &Path,
     dst_root: &Path,
@@ -6100,7 +6109,14 @@ fn sync_preview_inner(
     check_sync_preview_cancelled()?;
     let src_root = expand_tilde(src);
     let dst_root = expand_tilde(dst);
-    if remote::is_object_storage_mount(&src_root) || remote::is_object_storage_mount(&dst_root) {
+    // Der rclone-Mount (WebDAV, SMB oder FTP) hat einen Verzeichnis-Cache.
+    // Für einen unmittelbar nach einer Serveränderung gestarteten Sync muss
+    // die Vorschau daher ebenso direkt vom Server lesen wie bei S3/Swift.
+    if remote::is_object_storage_mount(&src_root)
+        || remote::is_object_storage_mount(&dst_root)
+        || remote::rclone_transfer_context(&src_root).is_some()
+        || remote::rclone_transfer_context(&dst_root).is_some()
+    {
         let ignore_patterns = sync_ignore_patterns(&src_root, extra_ignore_patterns);
         return direct_object_storage_sync_preview(
             &src_root,

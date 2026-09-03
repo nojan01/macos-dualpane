@@ -2366,9 +2366,11 @@ fn direct_rclone_command(
 /// den alten Stand. Gemessen blieben sechs gelöschte Dateien auch nach zwei
 /// Minuten sichtbar. Objekt-Speicher liest aus demselben Grund seit jeher
 /// unmittelbar.
-pub fn list_rclone_dir(path: &Path) -> Option<Result<Vec<ObjectStorageEntry>, String>> {
-    let context = rclone_transfer_context(path)?;
-    let result = (|| -> Result<Vec<ObjectStorageEntry>, String> {
+fn list_rclone_dir_direct(
+    path: &Path,
+    context: &RcloneTransferContext,
+) -> Result<Vec<ObjectStorageEntry>, String> {
+    (|| -> Result<Vec<ObjectStorageEntry>, String> {
         let target = rclone_transfer_target(path, &context.mount_path, &context.spec)?;
         let real_path = canonicalize_with_missing_suffix(path);
         let output = direct_rclone_command(
@@ -2407,7 +2409,12 @@ pub fn list_rclone_dir(path: &Path) -> Option<Result<Vec<ObjectStorageEntry>, St
                 name: entry.name,
             })
             .collect())
-    })();
+    })()
+}
+
+pub fn list_rclone_dir(path: &Path) -> Option<Result<Vec<ObjectStorageEntry>, String>> {
+    let context = rclone_transfer_context(path)?;
+    let result = list_rclone_dir_direct(path, &context);
     // Scheitert der direkte Weg – etwa weil der Zugang gerade nicht antwortet
     // oder das Kennwort nicht abrufbar ist –, wird der Fehler NICHT
     // durchgereicht. Sonst bliebe die Anzeige leer und das Laufwerk wirkte
@@ -2476,19 +2483,37 @@ pub fn list_rclone_tree(path: &Path) -> Option<Result<Vec<ObjectStorageEntry>, S
             })
             .collect())
     })();
-    // Scheitert der direkte Weg – etwa weil der Zugang gerade nicht antwortet
-    // oder das Kennwort nicht abrufbar ist –, wird der Fehler NICHT
-    // durchgereicht. Sonst bliebe die Anzeige leer und das Laufwerk wirkte
-    // defekt, obwohl es eingehängt ist. Stattdessen wird auf das Lesen vom
-    // eingehängten Pfad zurückgefallen: schlimmstenfalls ein etwas älterer
-    // Stand, aber nie eine kaputte Ansicht.
-    match result {
-        Ok(entries) => Some(Ok(entries)),
-        Err(reason) => {
-            log_direct_listing_fallback("Baum", path, &reason);
-            None
-        }
+    // Anders als bei der Pane-Anzeige ist ein lokaler Fallback hier falsch:
+    // Die Sync-Vorschau muss den aktuellen Serverstand zeigen oder mit dem
+    // Serverfehler abbrechen. Ein NFS-Cache könnte gelöschte Dateien sonst
+    // noch als vorhanden melden.
+    Some(result)
+}
+
+/// Prüft einen Namen unmittelbar im Parent-Listing des rclone-Servers.
+///
+/// Der eingehängte NFS-Pfad darf hierfür nicht verwendet werden: Nach einem
+/// Löschen oder einer Änderung am Server kann dessen Verzeichnis-Cache noch
+/// den vorigen Stand liefern. `lsjson --stat` ist für nicht vorhandene
+/// Verzeichnisse bei einigen Backends ebenfalls nicht eindeutig, deshalb wird
+/// wie beim Objekt-Speicher das Parent-Listing verwendet.
+pub fn rclone_path_exists(path: &Path) -> Option<Result<bool, String>> {
+    let context = rclone_transfer_context(path)?;
+    let real_path = canonicalize_with_missing_suffix(path);
+    let real_mount = canonicalize_with_missing_suffix(&context.mount_path);
+    if real_path == real_mount {
+        return Some(Ok(true));
     }
+    let Some(name) = real_path.file_name().map(|name| name.to_os_string())
+    else {
+        return Some(Ok(true));
+    };
+    let parent = real_path.parent().unwrap_or(&context.mount_path);
+    Some(list_rclone_dir_direct(parent, &context).map(|entries| {
+        entries
+            .iter()
+            .any(|entry| entry.name == name.to_string_lossy())
+    }))
 }
 
 /// Extrahiert die Prozentzahl aus rclone `--stats-one-line`, zum Beispiel
