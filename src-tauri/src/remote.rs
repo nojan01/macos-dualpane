@@ -2276,6 +2276,16 @@ pub fn copy_rclone_storage(
     }
 }
 
+/// Hält fest, dass das direkte Lesen nicht geklappt hat und deshalb der
+/// eingehängte Pfad gelesen wird. Die Meldung landet nur im Protokoll – für
+/// die Bedienung ist der Rückfall unauffällig.
+fn log_direct_listing_fallback(art: &str, path: &Path, reason: &str) {
+    eprintln!(
+        "[dualbeam] direktes Lesen ({art}) fehlgeschlagen fuer {}: {reason} – lese vom eingehaengten Pfad",
+        path.display()
+    );
+}
+
 /// Setzt einen rclone-Befehl unmittelbar gegen den Server ab, ohne den
 /// eingehängten Pfad zu berühren.
 ///
@@ -2308,7 +2318,7 @@ fn direct_rclone_command(spec: &RemoteSpec, args: &[String]) -> Result<std::proc
 /// unmittelbar.
 pub fn list_rclone_dir(path: &Path) -> Option<Result<Vec<ObjectStorageEntry>, String>> {
     let context = rclone_transfer_context(path)?;
-    Some((|| {
+    let result = (|| -> Result<Vec<ObjectStorageEntry>, String> {
         let target = rclone_transfer_target(path, &context.mount_path, &context.spec)?;
         let real_path = canonicalize_with_missing_suffix(path);
         let output = direct_rclone_command(
@@ -2343,14 +2353,27 @@ pub fn list_rclone_dir(path: &Path) -> Option<Result<Vec<ObjectStorageEntry>, St
                 name: entry.name,
             })
             .collect())
-    })())
+    })();
+    // Scheitert der direkte Weg – etwa weil der Zugang gerade nicht antwortet
+    // oder das Kennwort nicht abrufbar ist –, wird der Fehler NICHT
+    // durchgereicht. Sonst bliebe die Anzeige leer und das Laufwerk wirkte
+    // defekt, obwohl es eingehängt ist. Stattdessen wird auf das Lesen vom
+    // eingehängten Pfad zurückgefallen: schlimmstenfalls ein etwas älterer
+    // Stand, aber nie eine kaputte Ansicht.
+    match result {
+        Ok(entries) => Some(Ok(entries)),
+        Err(reason) => {
+            log_direct_listing_fallback("Verzeichnis", path, &reason);
+            None
+        }
+    }
 }
 
 /// Rekursives Listing für die Vorschau des Abgleichs, ebenfalls unmittelbar
 /// vom Server.
 pub fn list_rclone_tree(path: &Path) -> Option<Result<Vec<ObjectStorageEntry>, String>> {
     let context = rclone_transfer_context(path)?;
-    Some((|| {
+    let result = (|| -> Result<Vec<ObjectStorageEntry>, String> {
         let target = rclone_transfer_target(path, &context.mount_path, &context.spec)?;
         let real_path = canonicalize_with_missing_suffix(path);
         let output = direct_rclone_command(
@@ -2394,7 +2417,20 @@ pub fn list_rclone_tree(path: &Path) -> Option<Result<Vec<ObjectStorageEntry>, S
                 }
             })
             .collect())
-    })())
+    })();
+    // Scheitert der direkte Weg – etwa weil der Zugang gerade nicht antwortet
+    // oder das Kennwort nicht abrufbar ist –, wird der Fehler NICHT
+    // durchgereicht. Sonst bliebe die Anzeige leer und das Laufwerk wirkte
+    // defekt, obwohl es eingehängt ist. Stattdessen wird auf das Lesen vom
+    // eingehängten Pfad zurückgefallen: schlimmstenfalls ein etwas älterer
+    // Stand, aber nie eine kaputte Ansicht.
+    match result {
+        Ok(entries) => Some(Ok(entries)),
+        Err(reason) => {
+            log_direct_listing_fallback("Baum", path, &reason);
+            None
+        }
+    }
 }
 
 /// Extrahiert die Prozentzahl aus rclone `--stats-one-line`, zum Beispiel
