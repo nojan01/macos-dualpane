@@ -400,6 +400,29 @@ export async function loadPane(
     if (isCurrent()) watchPath(pane, target).catch(() => {});
   } catch (e) {
     if (!isCurrent()) return;
+    // Ein ausdrücklich aus der Seitenleiste geöffnetes Netzlaufwerk darf bei
+    // einem Listing-Fehler nicht unbemerkt auf Home springen. Besonders S3 und
+    // Swift besitzen nur einen virtuellen Pfad: Nach einer fehlenden
+    // Berechtigung oder einem Endpoint-Fehler sähe der Benutzer sonst sein
+    // Home-Verzeichnis und hielte es für den Inhalt des neuen Laufwerks.
+    // Die Wurzel bleibt sichtbar, die Liste wird geleert und der echte Fehler
+    // wird in der Pane angezeigt.
+    if (isNet && options.navigationRoot !== undefined) {
+      setState(pane, {
+        cwd: target,
+        entriesRaw: [],
+        entries: [],
+        cursor: 0,
+        selected: new Set(),
+        anchor: null,
+        navigationRoot: root,
+        loading: false,
+        error: errMsg(e),
+      });
+      syncActiveTab(pane);
+      bumpSel();
+      return;
+    }
     // Netzpfad nicht erreichbar (z. B. Freigabe ausgehängt): auf Home ausweichen,
     // damit die App sofort nutzbar bleibt, statt nur eine Fehlermeldung zu zeigen.
     if (isNet) {

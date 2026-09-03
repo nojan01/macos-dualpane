@@ -33,6 +33,14 @@ const DEFAULT_PORTS: Record<RemoteProtocol, number> = {
   webdav: 443,
 };
 
+/** Servernamen, Freigaben und Zugangsdaten sind technische Werte. macOS darf
+ * sie weder korrigieren noch die Schreibweise automatisch ändern. */
+const TECHNICAL_INPUT = {
+  autocapitalize: "none",
+  autocorrect: "off",
+  spellcheck: false,
+} as const;
+
 /** Anbieterkennungen, die rclone bei WebDAV auswertet. Die Auswahl ändert das
  * Verhalten spürbar: Nextcloud meldet etwa Prüfsummen, die andere nicht
  * kennen. Ein falscher Wert führt zu unnötigen Nachfragen beim Server. */
@@ -221,14 +229,6 @@ export function RemoteDialog() {
     const current = dialog();
     if (!current) return;
     const spec = toSpec(current);
-    if (current.savePassword) {
-      // Ein fehlgeschlagenes Sichern darf das Verbinden nicht verhindern.
-      try {
-        await saveRemotePassword(spec, current.password);
-      } catch {
-        /* Schlüsselbund nicht verfügbar: dann eben ohne. */
-      }
-    }
     // Ein rclone-Mount hält sein Ziel beim Start fest. Wenn im Dialog der
     // Remote-Pfad geändert wurde, darf der vorhandene Mount daher nicht
     // weiterverwendet werden: Er würde weiterhin die alte Server-Wurzel
@@ -243,6 +243,16 @@ export function RemoteDialog() {
       current.password,
       isInsecure(current.protocol),
     );
+    // Ein falsch eingegebenes Kennwort darf nicht den bislang funktionierenden
+    // Schlüsselbund-Eintrag ersetzen. Erst nach erfolgreicher Anmeldung wird
+    // es gespeichert.
+    if (current.savePassword) {
+      try {
+        await saveRemotePassword(spec, current.password);
+      } catch {
+        /* Schlüsselbund nicht verfügbar: dann eben ohne. */
+      }
+    }
     saveRemoteProfile(spec);
     bumpVolumes();
     close();
@@ -333,6 +343,7 @@ export function RemoteDialog() {
                     {t("remote.host")}
                     <input
                       type="text"
+                      {...TECHNICAL_INPUT}
                       placeholder={
                         current().protocol === "smb"
                           ? "nas.local"
@@ -370,6 +381,7 @@ export function RemoteDialog() {
                       {t("remote.basePath")}
                       <input
                         type="text"
+                        {...TECHNICAL_INPUT}
                         placeholder={
                           current().vendor === "nextcloud" ||
                           current().vendor === "owncloud"
@@ -393,6 +405,7 @@ export function RemoteDialog() {
                     })}
                     <input
                       type="text"
+                      {...TECHNICAL_INPUT}
                       inputmode="numeric"
                       value={current().port}
                       disabled={current().busy}
@@ -405,6 +418,7 @@ export function RemoteDialog() {
                     {t("remote.username")}
                     <input
                       type="text"
+                      {...TECHNICAL_INPUT}
                       autocomplete="username"
                       value={current().username}
                       disabled={current().busy}
@@ -417,6 +431,7 @@ export function RemoteDialog() {
                     {t("remote.password")}
                     <input
                       type="password"
+                      {...TECHNICAL_INPUT}
                       autocomplete="current-password"
                       value={current().password}
                       disabled={current().busy}
@@ -434,6 +449,7 @@ export function RemoteDialog() {
                       : t("remote.path")}
                     <input
                       type="text"
+                      {...TECHNICAL_INPUT}
                       placeholder={
                         current().protocol === "smb" ? "Freigabe" : "/"
                       }
@@ -449,6 +465,7 @@ export function RemoteDialog() {
                       {t("remote.domain")}
                       <input
                         type="text"
+                        {...TECHNICAL_INPUT}
                         placeholder="WORKGROUP"
                         value={current().domain}
                         disabled={current().busy}
@@ -462,6 +479,7 @@ export function RemoteDialog() {
                     {t("remote.label")}
                     <input
                       type="text"
+                      {...TECHNICAL_INPUT}
                       placeholder={current().host || "sftp.example.com"}
                       value={current().label}
                       disabled={current().busy}

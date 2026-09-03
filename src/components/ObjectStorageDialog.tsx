@@ -17,6 +17,13 @@ const [editing, setEditing] = createSignal<ObjectStorageProfile | null>(null);
 const [secret, setSecret] = createSignal("");
 const [hasStoredSecret, setHasStoredSecret] = createSignal(false);
 
+/** Endpunkte, Buckets und Schlüssel müssen unverändert übernommen werden. */
+const TECHNICAL_INPUT = {
+  autocapitalize: "none",
+  autocorrect: "off",
+  spellcheck: false,
+} as const;
+
 export function openObjectStorageDialog(profile?: ObjectStorageProfile) {
   const next = profile ? { ...profile } : emptyObjectStorageProfile();
   setEditing(next);
@@ -89,23 +96,23 @@ export function ObjectStorageDialog() {
       <h2>{profile().name ? t("object.profile") : t("object.add")}</h2>
       <p>{t("object.intro")}</p>
       <div class="object-profile-grid">
-        <label><span>{t("object.name")}</span><input value={profile().name} onInput={(e) => update("name", e.currentTarget.value)} /></label>
+        <label><span>{t("object.name")}</span><input {...TECHNICAL_INPUT} value={profile().name} onInput={(e) => update("name", e.currentTarget.value)} /></label>
         <label><span>{t("object.protocol")}</span><select value={profile().protocol} onChange={(e) => update("protocol", e.currentTarget.value as "s3" | "swift")}><option value="s3">S3</option><option value="swift">OpenStack Swift</option></select></label>
-        <label class="wide"><span>{profile().protocol === "s3" ? t("object.s3Endpoint") : t("object.swiftEndpoint")}</span><input placeholder={profile().protocol === "s3" ? "https://s3.example.net" : "https://swift.example.net"} value={profile().endpoint} onInput={(e) => update("endpoint", e.currentTarget.value)} /></label>
+        <label class="wide"><span>{profile().protocol === "s3" ? t("object.s3Endpoint") : t("object.swiftEndpoint")}</span><input {...TECHNICAL_INPUT} placeholder={profile().protocol === "s3" ? "https://s3.example.net" : "https://swift.example.net"} value={profile().endpoint} onInput={(e) => update("endpoint", e.currentTarget.value)} /></label>
         <Show when={profile().protocol === "s3"} fallback={<>
           <label><span>{t("object.keystoneVersion")}</span><select value={profile().swiftAuthVersion} onChange={(e) => { const version = e.currentTarget.value as "v2" | "v3"; update("swiftAuthVersion", version); update("swiftIdentityPath", version === "v3" ? "/identity/v3" : "/v2.0"); }}><option value="v3">Keystone v3</option><option value="v2">Keystone v2 (Legacy)</option></select></label>
-          <label><span>{t("object.username")}</span><input value={profile().username} onInput={(e) => update("username", e.currentTarget.value)} /></label>
-          <label><span>{profile().swiftAuthVersion === "v2" ? t("object.tenant") : t("object.project")}</span><input value={profile().swiftProject} onInput={(e) => update("swiftProject", e.currentTarget.value)} /></label>
-          <label><span>{t("object.region")}</span><input value={profile().region} onInput={(e) => update("region", e.currentTarget.value)} /></label>
-          <label><span>{t("object.keystonePath")}</span><input value={profile().swiftIdentityPath} onInput={(e) => update("swiftIdentityPath", e.currentTarget.value)} /></label>
-          <Show when={profile().swiftAuthVersion === "v3"}><label><span>{t("object.userDomain")}</span><input value={profile().swiftUserDomain} onInput={(e) => update("swiftUserDomain", e.currentTarget.value)} /></label><label><span>{t("object.projectDomain")}</span><input value={profile().swiftProjectDomain} onInput={(e) => update("swiftProjectDomain", e.currentTarget.value)} /></label></Show>
+          <label><span>{t("object.username")}</span><input {...TECHNICAL_INPUT} value={profile().username} onInput={(e) => update("username", e.currentTarget.value)} /></label>
+          <label><span>{profile().swiftAuthVersion === "v2" ? t("object.tenant") : t("object.project")}</span><input {...TECHNICAL_INPUT} value={profile().swiftProject} onInput={(e) => update("swiftProject", e.currentTarget.value)} /></label>
+          <label><span>{t("object.region")}</span><input {...TECHNICAL_INPUT} value={profile().region} onInput={(e) => update("region", e.currentTarget.value)} /></label>
+          <label><span>{t("object.keystonePath")}</span><input {...TECHNICAL_INPUT} value={profile().swiftIdentityPath} onInput={(e) => update("swiftIdentityPath", e.currentTarget.value)} /></label>
+          <Show when={profile().swiftAuthVersion === "v3"}><label><span>{t("object.userDomain")}</span><input {...TECHNICAL_INPUT} value={profile().swiftUserDomain} onInput={(e) => update("swiftUserDomain", e.currentTarget.value)} /></label><label><span>{t("object.projectDomain")}</span><input {...TECHNICAL_INPUT} value={profile().swiftProjectDomain} onInput={(e) => update("swiftProjectDomain", e.currentTarget.value)} /></label></Show>
         </>}>
-          <label><span>Access Key</span><input value={profile().accessKey} onInput={(e) => update("accessKey", e.currentTarget.value)} /></label>
-          <label><span>{t("object.region")}</span><input value={profile().region} onInput={(e) => update("region", e.currentTarget.value)} /></label>
+          <label><span>Access Key</span><input {...TECHNICAL_INPUT} value={profile().accessKey} onInput={(e) => update("accessKey", e.currentTarget.value)} /></label>
+          <label><span>{t("object.region")}</span><input {...TECHNICAL_INPUT} value={profile().region} onInput={(e) => update("region", e.currentTarget.value)} /></label>
         </Show>
-        <label><span>{t("object.containerBucket")}</span><input placeholder={t("object.allContainers")} value={profile().container} onInput={(e) => update("container", e.currentTarget.value)} /></label>
+        <label><span>{t("object.containerBucket")}</span><input {...TECHNICAL_INPUT} placeholder={t("object.allContainers")} value={profile().container} onInput={(e) => update("container", e.currentTarget.value)} /></label>
         <label><span>{t("object.parallelTransfers")}</span><select value={profile().parallelTransfers} onChange={(e) => update("parallelTransfers", e.currentTarget.value === "4" ? 4 : 1)}><option value="1">{t("object.parallelTransfersSafe")}</option><option value="4">{t("object.parallelTransfersFast")}</option></select><small>{t("object.parallelTransfersHint")}</small></label>
-        <label><span>{profile().protocol === "s3" ? t("object.s3Secret") : t("object.swiftPassword")}</span><input type="password" placeholder={hasStoredSecret() ? t("object.secretStoredKeep") : t("object.secretWillStore")} value={secret()} onInput={(e) => setSecret(e.currentTarget.value)} /><Show when={hasStoredSecret()} fallback={<small class="object-secret-status missing">{t("object.secretMissing")}</small>}><small class="object-secret-status">{t("object.secretStored")}</small></Show></label>
+        <label><span>{profile().protocol === "s3" ? t("object.s3Secret") : t("object.swiftPassword")}</span><input type="password" {...TECHNICAL_INPUT} placeholder={hasStoredSecret() ? t("object.secretStoredKeep") : t("object.secretWillStore")} value={secret()} onInput={(e) => setSecret(e.currentTarget.value)} /><Show when={hasStoredSecret()} fallback={<small class="object-secret-status missing">{t("object.secretMissing")}</small>}><small class="object-secret-status">{t("object.secretStored")}</small></Show></label>
         <Show when={profile().protocol === "s3"}><label class="object-profile-toggle wide"><input type="checkbox" checked={profile().pathStyle} onChange={(e) => update("pathStyle", e.currentTarget.checked)} /> {t("object.pathStyle")}</label></Show>
       </div>
       <div class="modal-actions"><Show when={profile().name}><button class="danger" onClick={() => void remove()}>{t("common.delete")}</button></Show><span /><button onClick={() => void save()}>{t("common.save")}</button><button class="secondary" onClick={close}>{t("common.cancel")}</button></div>

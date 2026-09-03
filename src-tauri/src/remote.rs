@@ -29,6 +29,11 @@ const RCLONE_REMOTE: &str = "DUALBEAM";
 /// Wie lange nach dem Start von rclone auf das fertige Laufwerk gewartet wird.
 const MOUNT_TIMEOUT: Duration = Duration::from_secs(45);
 
+/// Die Anmeldung wird vor dem NFS-Mount geprüft. Ohne diese Vorprüfung kann
+/// macOS den Mountpunkt schon anlegen, während der erste Verzeichniszugriff
+/// bei einem abgelehnten SMB-/WebDAV-Kennwort unbegrenzt auf rclone wartet.
+const REMOTE_VERIFY_TIMEOUT: Duration = Duration::from_secs(20);
+
 /// Zeitlimit für das Abfragen der Hostschlüssel. `ssh-keyscan` wartet sonst bei
 /// einem stillen Ziel sehr lange.
 const KEYSCAN_TIMEOUT: Duration = Duration::from_secs(20);
@@ -881,6 +886,75 @@ fn is_mount_ready(path: &Path) -> bool {
     is_mount_point(path) && std::fs::read_dir(path).is_ok()
 }
 
+/// Prüft Zugang und gewählten Startpfad unmittelbar mit rclone, bevor der
+/// NFS-Mount angelegt wird. Dadurch kann ein falsches Kennwort nicht zu einem
+/// Mountpunkt führen, dessen erster `read_dir`-Aufruf blockiert.
+fn verify_rclone_connection(
+    rclone: &Path,
+    spec: &RemoteSpec,
+    obscured_password: &str,
+    known_hosts: Option<&Path>,
+) -> Result<(), String> {
+    let mut command = Command::new(rclone);
+    command
+        // `lsf` prüft Anmeldung und Leserechte, ohne die JSON-Metadaten
+        // anzufordern. Gerade einige SMB-/Samba-Server beantworten `lsjson`
+        // vor einem Mount unvollständig, obwohl die normale Freigabe danach
+        // problemlos lesbar ist.
+        .arg("lsf")
+        .arg("--max-depth")
+        .arg("1")
+        .arg("--format")
+        .arg("p")
+        .arg("--contimeout")
+        .arg("8s")
+        .arg("--timeout")
+        .arg("12s")
+        .arg("--retries")
+        .arg("1")
+        .arg("--low-level-retries")
+        .arg("1")
+        .arg(remote_argument(spec))
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    for (key, value) in rclone_env(spec, obscured_password, known_hosts) {
+        command.env(key, value);
+    }
+    let mut child = command
+        .spawn()
+        .map_err(|_| "err.remote.mountFailed".to_string())?;
+    let deadline = Instant::now() + REMOTE_VERIFY_TIMEOUT;
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => {
+                let output = child
+                    .wait_with_output()
+                    .map_err(|_| "err.remote.mountFailed".to_string())?;
+                return if output.status.success() {
+                    Ok(())
+                } else {
+                    Err(rclone_failure_message(&String::from_utf8_lossy(
+                        &output.stderr,
+                    )))
+                };
+            }
+            Ok(None) => {}
+            Err(_) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err("err.remote.mountFailed".into());
+            }
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err("err.remote.mountTimeout".into());
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
 pub(crate) fn unique_mount_dir(label: &str) -> Result<(PathBuf, String), String> {
     let root = mount_root()?;
     for attempt in 0..50 {
@@ -1166,6 +1240,15 @@ fn mount_blocking(
 
     let rclone = rclone_executable()?;
     let obscured = obscure(&rclone, &password)?;
+    if let Err(error) = verify_rclone_connection(
+        &rclone,
+        &spec,
+        &obscured,
+        known_hosts.as_deref(),
+    ) {
+        let _ = std::fs::remove_dir(&mount_dir);
+        return Err(error);
+    }
     let rc_socket = rc_socket_path()?;
     let _ = std::fs::remove_file(&rc_socket);
     let rc_addr = format!("unix://{}", rc_socket.display());
@@ -2395,17 +2478,17 @@ fn list_rclone_dir_direct(
                 .unwrap_or_default();
             return Err(sftp_client_error(&output.stderr, &password));
         }
-        let entries: Vec<RcloneListEntry> = serde_json::from_slice(&output.stdout)
-            .map_err(|_| "Die Antwort des Netzlaufwerks konnte nicht gelesen werden".to_string())?;
+        let entries = parse_rclone_list_entries(
+            &output.stdout,
+            "Die Antwort des Netzlaufwerks konnte nicht gelesen werden",
+        )?;
         Ok(entries
             .into_iter()
             .map(|entry| ObjectStorageEntry {
                 path: real_path.join(&entry.name),
                 is_dir: entry.is_dir,
-                size: entry.size,
-                mtime: chrono::DateTime::parse_from_rfc3339(&entry.modified)
-                    .map(|time| time.timestamp())
-                    .unwrap_or(0),
+                size: rclone_list_size(entry.size),
+                mtime: rclone_list_mtime(entry.modified.as_deref()),
                 name: entry.name,
             })
             .collect())
@@ -2460,8 +2543,10 @@ pub fn list_rclone_tree(path: &Path) -> Option<Result<Vec<ObjectStorageEntry>, S
                 .unwrap_or_default();
             return Err(sftp_client_error(&output.stderr, &password));
         }
-        let entries: Vec<RcloneListEntry> = serde_json::from_slice(&output.stdout)
-            .map_err(|_| "Die Antwort des Netzlaufwerks konnte nicht gelesen werden".to_string())?;
+        let entries = parse_rclone_list_entries(
+            &output.stdout,
+            "Die Antwort des Netzlaufwerks konnte nicht gelesen werden",
+        )?;
         Ok(entries
             .into_iter()
             .map(|entry| {
@@ -2474,10 +2559,8 @@ pub fn list_rclone_tree(path: &Path) -> Option<Result<Vec<ObjectStorageEntry>, S
                 ObjectStorageEntry {
                     path: real_path.join(&relative),
                     is_dir: entry.is_dir,
-                    size: entry.size,
-                    mtime: chrono::DateTime::parse_from_rfc3339(&entry.modified)
-                        .map(|time| time.timestamp())
-                        .unwrap_or(0),
+                    size: rclone_list_size(entry.size),
+                    mtime: rclone_list_mtime(entry.modified.as_deref()),
                     name: relative,
                 }
             })
@@ -3057,7 +3140,14 @@ fn rclone_failure_message(text: &str) -> String {
     if lower.contains("knownhosts") || lower.contains("key mismatch") {
         return "err.remote.hostKeyChanged".into();
     }
-    if lower.contains("permission denied") || (lower.contains("auth") && lower.contains("fail")) {
+    if lower.contains("permission denied")
+        || lower.contains("access denied")
+        || lower.contains("logon failure")
+        || lower.contains("logon_failure")
+        || lower.contains("invalid credentials")
+        || (lower.contains("auth")
+            && (lower.contains("fail") || lower.contains("reject") || lower.contains("denied")))
+    {
         return "err.remote.auth".into();
     }
     if lower.contains("no such host") || lower.contains("connection refused") {
@@ -4090,11 +4180,40 @@ struct RcloneListEntry {
     #[serde(rename = "Name")]
     name: String,
     #[serde(rename = "Size", default)]
-    size: u64,
+    size: i64,
     #[serde(rename = "ModTime", default)]
-    modified: String,
+    modified: Option<String>,
     #[serde(rename = "IsDir", default)]
     is_dir: bool,
+}
+
+/// S3-Bucket-Wurzeln besitzen oft keinen Zeitstempel. rclone liefert dafür
+/// je nach Anbieter `null` statt eines fehlenden Feldes; beides ist für die
+/// Dateiansicht ein unbekanntes Änderungsdatum.
+fn rclone_list_mtime(value: Option<&str>) -> i64 {
+    value
+        .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
+        .map(|time| time.timestamp())
+        .unwrap_or(0)
+}
+
+/// rclone kennzeichnet die Größe einiger virtueller S3-Ordner mit `-1`.
+/// Solche Einträge besitzen keine übertragbare Dateigröße.
+fn rclone_list_size(value: i64) -> u64 {
+    value.max(0) as u64
+}
+
+/// Manche S3-kompatiblen Anbieter antworten bei einer leeren Bucket-Wurzel
+/// mit JSON `null` statt `[]`. Beide Antworten stehen für eine leere Liste.
+fn parse_rclone_list_entries(
+    bytes: &[u8],
+    error_message: &'static str,
+) -> Result<Vec<RcloneListEntry>, String> {
+    serde_json::from_slice::<Option<Vec<RcloneListEntry>>>(bytes)
+        .map(|entries| entries.unwrap_or_default())
+        // Der Parsergrund enthält ausschließlich JSON-Strukturinformationen
+        // (z. B. `null` statt Zeichenkette), nie Antwortinhalte oder Secrets.
+        .map_err(|error| format!("{error_message}: {error}"))
 }
 
 /// Ein Eintrag aus einem direkten S3-/Swift-Listing. Die Struktur ist bewusst
@@ -4183,17 +4302,17 @@ pub fn list_object_storage_dir(path: &Path) -> Option<Result<Vec<ObjectStorageEn
         if !output.status.success() {
             return Err(direct_object_storage_error(&output.stderr, &secret));
         }
-        let entries: Vec<RcloneListEntry> = serde_json::from_slice(&output.stdout)
-            .map_err(|_| "Objekt-Speicher-Antwort konnte nicht gelesen werden".to_string())?;
+        let entries = parse_rclone_list_entries(
+            &output.stdout,
+            "Objekt-Speicher-Antwort konnte nicht gelesen werden",
+        )?;
         Ok(entries
             .into_iter()
             .map(|entry| ObjectStorageEntry {
                 path: context.real_path.join(&entry.name),
                 is_dir: entry.is_dir,
-                size: entry.size,
-                mtime: chrono::DateTime::parse_from_rfc3339(&entry.modified)
-                    .map(|time| time.timestamp())
-                    .unwrap_or(0),
+                size: rclone_list_size(entry.size),
+                mtime: rclone_list_mtime(entry.modified.as_deref()),
                 name: entry.name,
             })
             .collect())
@@ -4226,17 +4345,17 @@ pub fn list_object_storage_tree(path: &Path) -> Option<Result<Vec<ObjectStorageE
         if !output.status.success() {
             return Err(direct_object_storage_error(&output.stderr, &secret));
         }
-        let entries: Vec<RcloneListEntry> = serde_json::from_slice(&output.stdout)
-            .map_err(|_| "Objekt-Speicher-Antwort konnte nicht gelesen werden".to_string())?;
+        let entries = parse_rclone_list_entries(
+            &output.stdout,
+            "Objekt-Speicher-Antwort konnte nicht gelesen werden",
+        )?;
         Ok(entries
             .into_iter()
             .map(|entry| ObjectStorageEntry {
                 path: context.mount_path.join(&entry.path),
                 is_dir: entry.is_dir,
-                size: entry.size,
-                mtime: chrono::DateTime::parse_from_rfc3339(&entry.modified)
-                    .map(|time| time.timestamp())
-                    .unwrap_or(0),
+                size: rclone_list_size(entry.size),
+                mtime: rclone_list_mtime(entry.modified.as_deref()),
                 name: entry.path,
             })
             .collect())
@@ -5232,6 +5351,32 @@ mod tests {
         s.domain = "  FIRMA  ".into();
         let mit = rclone_env(&s, "geheim", None);
         assert!(mit.contains(&("RCLONE_CONFIG_DUALBEAM_DOMAIN".into(), "FIRMA".into())));
+    }
+
+    #[test]
+    fn smb_login_errors_are_shown_as_authentication_failures() {
+        for message in [
+            "SMB: STATUS_LOGON_FAILURE",
+            "access denied",
+            "invalid credentials",
+        ] {
+            assert_eq!(rclone_failure_message(message), "err.remote.auth", "{message}");
+        }
+    }
+
+    #[test]
+    fn s3_listing_accepts_null_timestamp_and_empty_null_response() {
+        let entries = parse_rclone_list_entries(
+            br#"[{"Path":"bucket","Name":"bucket","Size":-1,"ModTime":null,"IsDir":true}]"#,
+            "unlesbar",
+        )
+        .unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(rclone_list_size(entries[0].size), 0);
+        assert_eq!(rclone_list_mtime(entries[0].modified.as_deref()), 0);
+        assert!(parse_rclone_list_entries(b"null", "unlesbar")
+            .unwrap()
+            .is_empty());
     }
 
     #[test]

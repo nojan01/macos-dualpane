@@ -18,6 +18,13 @@ const SECURITIES: NfsSecurity[] = ["auto", "krb5p", "krb5i", "krb5", "sys"];
 
 const TRANSPORTS: NfsTransport[] = ["auto", "tcp", "udp"];
 
+/** NFS-Server, Exportpfade und Kerberos-Realm sind keine Prosa. */
+const TECHNICAL_INPUT = {
+  autocapitalize: "none",
+  autocorrect: "off",
+  spellcheck: false,
+} as const;
+
 type NfsDialogState = {
   host: string;
   path: string;
@@ -120,6 +127,7 @@ export function NfsDialog() {
               {t("nfs.host")}
               <input
                 type="text"
+                {...TECHNICAL_INPUT}
                 autofocus
                 placeholder="192.168.1.10"
                 value={current().host}
@@ -131,6 +139,7 @@ export function NfsDialog() {
               {t("nfs.path")}
               <input
                 type="text"
+                {...TECHNICAL_INPUT}
                 placeholder="/export/daten"
                 value={current().path}
                 disabled={current().busy}
@@ -185,6 +194,7 @@ export function NfsDialog() {
                 {t("nfs.realm")}
                 <input
                   type="text"
+                  {...TECHNICAL_INPUT}
                   placeholder="BEISPIEL.DE"
                   value={current().realm}
                   disabled={current().busy}
@@ -219,6 +229,7 @@ export function NfsDialog() {
               {t("nfs.label")}
               <input
                 type="text"
+                {...TECHNICAL_INPUT}
                 placeholder={current().host || "nfs-freigabe"}
                 value={current().label}
                 disabled={current().busy}
