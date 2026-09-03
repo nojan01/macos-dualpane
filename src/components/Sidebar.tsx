@@ -19,6 +19,7 @@ import {
   mountNetworkUrl,
   mountObjectStorage,
   loadRemotePassword,
+  mountNfs,
   mountRemote,
   remoteMounts,
   unmountRemote,
@@ -45,7 +46,9 @@ import {
 } from "../objectStorageProfiles";
 import { openObjectStorageDialog } from "./ObjectStorageDialog";
 import { openRemoteDialog } from "./RemoteDialog";
-import { remoteProfiles, removeRemoteProfile, type RemoteProfile } from "../remoteProfiles";
+import { openNfsDialog } from "./NfsDialog";
+import { remoteDescriptor, remoteFromDescriptor, remoteProfiles, removeRemoteProfile, type RemoteProfile } from "../remoteProfiles";
+import { nfsDescriptor, nfsProfiles, removeNfsProfile, type NfsProfile } from "../nfsProfiles";
 
 function basename(p: string): string {
   const trimmed = p.endsWith("/") ? p.slice(0, -1) : p;
@@ -57,12 +60,6 @@ function basename(p: string): string {
  * „remote“ steht für die selbst über rclone eingehängten Ziele. */
 function isLocalVolume(vol: Volume): boolean {
   return vol.kind !== "network" && vol.kind !== "remote";
-}
-
-function remoteDescriptor(profile: RemoteProfile): string {
-  const port = profile.port ?? (profile.protocol === "sftp" ? 22 : profile.protocol === "ftpsImplicit" ? 990 : 21);
-  const scheme = profile.protocol === "sftp" ? "sftp" : profile.protocol === "ftp" ? "ftp" : "ftps";
-  return `${scheme}://${profile.username}@${profile.host}:${port}`;
 }
 
 type Menu = { idx: number; x: number; y: number } | null;
@@ -208,14 +205,31 @@ export function Sidebar() {
       openRemoteDialog({ ...profile, port: profile.port?.toString() ?? "" });
       return;
     }
-    const found = /^(sftp|ftp|ftps):\/\/([^@]+)@(.+):(\d+)$/.exec(mount.descriptor);
+    // Gibt es zu diesem Laufwerk ein NFS-Lesezeichen, stammen Fassung,
+    // Sicherheitsverfahren und Übertragungsart von dort.
+    const savedNfs = nfsProfiles().find((item) => nfsDescriptor(item) === mount.descriptor);
+    if (savedNfs) {
+      openNfsDialog({ ...savedNfs });
+      return;
+    }
+    // Ohne Lesezeichen bleiben nur Server und Freigabepfad aus der Kennung;
+    // die übrigen Einstellungen stehen wieder auf „Automatisch“. NFS kennt
+    // weder Benutzer noch Port, deshalb fehlt hier beides.
+    const nfs = /^nfs:\/\/([^/]+)(\/.*)$/.exec(mount.descriptor);
+    if (nfs) {
+      openNfsDialog({ host: nfs[1], path: nfs[2], label: mount.label });
+      return;
+    }
+    // Die Zerlegung leitet sich aus derselben Zuordnung ab, die auch die
+    // Kennung bildet. Ein künftig ergänztes Protokoll ist damit von selbst
+    // abgedeckt, statt hier vergessen zu werden.
+    const found = remoteFromDescriptor(mount.descriptor);
     if (!found) return;
-    const protocol = found[1] === "sftp" ? "sftp" : "ftpsExplicit";
     openRemoteDialog({
-      protocol,
-      username: found[2],
-      host: found[3],
-      port: found[4],
+      protocol: found.protocol,
+      username: found.username,
+      host: found.host,
+      port: found.port.toString(),
       label: mount.label,
     });
   }
@@ -295,6 +309,56 @@ export function Sidebar() {
     const mount = savedRemoteMount(profile);
     if (mount) await ejectVolume(mount.path);
     removeRemoteProfile(profile.id);
+    await refreshVols();
+  }
+
+  const savedNfsMount = (profile: NfsProfile) =>
+    remoteMountList().find((mount) => mount.descriptor === nfsDescriptor(profile));
+
+  async function openSavedNfsProfile(profile: NfsProfile) {
+    if (mounting()) return;
+    const activeMount = savedNfsMount(profile);
+    if (activeMount) {
+      await loadPane(state.active, activeMount.path);
+      return;
+    }
+    setMounting(profile.id);
+    try {
+      const mountPath = await mountNfs(profile);
+      bumpVolumes();
+      await refreshVols();
+      if (mountPath) await loadPane(state.active, mountPath);
+    } catch (error) {
+      // NFS kennt kein Kennwort; ein Fehlschlag liegt an Server, Netz oder den
+      // Freigaberechten. Der Dialog zeigt den Grund und erlaubt, die
+      // Einstellungen zu ändern, ohne alles neu einzutippen.
+      openNfsDialog({ ...profile });
+      await notifyError(errMsg(error));
+    } finally {
+      setMounting(null);
+    }
+  }
+
+  async function reconnectSavedNfsProfile(profile: NfsProfile) {
+    if (mounting()) return;
+    const activeMount = savedNfsMount(profile);
+    if (activeMount) {
+      setMounting(profile.id);
+      try {
+        await unmountRemote(activeMount.path);
+        bumpVolumes();
+        await refreshVols();
+      } finally {
+        setMounting(null);
+      }
+    }
+    await openSavedNfsProfile(profile);
+  }
+
+  async function removeSavedNfs(profile: NfsProfile) {
+    const mount = savedNfsMount(profile);
+    if (mount) await ejectVolume(mount.path);
+    removeNfsProfile(profile.id);
     await refreshVols();
   }
 
@@ -854,6 +918,20 @@ export function Sidebar() {
             </div>;
           }}
         </For>
+        <For each={nfsProfiles()}>
+          {(profile) => {
+            const mount = () => savedNfsMount(profile);
+            return <div class={`sb-item ${mount() ? "" : "disconnected"}`} onClick={() => void openSavedNfsProfile(profile)} title={mount() ? mount()!.path : `${profile.host}${profile.path} — ${t("sidebar.clickToMount")}`}>
+              <span class="sb-icon">{mount() ? "🌐" : "🔌"}</span>
+              <span class="sb-label">{profile.label || profile.host}</span>
+              <span class="sb-actions">
+                <button class="sb-eject" title={t("network.connectionSettings")} onClick={(event) => { event.stopPropagation(); openNfsDialog({ ...profile }); }}>⚙</button>
+                <Show when={mount()}><button class="sb-eject" title={t("sidebar.reconnect")} onClick={(event) => { event.stopPropagation(); void reconnectSavedNfsProfile(profile); }}>↻</button><button class="sb-eject" title={t("sidebar.unmount")} onClick={(event) => { event.stopPropagation(); void doEject({ name: profile.label || profile.host, path: mount()!.path, kind: "remote" }); }}>⏏</button></Show>
+                <button class="sb-eject sb-remove" title={t("sidebar.removeNetwork")} onClick={(event) => { event.stopPropagation(); void removeSavedNfs(profile); }}>×</button>
+              </span>
+            </div>;
+          }}
+        </For>
         <For each={bookmarks()}>
           {(b) => (
             <div
@@ -932,6 +1010,8 @@ export function Sidebar() {
                   ),
               ) && !remoteMountList().some(
                 (mount) => mount.path === v.path && remoteProfiles().some((profile) => mount.descriptor === remoteDescriptor(profile)),
+              ) && !remoteMountList().some(
+                (mount) => mount.path === v.path && nfsProfiles().some((profile) => mount.descriptor === nfsDescriptor(profile)),
               ),
           )}
         >

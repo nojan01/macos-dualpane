@@ -2,13 +2,13 @@ import { For, Show, createSignal } from "solid-js";
 import { bumpVolumes, loadPane, state } from "../state";
 import {
   mountNfs,
-  rememberNetworkVolume,
   type NfsSecurity,
   type NfsSpec,
   type NfsTransport,
   type NfsVersion,
 } from "../ipc";
 import { errMsg, t } from "../i18n";
+import { saveNfsProfile } from "../nfsProfiles";
 
 /** Reihenfolge im Auswahlfeld: die ausgehandelte Voreinstellung zuerst. */
 const VERSIONS: NfsVersion[] = ["auto", "v3", "v4", "v41", "v2"];
@@ -85,8 +85,14 @@ export function NfsDialog() {
     };
     update({ busy: true, error: null });
     try {
+      // Kein Netzwerk-Lesezeichen: Dieses Laufwerk hängt DualBeam selbst ein,
+      // seine Mount-Quelle lautet "host:/export" und taugt nicht als URL zum
+      // erneuten Verbinden. Es wird über register_plain_mount als eigene Art
+      // "remote" geführt und erscheint darüber in der Seitenleiste.
       const mountPath = await mountNfs(spec);
-      if (mountPath) await rememberNetworkVolume(mountPath);
+      // Erst nach dem geglückten Einhängen merken: Ein Lesezeichen, das gar
+      // nicht verbindet, wäre in der Seitenleiste nur eine Sackgasse.
+      saveNfsProfile(spec);
       bumpVolumes();
       close();
       if (mountPath) await loadPane(state.active, mountPath);

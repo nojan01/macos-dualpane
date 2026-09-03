@@ -21,6 +21,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::net::IpAddr;
+use std::path::Path;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
@@ -346,16 +347,51 @@ pub fn mount(spec: NfsSpec) -> Result<remote::RemoteMountInfo, String> {
         return Err(explain_failure(&message));
     }
 
+    // Ein NFS-Mount gelingt auch dann, wenn der Server anschließend jeden
+    // Zugriff verweigert. Der Ordner erschien in der Oberfläche dann als leeres
+    // Laufwerk, ohne jede Begründung. Deshalb wird sofort einmal gelesen.
+    if let Err(err) = std::fs::read_dir(&dir) {
+        let reason = access_denial_reason(&dir, &err);
+        let _ = remote::unmount_owned(&dir);
+        let _ = std::fs::remove_dir(&dir);
+        return Err(reason);
+    }
+
     let path = dir.to_string_lossy().to_string();
     let descriptor = spec.descriptor();
     remote::register_plain_mount(dir, unique.clone(), descriptor.clone());
-
     Ok(remote::RemoteMountInfo {
         path,
         home_path: None,
         label: unique,
         descriptor,
     })
+}
+
+/// Begründet, warum eine eingehängte Freigabe nicht lesbar ist.
+///
+/// Der häufigste Fall ist kein Netz- oder Anmeldefehler, sondern eine schlichte
+/// Rechtefrage: Bei AUTH_SYS meldet der Mac seine eigene Benutzernummer. Gehört
+/// der freigegebene Ordner einem anderen Benutzer und erlaubt er Fremden nichts,
+/// bleibt er verschlossen. Die Nummern stehen deshalb in der Meldung — ohne sie
+/// ist der Fall vom Anwender nicht zu klären.
+fn access_denial_reason(dir: &Path, err: &std::io::Error) -> String {
+    if err.kind() != std::io::ErrorKind::PermissionDenied {
+        return format!("err.nfs.unreadable\u{1f}{err}");
+    }
+    use std::os::unix::fs::MetadataExt;
+    let Ok(meta) = std::fs::metadata(dir) else {
+        return "err.nfs.noAccess".to_string();
+    };
+    // Nur die neun Rechtebits, oktal — so, wie sie auch `chmod` erwartet.
+    let mode = meta.mode() & 0o777;
+    format!(
+        "err.nfs.noAccessDetails\u{1f}{}\u{1f}{}\u{1f}{:o}\u{1f}{}",
+        meta.uid(),
+        meta.gid(),
+        mode,
+        unsafe { libc::getuid() }
+    )
 }
 
 /// Tauri-Befehl: hängt ein NFS-Laufwerk ein und liefert seinen Pfad.

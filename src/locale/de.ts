@@ -537,6 +537,11 @@ export const de: Record<string, string> = {
   "err.nfs.timeout": "Der Server hat nicht rechtzeitig geantwortet.",
   "err.nfs.spawn": "Der Einhängevorgang ließ sich nicht starten: {0}",
   "err.nfs.generic": "Einhängen fehlgeschlagen: {0}",
+  "err.nfs.noAccessDetails":
+    "Die Verbindung steht, doch der Server verweigert den Zugriff auf den Inhalt. Der freigegebene Ordner gehört Benutzer {0} und Gruppe {1} und ist mit den Rechten {2} versehen; dieser Mac meldet sich als Benutzer {3}. Weiten Sie am Server die Rechte des Ordners aus oder ergänzen Sie den Eintrag in „/etc/exports“ um „all_squash,anonuid={0},anongid={1}“.",
+  "err.nfs.noAccess":
+    "Die Verbindung steht, doch der Server verweigert den Zugriff auf den Inhalt der Freigabe. Prüfen Sie am Server die Rechte des freigegebenen Ordners.",
+  "err.nfs.unreadable": "Die Freigabe ließ sich nach dem Verbinden nicht lesen: {0}",
   "remote.title": "Netzlaufwerk verbinden",
   "remote.description":
     "Verbindet einen Server per SFTP oder FTPS. Das Ziel erscheint danach als gewöhnlicher Ordner in der Seitenleiste.",

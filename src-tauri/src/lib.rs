@@ -1540,6 +1540,16 @@ fn bookmark_url_from_mount_source(source: &str, fstype: &str) -> Option<String> 
 fn remember_network_volume_inner(path: &Path) -> Result<(), String> {
     let mount_path = std::fs::canonicalize(path).map_err(|e| e.to_string())?;
     let mount_path_str = mount_path.to_string_lossy().into_owned();
+    // Von DualBeam selbst eingehängte Laufwerke (rclone, NFS) taugen nicht als
+    // Netzwerk-Lesezeichen: Ihre Mount-Quelle lautet "localhost:/…" bzw.
+    // "host:/export" und ist keine URL, mit der sich macOS erneut verbinden
+    // könnte. Sie werden als eigene Art "remote" geführt.
+    if remote::active_mounts()
+        .iter()
+        .any(|mount| mount.path == mount_path_str)
+    {
+        return Err("Von DualBeam eingebundene Laufwerke lassen sich nicht als Netzwerk-Lesezeichen merken".into());
+    }
     let (source, fstype) = mount_source_and_fstype()
         .remove(&mount_path_str)
         .ok_or_else(|| "Netzlaufwerk ist nicht mehr eingebunden".to_string())?;

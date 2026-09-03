@@ -67,9 +67,11 @@ export function NetworkStorageDialog() {
     update({ busy: true });
     try {
       const mountPath = await mountNetworkUrl(url);
-      // Neue WebDAV- und SMB-Ziele erhalten sofort ein Lesezeichen. Damit
-      // zeigen sie ohne den Umweg über ein erstes Aushängen dieselben Aktionen
-      // wie bereits bekannte Netzwerk-Laufwerke.
+      // Neue WebDAV-Ziele erhalten sofort ein Lesezeichen. Damit zeigen sie
+      // ohne den Umweg über ein erstes Aushängen dieselben Aktionen wie
+      // bereits bekannte Netzwerk-Laufwerke. SMB läuft nicht mehr hier
+      // entlang, sondern über den rclone-Dialog, und wird dort als eigene Art
+      // "remote" geführt.
       if (mountPath) await rememberNetworkVolume(mountPath);
       bumpVolumes();
       close();

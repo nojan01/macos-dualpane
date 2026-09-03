@@ -1,6 +1,6 @@
 [package]
 name = "dualbeam"
-version = "0.5.4"
+version = "0.5.5"
 description = "DualBeam — Dual-Pane File Manager für macOS"
 authors = ["N.J."]
 license = "MIT"

@@ -483,7 +483,7 @@ export const en: Record<string, string> = {
   "nfs.security.krb5p": "Kerberos - encrypted (krb5p)",
   "nfs.realm": "Kerberos realm (optional)",
   "nfs.realmHint":
-    "The name of the Kerberos realm, usually your company domain in capitals - for example COMPANY.LOCAL. Your administrator knows it; \u201cklist\u201d in Terminal shows it too. Leave empty if you hold only one Kerberos credential: macOS then picks it by itself. Obtain the ticket beforehand with \u201ckinit\u201d - NFS has no password of its own.",
+    "The name of the Kerberos realm, usually your company domain in capitals - for example COMPANY.LOCAL. Your administrator knows it; “klist” in Terminal shows it too. Leave empty if you hold only one Kerberos credential: macOS then picks it by itself. Obtain the ticket beforehand with “kinit” - NFS has no password of its own.",
   "nfs.transport": "Transport",
   "nfs.transport.auto": "Automatic",
   "nfs.transport.tcp": "TCP",
@@ -491,35 +491,35 @@ export const en: Record<string, string> = {
   "nfs.label": "Display name",
   "nfs.noLocks": "Disable file locking",
   "nfs.noLocksHint":
-    "Helps with servers lacking \u201crpc.statd\u201d, where access would otherwise hang.",
+    "Helps with servers lacking “rpc.statd”, where access would otherwise hang.",
   "nfs.insecureNote":
     "AUTH_SYS sends all content in the clear and proves nobody's identity - the server trusts the user ID alone. Without Kerberos only servers on your own local network are allowed.",
   "nfs.kerberosPlainNote":
-    "Kerberos proves both identities securely but does not encrypt file content. Choose \u201ckrb5p\u201d for encrypted transfer.",
+    "Kerberos proves both identities securely but does not encrypt file content. Choose “krb5p” for encrypted transfer.",
   "nfs.acceptInsecure": "Allow unencrypted transfer",
   "nfs.privilegedPortHint":
-    "DualBeam connects without administrator rights. Servers requiring a privileged port - the Linux default \u201csecure\u201d - must set their export to \u201cinsecure\u201d.",
+    "DualBeam connects without administrator rights. Servers requiring a privileged port - the Linux default “secure” - must set their export to “insecure”.",
   "nfs.connect": "Connect",
   "nfs.connecting": "Connecting ...",
   "nfs.needHostAndPath":
-    "Please enter a server and an exported path starting with \u201c/\u201d.",
+    "Please enter a server and an exported path starting with “/”.",
   "err.nfs.host": "Invalid server name.",
-  "err.nfs.path": "Invalid exported path. It must start with \u201c/\u201d.",
+  "err.nfs.path": "Invalid exported path. It must start with “/”.",
   "err.nfs.realm": "Invalid Kerberos realm.",
   "err.nfs.realmWithoutKerberos":
     "A Kerberos realm only applies to a Kerberos flavour.",
   "err.nfs.v2NeedsUdp": "NFS 2 runs over UDP only.",
   "err.nfs.v4NeedsTcp": "NFS 4 runs over TCP only.",
   "err.nfs.insecureNotConfirmed":
-    "This connection transfers unencrypted. Please confirm in the dialog or choose \u201ckrb5p\u201d.",
+    "This connection transfers unencrypted. Please confirm in the dialog or choose “krb5p”.",
   "err.nfs.remoteNeedsKerberos":
     "Without Kerberos only servers on your own local network are allowed.",
   "err.nfs.hostnameNeedsKerberos":
     "Without Kerberos an IP address of a server on your own local network is required instead of a name.",
   "err.nfs.privilegedPort":
-    "The server requires a privileged port. DualBeam connects without administrator rights and cannot provide one. Set the export to \u201cinsecure\u201d on the server (Linux: in \u201c/etc/exports\u201d).",
+    "The server requires a privileged port. DualBeam connects without administrator rights and cannot provide one. Set the export to “insecure” on the server (Linux: in “/etc/exports”).",
   "err.nfs.versionUnavailable":
-    "The server does not offer the selected protocol version. Try another version or \u201cNegotiate automatically\u201d.",
+    "The server does not offer the selected protocol version. Try another version or “Negotiate automatically”.",
   "err.nfs.notExported":
     "The server rejected this Mac. Usually its IP address is missing from the export.",
   "err.nfs.authentication":
@@ -532,6 +532,11 @@ export const en: Record<string, string> = {
   "err.nfs.timeout": "The server did not answer in time.",
   "err.nfs.spawn": "Could not start the mount: {0}",
   "err.nfs.generic": "Mount failed: {0}",
+  "err.nfs.noAccessDetails":
+    "The connection works, but the server denies access to the contents. The shared folder belongs to user {0} and group {1} and carries permissions {2}; this Mac identifies itself as user {3}. Widen the folder permissions on the server, or add “all_squash,anonuid={0},anongid={1}” to its entry in “/etc/exports”.",
+  "err.nfs.noAccess":
+    "The connection works, but the server denies access to the contents of the share. Check the permissions of the shared folder on the server.",
+  "err.nfs.unreadable": "The share could not be read after connecting: {0}",
   "remote.title": "Connect network drive",
   "remote.description":
     "Connects to a server over SFTP or FTPS. The target then appears as an ordinary folder in the sidebar.",
@@ -573,7 +578,7 @@ export const en: Record<string, string> = {
   "err.remote.path": "Invalid path on the server.",
   "err.remote.port": "Invalid port.",
   "err.remote.shareMissing":
-    "Please enter the name of the share, for example \u201cData\u201d.",
+    "Please enter the name of the share, for example “Data”.",
   "err.remote.label": "Invalid display name.",
   "err.remote.noAppDir": "The app's working folder could not be created.",
   "err.remote.rcloneMissing":

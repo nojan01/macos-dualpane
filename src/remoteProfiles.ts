@@ -18,11 +18,61 @@ function idFor(spec: RemoteSpec) {
 
 /** Entspricht der stabilen Kennung, die das Rust-Backend für einen aktiven
  * rclone-Mount liefert. Sie ist unabhängig vom lokalen Mount-Namen, der sich
- * nach einem Neustart ändern kann. */
+ * nach einem Neustart ändern kann.
+ *
+ * Schema und Standardport müssen mit `RemoteProtocol::scheme` und
+ * `RemoteProtocol::default_port` im Rust-Modul übereinstimmen. Weicht auch nur
+ * eines davon ab, findet die Oberfläche ein bereits eingehängtes Laufwerk nicht
+ * wieder: Das Zahnrad bliebe wirkungslos und erneutes Verbinden legte einen
+ * zweiten Eintrag an, statt den bestehenden zu ersetzen. Die vollständige
+ * Zuordnung erzwingt, dass ein neues Protokoll hier nicht vergessen wird. */
+const SCHEME: Record<RemoteSpec["protocol"], string> = {
+  sftp: "sftp",
+  ftp: "ftp",
+  ftpsExplicit: "ftps",
+  ftpsImplicit: "ftps",
+  smb: "smb",
+};
+
+const DEFAULT_PORT: Record<RemoteSpec["protocol"], number> = {
+  sftp: 22,
+  ftp: 21,
+  ftpsExplicit: 21,
+  ftpsImplicit: 990,
+  smb: 445,
+};
+
 export function remoteDescriptor(spec: RemoteSpec): string {
-  const port = spec.port ?? (spec.protocol === "sftp" ? 22 : spec.protocol === "ftpsImplicit" ? 990 : 21);
-  const scheme = spec.protocol === "sftp" ? "sftp" : spec.protocol === "ftp" ? "ftp" : "ftps";
-  return `${scheme}://${spec.username}@${spec.host}:${port}`;
+  const port = spec.port ?? DEFAULT_PORT[spec.protocol];
+  return `${SCHEME[spec.protocol]}://${spec.username}@${spec.host}:${port}`;
+}
+
+/** Alle Protokolle, abgeleitet aus `SCHEME`. Weil TypeScript diese Zuordnung
+ * vollständig erzwingt, kann hier kein Protokoll fehlen. */
+const PROTOCOLS = Object.keys(SCHEME) as RemoteSpec["protocol"][];
+
+/** Kehrt `remoteDescriptor` um: gewinnt die Verbindungsdaten aus der Kennung
+ * eines eingehängten Laufwerks zurück, zu dem es kein Lesezeichen gibt.
+ *
+ * Bewusst aus `SCHEME` und `DEFAULT_PORT` abgeleitet statt mit einer eigenen
+ * Protokollliste geschrieben: Eine zweite Liste geriete beim Hinzufügen eines
+ * Protokolls unweigerlich aus dem Tritt, und der Einstellungsdialog bliebe für
+ * das neue Protokoll wirkungslos — ohne dass irgendetwas sich beschwert. */
+export function remoteFromDescriptor(descriptor: string):
+  | { protocol: RemoteSpec["protocol"]; username: string; host: string; port: number }
+  | undefined {
+  const found = /^([a-z]+):\/\/([^@]+)@(.+):(\d+)$/.exec(descriptor);
+  if (!found) return undefined;
+  const [, scheme, username, host, portText] = found;
+  const port = Number(portText);
+  const candidates = PROTOCOLS.filter((item) => SCHEME[item] === scheme);
+  if (candidates.length === 0) return undefined;
+  // „ftps“ steht für zwei Protokolle. Erst der Port trennt sie: 990 bedeutet
+  // implizites TLS, 21 explizites. Ohne diese Unterscheidung öffnete das
+  // Zahnrad an einem implizit gesicherten Laufwerk den Dialog mit dem falschen
+  // Verfahren, und erneutes Verbinden liefe auf den falschen Port.
+  const protocol = candidates.find((item) => DEFAULT_PORT[item] === port) ?? candidates[0];
+  return { protocol, username, host, port };
 }
 
 function load(): RemoteProfile[] {
@@ -33,8 +83,12 @@ function load(): RemoteProfile[] {
       if (!item || typeof item !== "object") return [];
       const p = item as Partial<RemoteProfile>;
       if (typeof p.host !== "string" || typeof p.username !== "string" || typeof p.protocol !== "string") return [];
-      if (!(["sftp", "ftp", "ftpsExplicit", "ftpsImplicit"] as string[]).includes(p.protocol)) return [];
-      const spec: RemoteSpec = { protocol: p.protocol as RemoteSpec["protocol"], host: p.host, username: p.username, port: p.port ?? null, path: p.path ?? "", label: p.label ?? "" };
+      // Bewusst aus `PROTOCOLS` geprüft statt gegen eine eigene Aufzählung:
+      // Fehlte in einer solchen Liste ein Protokoll, würde sein Lesezeichen
+      // zwar gespeichert, beim nächsten Start aber stillschweigend verworfen —
+      // das Laufwerk wäre einfach verschwunden. Genau so ging SMB verloren.
+      if (!(PROTOCOLS as string[]).includes(p.protocol)) return [];
+      const spec: RemoteSpec = { protocol: p.protocol as RemoteSpec["protocol"], host: p.host, username: p.username, port: p.port ?? null, path: p.path ?? "", label: p.label ?? "", domain: p.domain ?? "" };
       return [{ ...spec, id: idFor(spec) }];
     });
   } catch { return []; }
