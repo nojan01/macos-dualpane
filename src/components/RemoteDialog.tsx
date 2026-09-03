@@ -250,7 +250,7 @@ export function RemoteDialog() {
       await loadPane(
         state.active,
         mountPath,
-        spec.protocol === "sftp" ? { navigationRoot: mountPath } : {},
+        { navigationRoot: mountPath },
       );
     }
   };

@@ -1298,7 +1298,7 @@ fn navigation_root_blocking(path: String) -> Option<String> {
     if let Some(root) = remote::object_storage_mount_root(&path) {
         return Some(root.to_string_lossy().into_owned());
     }
-    if let Some(root) = remote::sftp_mount_root(&path) {
+    if let Some(root) = remote::remote_mount_root(&path) {
         return Some(root.to_string_lossy().into_owned());
     }
     mount_fs_types()
@@ -1683,11 +1683,16 @@ fn list_network_bookmarks_blocking() -> Result<Vec<NetworkBookmark>, String> {
     let fs = mount_fs_types();
     let mut out = Vec::new();
     for (name, url, mp) in known_network_bookmarks() {
-        let connected = fs.contains_key(&mp);
+        // macOS kann bei einem gleichnamigen Volume einen Suffix anhängen
+        // (z. B. „WebDAV 2“). Ein gespeicherter Mountpfad ist dann veraltet,
+        // obwohl das Laufwerk erfolgreich verbunden wurde. Der tatsächlich
+        // zur URL gehörende Mountpunkt ist für Status und Navigation maßgeblich.
+        let actual_mount = mounted_volume_for_url(&url);
+        let connected = actual_mount.is_some() || fs.contains_key(&mp);
         out.push(NetworkBookmark {
             name,
             url,
-            mount_path: mp,
+            mount_path: actual_mount.unwrap_or(mp),
             connected,
         });
     }
@@ -1831,6 +1836,15 @@ fn run_osascript_with_timeout(script: &str) -> Result<std::process::Output, Stri
 /// immer zu — bei Namenskonflikten hängt macOS eine Ziffer an. Deshalb wird das
 /// Ergebnis geprüft und im Zweifel nichts zurückgegeben.
 fn mounted_volume_for_url(url: &str) -> Option<String> {
+    let normalized = url.trim_end_matches('/');
+    // Die Mount-Tabelle ist verlässlicher als eine Namensableitung. Sie löst
+    // auch einen automatisch angehängten „ 2“-Suffix am macOS-Volume auf.
+    if let Some((path, _)) = mount_source_and_fstype().into_iter().find(|(_, (source, fstype))| {
+        fstype == "webdav"
+            && source.trim_end_matches('/').eq_ignore_ascii_case(normalized)
+    }) {
+        return Some(path);
+    }
     let pfad = format!("/Volumes/{}", volume_name_from_url(url)?);
     Path::new(&pfad).is_dir().then_some(pfad)
 }

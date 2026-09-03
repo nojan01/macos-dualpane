@@ -208,6 +208,18 @@ struct ActiveMount {
     /// flüchtig im Speicher, damit die App alle Dateioperationen unmittelbar
     /// gegen die Objekt-Speicher-API ausführen kann.
     object_profile: Option<ObjectStorageProfile>,
+    /// Das bereits verschleierte Kennwort dieses Mounts.
+    ///
+    /// Objekt-Speicher hält sein komplettes Profil im Speicher und kann
+    /// deshalb jederzeit unmittelbar mit dem Server sprechen. Für WebDAV, SMB
+    /// und FTP gilt hier dasselbe: Ohne diese Ablage müsste jeder
+    /// Verzeichniswechsel das Kennwort erneut aus dem Schlüsselbund holen –
+    /// und ginge leer aus, sobald dort keins hinterlegt ist, obwohl der
+    /// laufende Mount durchgehend damit arbeitet.
+    ///
+    /// Der Wert ist verschleiert, wie rclone ihn erwartet, und lebt nur so
+    /// lange wie der Mount.
+    obscured_password: Option<String>,
     /// Das kurzlebige SSH_ASKPASS-Hilfsprogramm eines SSHFS-Mounts. Es enthält
     /// kein Kennwort; dieses liegt ausschließlich in der Umgebung des SSHFS-
     /// Prozesses. Der Pfad wird beim Aushängen wieder entfernt.
@@ -860,6 +872,15 @@ pub(crate) fn is_mount_point(path: &Path) -> bool {
     }
 }
 
+/// Ein NFS-Mountpunkt kann bereits im Kernel erscheinen, obwohl rclone den
+/// ersten Verzeichniszugriff noch nicht bedienen kann. Die Oberfläche würde
+/// dann den frisch gemeldeten Mount öffnen, `read_dir` bekäme EIO und fiele
+/// auf das Home-Verzeichnis zurück. Erst ein erfolgreicher Root-Listing-Zugriff
+/// macht das Laufwerk für die Navigation wirklich bereit.
+fn is_mount_ready(path: &Path) -> bool {
+    is_mount_point(path) && std::fs::read_dir(path).is_ok()
+}
+
 pub(crate) fn unique_mount_dir(label: &str) -> Result<(PathBuf, String), String> {
     let root = mount_root()?;
     for attempt in 0..50 {
@@ -1107,7 +1128,7 @@ fn mount_blocking(
             .map_err(|_| "SFTP-Dateisystem konnte nicht gestartet werden".to_string())?;
         let deadline = Instant::now() + MOUNT_TIMEOUT;
         loop {
-            if is_mount_point(&mount_dir) {
+            if is_mount_ready(&mount_dir) {
                 break;
             }
             if let Ok(Some(_)) = child.try_wait() {
@@ -1136,6 +1157,7 @@ fn mount_blocking(
                 log: log_path,
                 remote_spec: Some(spec),
                 object_profile: None,
+                obscured_password: None,
                 sshfs_askpass: Some(askpass),
             });
         }
@@ -1175,7 +1197,7 @@ fn mount_blocking(
 
     let deadline = Instant::now() + MOUNT_TIMEOUT;
     loop {
-        if is_mount_point(&mount_dir) {
+        if is_mount_ready(&mount_dir) {
             break;
         }
         // Beendet sich rclone vorher, ist die Ursache im Protokoll zu finden.
@@ -1204,6 +1226,7 @@ fn mount_blocking(
             log: log_path,
             remote_spec: Some(spec.clone()),
             object_profile: None,
+            obscured_password: Some(obscured.clone()),
             sshfs_askpass: None,
         });
     }
@@ -1269,6 +1292,7 @@ pub fn mount_object_storage(
             log: log_path,
             remote_spec: None,
             object_profile: Some(profile.clone()),
+            obscured_password: None,
             sshfs_askpass: None,
         });
     }
@@ -2018,6 +2042,9 @@ pub fn copy_sftp_storage(
 pub struct RcloneTransferContext {
     pub mount_path: PathBuf,
     pub spec: RemoteSpec,
+    /// Das beim Einhängen abgelegte, verschleierte Kennwort. Ist es vorhanden,
+    /// braucht kein Folgeaufruf den Schlüsselbund.
+    pub obscured_password: Option<String>,
 }
 
 /// Findet den passenden rclone-Mount zu einem Pfad. Auch ein noch nicht
@@ -2065,6 +2092,7 @@ pub fn rclone_transfer_context(path: &Path) -> Option<RcloneTransferContext> {
                 .then_some(RcloneTransferContext {
                     mount_path: entry.path.clone(),
                     spec: spec.clone(),
+                    obscured_password: entry.obscured_password.clone(),
                 })
         })
         // Bei verschachtelten Mounts gewinnt der spezifischste.
@@ -2166,9 +2194,17 @@ pub fn copy_rclone_storage(
         .map(|meta| meta.is_dir() && !meta.file_type().is_symlink())
         .unwrap_or(false);
 
-    let password = remote_password(spec)?.ok_or_else(|| "err.remote.emptyPassword".to_string())?;
+    // Wie beim Lesen: Das beim Einhängen abgelegte Kennwort hat Vorrang, damit
+    // ein fehlender Schlüsselbund-Eintrag die Übertragung nicht verhindert.
+    let password = match context.obscured_password.as_deref() {
+        Some(value) if !value.is_empty() => String::new(),
+        _ => remote_password(spec)?.ok_or_else(|| "err.remote.emptyPassword".to_string())?,
+    };
     let rclone = rclone_executable()?;
-    let obscured = obscure(&rclone, &password)?;
+    let obscured = match context.obscured_password.as_deref() {
+        Some(value) if !value.is_empty() => value.to_string(),
+        _ => obscure(&rclone, &password)?,
+    };
     let (from, to) = if source_is_remote {
         (remote_path, local_side.to_string_lossy().into_owned())
     } else {
@@ -2291,10 +2327,24 @@ fn log_direct_listing_fallback(art: &str, path: &Path, reason: &str) {
 ///
 /// Gegenstück zu `direct_object_storage_command`, nur für die Laufwerke mit
 /// [`RemoteSpec`] statt einem Objekt-Speicher-Profil.
-fn direct_rclone_command(spec: &RemoteSpec, args: &[String]) -> Result<std::process::Output, String> {
-    let password = remote_password(spec)?.ok_or_else(|| "err.remote.emptyPassword".to_string())?;
+fn direct_rclone_command(
+    spec: &RemoteSpec,
+    obscured_password: Option<&str>,
+    args: &[String],
+) -> Result<std::process::Output, String> {
     let rclone = rclone_executable()?;
-    let obscured = obscure(&rclone, &password)?;
+    // Bevorzugt das beim Einhängen abgelegte Kennwort. Der Schlüsselbund ist
+    // nur der Notnagel: Wer beim Verbinden „nicht speichern" gewählt hat, hat
+    // dort keinen Eintrag – der Mount läuft trotzdem, weil rclone das Kennwort
+    // beim Start bekam. Ohne diese Ablage wäre jeder Folgeaufruf wertlos.
+    let obscured = match obscured_password {
+        Some(value) if !value.is_empty() => value.to_string(),
+        _ => {
+            let password =
+                remote_password(spec)?.ok_or_else(|| "err.remote.emptyPassword".to_string())?;
+            obscure(&rclone, &password)?
+        }
+    };
     let mut command = Command::new(&rclone);
     command.args(args).stdin(Stdio::null());
     for (key, value) in rclone_env(spec, &obscured, None) {
@@ -2323,6 +2373,7 @@ pub fn list_rclone_dir(path: &Path) -> Option<Result<Vec<ObjectStorageEntry>, St
         let real_path = canonicalize_with_missing_suffix(path);
         let output = direct_rclone_command(
             &context.spec,
+            context.obscured_password.as_deref(),
             &[
                 "lsjson".to_string(),
                 "--no-mimetype".to_string(),
@@ -2336,7 +2387,10 @@ pub fn list_rclone_dir(path: &Path) -> Option<Result<Vec<ObjectStorageEntry>, St
             ],
         )?;
         if !output.status.success() {
-            let password = remote_password(&context.spec)?.unwrap_or_default();
+            let password = remote_password(&context.spec)
+                .ok()
+                .flatten()
+                .unwrap_or_default();
             return Err(sftp_client_error(&output.stderr, &password));
         }
         let entries: Vec<RcloneListEntry> = serde_json::from_slice(&output.stdout)
@@ -2378,6 +2432,7 @@ pub fn list_rclone_tree(path: &Path) -> Option<Result<Vec<ObjectStorageEntry>, S
         let real_path = canonicalize_with_missing_suffix(path);
         let output = direct_rclone_command(
             &context.spec,
+            context.obscured_password.as_deref(),
             &[
                 "lsjson".to_string(),
                 "--recursive".to_string(),
@@ -2392,7 +2447,10 @@ pub fn list_rclone_tree(path: &Path) -> Option<Result<Vec<ObjectStorageEntry>, S
             ],
         )?;
         if !output.status.success() {
-            let password = remote_password(&context.spec)?.unwrap_or_default();
+            let password = remote_password(&context.spec)
+                .ok()
+                .flatten()
+                .unwrap_or_default();
             return Err(sftp_client_error(&output.stderr, &password));
         }
         let entries: Vec<RcloneListEntry> = serde_json::from_slice(&output.stdout)
@@ -3199,6 +3257,21 @@ fn sftp_mount_context(path: &Path) -> Option<SftpMountContext> {
 /// niemals per „Nach oben“ erreichbar sein.
 pub fn sftp_mount_root(path: &Path) -> Option<PathBuf> {
     sftp_mount_context(path).map(|context| context.mount_path)
+}
+
+/// Sichtbare Wurzel eines von DualBeam über SSHFS oder rclone eingehängten
+/// Netzlaufwerks. Alle diese Mounts liegen technisch im App-Support-Ordner;
+/// dessen Eltern sind keine sinnvolle Navigationsebene für den Benutzer.
+pub fn remote_mount_root(path: &Path) -> Option<PathBuf> {
+    let real_path = canonicalize_with_missing_suffix(path);
+    let list = registry().lock().ok()?;
+    list.iter()
+        .filter(|entry| entry.remote_spec.is_some())
+        .filter_map(|entry| {
+            let mount = canonicalize_with_missing_suffix(&entry.path);
+            real_path.starts_with(&mount).then(|| entry.path.clone())
+        })
+        .max_by_key(|mount| mount.as_os_str().len())
 }
 
 fn sftp_batch_arg(value: &str) -> Result<String, String> {
@@ -4588,6 +4661,7 @@ pub(crate) fn register_plain_mount(path: PathBuf, label: String, descriptor: Str
             log: PathBuf::new(),
             remote_spec: None,
             object_profile: None,
+            obscured_password: None,
             sshfs_askpass: None,
         });
     }

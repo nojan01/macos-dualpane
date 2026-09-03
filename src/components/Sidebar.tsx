@@ -249,7 +249,7 @@ export function Sidebar() {
       await loadPane(
         state.active,
         activeMount.path,
-        profile.protocol === "sftp" ? { navigationRoot: activeMount.path } : {},
+        { navigationRoot: activeMount.path },
       );
       return;
     }
@@ -275,7 +275,7 @@ export function Sidebar() {
       await loadPane(
         state.active,
         mountPath,
-        profile.protocol === "sftp" ? { navigationRoot: mountPath } : {},
+        { navigationRoot: mountPath },
       );
     } catch (error) {
       // Der Dialog bleibt der sichere Ausweichweg, z. B. für einen geänderten
@@ -444,10 +444,11 @@ export function Sidebar() {
     if (mounting()) return;
     setMounting(b.url);
     try {
-      await mountNetworkUrl(b.url);
+      const mountedPath = await mountNetworkUrl(b.url);
       await refreshVols();
       const fresh = bookmarks().find((x) => x.url === b.url);
-      if (fresh?.connected) go(fresh.mountPath);
+      const target = mountedPath || (fresh?.connected ? fresh.mountPath : "");
+      if (target) go(target);
     } catch (err) {
       await askConfirm({
         title: t("sidebar.mountFailed"),
@@ -528,10 +529,11 @@ export function Sidebar() {
       } catch {
         /* nicht gemountet oder bereits ausgehängt – weiter mit mount */
       }
-      await mountNetworkUrl(b.url);
+      const mountedPath = await mountNetworkUrl(b.url);
       await refreshVols();
       const fresh = bookmarks().find((x) => x.url === b.url);
-      if (fresh?.connected) go(fresh.mountPath);
+      const target = mountedPath || (fresh?.connected ? fresh.mountPath : "");
+      if (target) go(target);
     } catch (err) {
       await askConfirm({
         title: t("sidebar.mountFailed"),
