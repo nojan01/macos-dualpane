@@ -955,6 +955,16 @@ fn verify_rclone_connection(
     }
 }
 
+/// SMB-Server unterscheiden sich darin, welche Metadaten sie vor dem ersten
+/// eigentlichen Mount preisgeben. Manche NAS-/Samba-Versionen lehnen `lsf`
+/// mit einem unspezifischen Fehler ab, obwohl derselbe Zugang im NFS-Mount
+/// danach sofort funktioniert. Authentifizierungs-, Erreichbarkeits- und
+/// Zeitlimitfehler bleiben dagegen verbindlich: Sie würden einen Mount nur
+/// warten lassen und müssen weiterhin sofort an die Oberfläche gehen.
+fn may_continue_after_verification_error(protocol: RemoteProtocol, error: &str) -> bool {
+    protocol == RemoteProtocol::Smb && error == "err.remote.mountFailed"
+}
+
 pub(crate) fn unique_mount_dir(label: &str) -> Result<(PathBuf, String), String> {
     let root = mount_root()?;
     for attempt in 0..50 {
@@ -1246,8 +1256,10 @@ fn mount_blocking(
         &obscured,
         known_hosts.as_deref(),
     ) {
-        let _ = std::fs::remove_dir(&mount_dir);
-        return Err(error);
+        if !may_continue_after_verification_error(spec.protocol, &error) {
+            let _ = std::fs::remove_dir(&mount_dir);
+            return Err(error);
+        }
     }
     let rc_socket = rc_socket_path()?;
     let _ = std::fs::remove_file(&rc_socket);
@@ -5362,6 +5374,26 @@ mod tests {
         ] {
             assert_eq!(rclone_failure_message(message), "err.remote.auth", "{message}");
         }
+    }
+
+    #[test]
+    fn smb_allows_only_unspecific_preflight_failures_to_reach_the_mount() {
+        assert!(may_continue_after_verification_error(
+            RemoteProtocol::Smb,
+            "err.remote.mountFailed"
+        ));
+        assert!(!may_continue_after_verification_error(
+            RemoteProtocol::Smb,
+            "err.remote.auth"
+        ));
+        assert!(!may_continue_after_verification_error(
+            RemoteProtocol::Smb,
+            "err.remote.unreachable"
+        ));
+        assert!(!may_continue_after_verification_error(
+            RemoteProtocol::Webdav,
+            "err.remote.mountFailed"
+        ));
     }
 
     #[test]
