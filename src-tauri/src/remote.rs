@@ -2249,6 +2249,7 @@ pub fn purge_remote_storage(
         // erfolgreich gelöschten Objekte live in der Statusleiste zu zählen.
         // FTP und FTPS behalten bytegenau ihren bisherigen Prozessaufruf.
         let report_progress = spec.protocol == RemoteProtocol::Sftp && progress.is_some();
+        let environment = rclone_env(spec, &obscured, known_hosts.as_deref());
         let mut command = Command::new(&rclone);
         command
             .arg(if is_dir { "purge" } else { "deletefile" })
@@ -2262,45 +2263,44 @@ pub fn purge_remote_storage(
                 "--retries",
                 "3",
             ])
-            .arg(target)
+            .arg(&target)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(if report_progress {
-                Stdio::piped()
-            } else {
-                Stdio::null()
-            });
+            // Die Fehlerausgabe wird bei jedem Protokoll mitgelesen. Wurde sie
+            // verworfen, blieb im Fehlerfall nur eine pauschale Sammelmeldung
+            // uebrig, die den eigentlichen Grund verschwieg.
+            .stderr(Stdio::piped());
         if report_progress {
             command.arg("-v");
         }
-        for (key, value) in rclone_env(spec, &obscured, known_hosts.as_deref()) {
+        for (key, value) in &environment {
             command.env(key, value);
         }
         let mut child = command
             .spawn()
             .map_err(|_| "err.remote.mountFailed".to_string())?;
         let (log_tx, log_rx) = mpsc::channel::<String>();
-        let log_reader = if report_progress {
-            let stderr = child
-                .stderr
-                .take()
-                .ok_or_else(|| "err.remote.mountFailed".to_string())?;
-            Some(std::thread::spawn(move || {
-                for line in BufReader::new(stderr).lines() {
-                    let Ok(line) = line else { break };
-                    let _ = log_tx.send(line);
-                }
-            }))
-        } else {
-            None
-        };
+        let stderr = child
+            .stderr
+            .take()
+            .ok_or_else(|| "err.remote.mountFailed".to_string())?;
+        let log_reader = Some(std::thread::spawn(move || {
+            for line in BufReader::new(stderr).lines() {
+                let Ok(line) = line else { break };
+                let _ = log_tx.send(line);
+            }
+        }));
+        let mut captured: Vec<String> = Vec::new();
         loop {
             while let Ok(line) = log_rx.try_recv() {
-                if let Some(path) = rclone_deleted_path(&line) {
-                    if let Some(callback) = progress.as_deref_mut() {
-                        callback(path);
+                if report_progress {
+                    if let Some(path) = rclone_deleted_path(&line) {
+                        if let Some(callback) = progress.as_deref_mut() {
+                            callback(path);
+                        }
                     }
                 }
+                captured.push(line);
             }
             match child.try_wait() {
                 Ok(Some(status)) if status.success() => {
@@ -2313,15 +2313,36 @@ pub fn purge_remote_storage(
                     // Der Reader kann unmittelbar vor Prozessende noch
                     // Meldungen in die Queue geschrieben haben.
                     while let Ok(line) = log_rx.try_recv() {
-                        if let Some(path) = rclone_deleted_path(&line) {
-                            if let Some(callback) = progress.as_deref_mut() {
-                                callback(path);
+                        if report_progress {
+                            if let Some(path) = rclone_deleted_path(&line) {
+                                if let Some(callback) = progress.as_deref_mut() {
+                                    callback(path);
+                                }
                             }
                         }
+                        captured.push(line);
                     }
                     break;
                 }
-                Ok(Some(_)) => return Err("err.remote.mountFailed".into()),
+                Ok(Some(_)) => {
+                    if let Some(reader) = log_reader {
+                        let _ = reader.join();
+                    }
+                    while let Ok(line) = log_rx.try_recv() {
+                        captured.push(line);
+                    }
+                    // rclone endet auch dann mit einem Fehlercode, wenn das
+                    // Objekt bereits entfernt wurde und erst ein nachgelagerter
+                    // Schritt scheitert. Der Benutzer sah deshalb eine
+                    // Fehlermeldung fuer eine erfolgreiche Loeschung. Ueber den
+                    // Ausgang entscheidet nun der tatsaechliche Zustand auf dem
+                    // Server, nicht der Exitcode allein.
+                    if remote_target_gone(&rclone, &target, &environment) {
+                        on_removed(&path);
+                        break;
+                    }
+                    return Err(rclone_failure_message(&captured.join("\n")));
+                }
                 Ok(None) if cancel.load(std::sync::atomic::Ordering::SeqCst) => {
                     let _ = child.kill();
                     let _ = child.wait();
@@ -2336,6 +2357,48 @@ pub fn purge_remote_storage(
         }
     }
     Ok(())
+}
+
+/// Fragt nach, ob ein Objekt auf dem Server noch vorhanden ist. `lsjson --stat`
+/// liest ausschliesslich Metadaten und veraendert nichts. Nur eine eindeutige
+/// Fehlanzeige des Servers gilt als Beleg fuer eine erfolgte Loeschung; ein
+/// Verbindungsfehler darf niemals als Erfolg durchgehen.
+fn remote_target_gone(rclone: &Path, target: &str, environment: &[(String, String)]) -> bool {
+    let mut command = Command::new(rclone);
+    command
+        .args([
+            "lsjson",
+            "--stat",
+            "--contimeout",
+            "15s",
+            "--timeout",
+            "30s",
+            "--retries",
+            "1",
+        ])
+        .arg(target)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped());
+    for (key, value) in environment {
+        command.env(key, value);
+    }
+    let Ok(output) = command.output() else {
+        return false;
+    };
+    if output.status.success() {
+        return false;
+    }
+    stderr_reports_missing(&String::from_utf8_lossy(&output.stderr))
+}
+
+/// Nur eine ausdrueckliche Fehlanzeige des Servers belegt, dass ein Objekt
+/// entfernt wurde. Jede andere Fehlerursache - etwa eine unterbrochene
+/// Verbindung - muss als Fehlschlag gelten, damit nie eine ausgebliebene
+/// Loeschung als Erfolg gemeldet wird.
+fn stderr_reports_missing(text: &str) -> bool {
+    let lower = text.to_lowercase();
+    lower.contains("not found") || lower.contains("no such file") || lower.contains("does not exist")
 }
 
 /// Meldungen des rclone-Verbose-Logs haben die Form
@@ -4098,26 +4161,74 @@ pub fn unmount_all() {
     }
 }
 
+/// Liest die Einhängetabelle des Kerns. `getfsstat` mit `MNT_NOWAIT` liefert
+/// ausschliesslich den bereits zwischengespeicherten Zustand und fragt die
+/// Dateisysteme selbst nicht an. Der Aufruf kann deshalb auch dann nicht
+/// blockieren, wenn eine Einhaengung ihren Server verloren hat.
+#[cfg(target_os = "macos")]
+fn kernel_mount_points() -> std::collections::HashSet<PathBuf> {
+    use std::os::unix::ffi::OsStrExt;
+    let mut points = std::collections::HashSet::new();
+    unsafe {
+        let count = libc::getfsstat(std::ptr::null_mut(), 0, libc::MNT_NOWAIT);
+        if count <= 0 {
+            return points;
+        }
+        let mut buffer: Vec<libc::statfs> = Vec::with_capacity(count as usize);
+        let size = std::mem::size_of::<libc::statfs>() * count as usize;
+        let written = libc::getfsstat(buffer.as_mut_ptr(), size as libc::c_int, libc::MNT_NOWAIT);
+        if written <= 0 {
+            return points;
+        }
+        buffer.set_len(written as usize);
+        for entry in &buffer {
+            let raw = std::ffi::CStr::from_ptr(entry.f_mntonname.as_ptr());
+            points.insert(PathBuf::from(std::ffi::OsStr::from_bytes(raw.to_bytes())));
+        }
+    }
+    points
+}
+
+#[cfg(not(target_os = "macos"))]
+fn kernel_mount_points() -> std::collections::HashSet<PathBuf> {
+    std::collections::HashSet::new()
+}
+
 /// Räumt Reste eines abgestürzten früheren Laufs weg: Ordner, die niemand mehr
 /// eingehängt hat, und liegengebliebene Protokolle.
 pub fn cleanup_stale() {
     let Ok(root) = mount_root() else {
         return;
     };
+    // Beim Start darf kein Zugriff auf einen unbekannten Ordner erfolgen. Blieb
+    // aus einem abgestuerzten Lauf eine verwaiste Einhaengung zurueck, blockiert
+    // schon ein einzelnes `stat()` endlos; die Anwendung liefe dann zwar als
+    // Prozess weiter, zeigte aber nie ein Fenster. Die Einhaengetabelle des
+    // Kerns beantwortet dieselbe Frage, ohne die Dateisysteme anzufassen.
+    let mounted = kernel_mount_points();
     if let Ok(entries) = std::fs::read_dir(&root) {
         for entry in entries.flatten() {
+            // `file_type()` stammt aus dem Verzeichniseintrag selbst und loest
+            // deshalb - anders als `is_dir()` - keinen Zugriff auf das Ziel aus.
+            if !entry
+                .file_type()
+                .map(|kind| kind.is_dir())
+                .unwrap_or(false)
+            {
+                continue;
+            }
             let path = entry.path();
             // Ältere DualBeam-Versionen haben S3/Swift noch per NFS
             // eingehängt. Beim ersten Start der direkten Variante gehören
             // diese Mounts sicher zu unserem eigenen Ordner und werden
             // kontrolliert gelöst, bevor der leere Kennungsordner entfernt
             // wird.
-            if path.is_dir() && is_mount_point(&path) {
+            if mounted.contains(&path) {
                 let _ = unmount_path(&path);
             }
-            if path.is_dir() && !is_mount_point(&path) {
-                let _ = std::fs::remove_dir(&path);
-            }
+            // Schlägt das Lösen fehl, bleibt der Ordner ein Einhängepunkt und
+            // `remove_dir` scheitert folgenlos.
+            let _ = std::fs::remove_dir(&path);
         }
     }
     let Ok(dir) = app_dir() else {
@@ -4137,6 +4248,30 @@ pub fn cleanup_stale() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Die Einhaengetabelle des Kerns muss ohne Zugriff auf die Dateisysteme
+    /// lesbar sein. Enthaelt sie die Wurzel, wurde sie tatsaechlich gelesen.
+    #[test]
+    fn kernel_mount_table_is_readable() {
+        let points = kernel_mount_points();
+        assert!(
+            points.contains(&PathBuf::from("/")),
+            "Einhaengetabelle ohne Wurzel: {points:?}"
+        );
+    }
+
+    /// Ein Verbindungsfehler darf niemals als vollzogene Loeschung gelten.
+    #[test]
+    fn only_a_missing_object_counts_as_removed() {
+        assert!(stderr_reports_missing("ERROR : file.zip: object not found"));
+        assert!(stderr_reports_missing("directory not found"));
+        assert!(stderr_reports_missing("No such file or directory"));
+        assert!(!stderr_reports_missing(
+            "Failed to lsjson: couldn't connect: i/o timeout"
+        ));
+        assert!(!stderr_reports_missing("401 Unauthorized"));
+        assert!(!stderr_reports_missing(""));
+    }
 
     #[test]
     fn hosts_are_checked() {

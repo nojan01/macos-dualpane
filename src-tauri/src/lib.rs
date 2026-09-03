@@ -7114,6 +7114,13 @@ fn set_menu_language(app: tauri::AppHandle, lang: String) -> Result<(), String> 
 // aber weiter mit dem alten Stand im Speicher.
 #[tauri::command]
 fn restart_application(app: tauri::AppHandle) {
+    // `AppHandle::restart()` ruft nur `cleanup_before_exit()` auf. Das raeumt
+    // Tray-Symbole und Ressourcentabellen ab, loest aber kein `RunEvent::Exit`.
+    // Das Aushaengen der Netzlaufwerke haengt jedoch genau daran und bliebe
+    // beim Neustart aus: Die Einhaengungen verloeren ihren Elternprozess, und
+    // der frisch gestartete Programmstand stolperte anschliessend beim
+    // Aufraeumen ueber eine verwaiste Einhaengung. Deshalb geschieht es hier.
+    unmount_all_network_volumes();
     app.restart();
 }
 
