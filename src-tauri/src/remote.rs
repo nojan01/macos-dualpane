@@ -2011,10 +2011,274 @@ pub fn copy_sftp_storage(
     }
 }
 
+/// Ordnet einen lokalen Pfad einem aktiven rclone-Mount zu (WebDAV, SMB, FTP,
+/// FTPS). SFTP bleibt bewusst ausgenommen: Dort überträgt bereits der native
+/// OpenSSH-Weg. Objekt-Speicher haben ihren eigenen direkten Zugang.
+#[derive(Clone)]
+pub struct RcloneTransferContext {
+    pub mount_path: PathBuf,
+    pub spec: RemoteSpec,
+}
+
+/// Findet den passenden rclone-Mount zu einem Pfad. Auch ein noch nicht
+/// angelegtes Ziel bleibt eindeutig zuordenbar, weil der Pfad ohne
+/// Existenzprüfung normalisiert wird.
+/// Entscheidet, ob ein eingehängtes Laufwerk über den direkten rclone-Weg
+/// bedient werden darf.
+///
+/// Ausgenommen bleiben zwei Gruppen, die längst einen eigenen, erprobten Weg
+/// zum Server haben und hier nicht angetastet werden:
+///
+/// * **Objekt-Speicher** (S3, Openstack Swift) – geht über
+///   [`copy_object_storage`].
+/// * **SFTP** – geht über [`upload_to_sftp_mount`] mit dem OpenSSH-Client.
+///
+/// Übrig bleiben WebDAV, SMB und FTP: genau die Laufwerke, die bisher über den
+/// zwischengespeicherten Mount liefen.
+fn is_rclone_transfer_candidate(
+    object_profile: Option<&ObjectStorageProfile>,
+    remote_spec: Option<&RemoteSpec>,
+) -> bool {
+    object_profile.is_none()
+        && remote_spec.is_some_and(|spec| spec.protocol != RemoteProtocol::Sftp)
+}
+
+pub fn rclone_transfer_context(path: &Path) -> Option<RcloneTransferContext> {
+    let list = registry().lock().ok()?;
+    // Ohne ein passendes Laufwerk ist der Pfadabgleich zwecklos.
+    if !list.iter().any(|entry| {
+        is_rclone_transfer_candidate(entry.object_profile.as_ref(), entry.remote_spec.as_ref())
+    }) {
+        return None;
+    }
+    let real_path = canonicalize_with_missing_suffix(path);
+    list.iter()
+        .filter_map(|entry| {
+            let spec = entry.remote_spec.as_ref()?;
+            is_rclone_transfer_candidate(entry.object_profile.as_ref(), Some(spec))
+                .then_some((entry, spec))
+        })
+        .filter_map(|(entry, spec)| {
+            let mount = canonicalize_with_missing_suffix(&entry.path);
+            real_path
+                .starts_with(&mount)
+                .then_some(RcloneTransferContext {
+                    mount_path: entry.path.clone(),
+                    spec: spec.clone(),
+                })
+        })
+        // Bei verschachtelten Mounts gewinnt der spezifischste.
+        .max_by_key(|context| context.mount_path.as_os_str().len())
+}
+
+/// Baut aus einem lokalen Mount-Pfad das rclone-Ziel, zum Beispiel
+/// `DUALBEAM:ordner/datei.txt`. Ein Pfad außerhalb des Mounts wird abgelehnt.
+fn rclone_transfer_target(
+    path: &Path,
+    mount_path: &Path,
+    spec: &RemoteSpec,
+) -> Result<String, String> {
+    let real_path = canonicalize_with_missing_suffix(path);
+    let real_mount = canonicalize_with_missing_suffix(mount_path);
+    let relative = real_path
+        .strip_prefix(&real_mount)
+        .map_err(|_| "Ungültiger Netzlaufwerkspfad".to_string())?;
+    let mut parts = Vec::new();
+    for component in relative.components() {
+        match component {
+            std::path::Component::Normal(part) => parts.push(
+                part.to_str()
+                    .ok_or_else(|| "Ungültiger Netzlaufwerkspfad".to_string())?,
+            ),
+            std::path::Component::CurDir => {}
+            _ => return Err("Ungültiger Netzlaufwerkspfad".into()),
+        }
+    }
+    let base = remote_argument(spec);
+    if parts.is_empty() {
+        return Ok(base);
+    }
+    Ok(format!(
+        "{}/{}",
+        base.trim_end_matches('/'),
+        parts.join("/")
+    ))
+}
+
+/// Überträgt zwischen einem rclone-Laufwerk und der lokalen Platte, ohne den
+/// eingehängten Pfad zu benutzen.
+///
+/// Der eingehängte NFS-Pfad führt einen Zwischenspeicher mit
+/// `--dir-cache-time`. Wer darüber schreibt oder liest, sieht deshalb je nach
+/// Zeitpunkt einen veralteten Stand: Eine eben geschriebene Datei fehlt noch im
+/// Verzeichnis, eine direkt gelöschte erscheint weiterhin. Genau daraus
+/// entstanden die sprunghaften Fehler („manchmal geht es, manchmal nicht").
+/// rclone spricht hier stattdessen unmittelbar mit dem Server – derselbe
+/// Grundsatz, nach dem SFTP und Objekt-Speicher bereits arbeiten.
+#[allow(clippy::too_many_arguments)]
+pub fn copy_rclone_storage(
+    context: &RcloneTransferContext,
+    source_is_remote: bool,
+    source: &Path,
+    destination: &Path,
+    force_overwrite: bool,
+    cancel: &std::sync::atomic::AtomicBool,
+    progress: &mut dyn FnMut(SftpCopyProgress),
+) -> Result<(), String> {
+    let spec = &context.spec;
+    if spec.protocol == RemoteProtocol::Sftp {
+        return Err("err.remote.notOurs".into());
+    }
+    // Ein aktiver Mount ist der Beleg, dass etwa unsicheres FTP zuvor bewusst
+    // bestätigt wurde. Ein Profil allein darf keinen direkten Netzaufruf lösen.
+    validate(spec, true)?;
+    if cancel.load(std::sync::atomic::Ordering::SeqCst) {
+        return Ok(());
+    }
+    // Der Mount wird erneut gegen die aktive Registrierung geprüft. Damit kann
+    // ein von außen gelieferter Pfad keinen fremden Zugang ansprechen.
+    let expected = spec.descriptor();
+    let real_mount = std::fs::canonicalize(&context.mount_path)
+        .unwrap_or_else(|_| context.mount_path.clone());
+    let verified = registry()
+        .lock()
+        .ok()
+        .map(|list| {
+            list.iter().any(|entry| {
+                let entry_mount =
+                    std::fs::canonicalize(&entry.path).unwrap_or_else(|_| entry.path.clone());
+                entry_mount == real_mount && entry.descriptor == expected
+            })
+        })
+        .unwrap_or(false);
+    if !verified {
+        return Err("err.remote.notOurs".into());
+    }
+
+    let remote_side = if source_is_remote { source } else { destination };
+    let remote_path = rclone_transfer_target(remote_side, &context.mount_path, spec)?;
+    let local_side = if source_is_remote { destination } else { source };
+
+    // Die Art des Quellobjekts entscheidet über `copy` (Ordner) oder `copyto`
+    // (Einzeldatei). Bei einer entfernten Quelle liefert der Mount die Auskunft
+    // zuverlässig, weil Lesen aus dem Zwischenspeicher unkritisch ist.
+    let source_is_dir = std::fs::symlink_metadata(source)
+        .map(|meta| meta.is_dir() && !meta.file_type().is_symlink())
+        .unwrap_or(false);
+
+    let password = remote_password(spec)?.ok_or_else(|| "err.remote.emptyPassword".to_string())?;
+    let rclone = rclone_executable()?;
+    let obscured = obscure(&rclone, &password)?;
+    let (from, to) = if source_is_remote {
+        (remote_path, local_side.to_string_lossy().into_owned())
+    } else {
+        (local_side.to_string_lossy().into_owned(), remote_path)
+    };
+
+    let mut command = Command::new(&rclone);
+    command
+        .arg(if source_is_dir { "copy" } else { "copyto" })
+        .args([
+            "--transfers",
+            "4",
+            "--checkers",
+            "1",
+            "--contimeout",
+            "15s",
+            "--timeout",
+            "2m",
+            "--retries",
+            "3",
+            // Mehrere Aktionen kurz hintereinander lassen Anbieter wie pCloud
+            // drosseln. Mit Wartezeit zwischen den Versuchen läuft der Vorgang
+            // durch, statt mit einem Verbindungsfehler abzubrechen.
+            "--retries-sleep",
+            "3s",
+            "--low-level-retries",
+            "10",
+            "--no-update-dir-modtime",
+            // Etwa zweimal je Sekunde eine einzeilige Statistik: So bleibt die
+            // Fortschrittsanzeige auch bei einer großen Einzeldatei aktiv.
+            "--stats",
+            "500ms",
+            "--stats-one-line",
+            "--stats-log-level",
+            "NOTICE",
+        ])
+        .arg(&from)
+        .arg(&to)
+        // INFO-Zeilen enthalten je bestätigter Datei „Copied (…)". Damit zählt
+        // die Oberfläche schon während eines großen Ordners mit.
+        .arg("-v")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped());
+    // Eine bewusste Kopie darf bei bestehendem Ziel nicht wegen gleicher
+    // Zeitstempel ausgelassen werden.
+    if force_overwrite {
+        command.arg("--ignore-times");
+    }
+    for (key, value) in rclone_env(spec, &obscured, None) {
+        command.env(key, value);
+    }
+
+    let mut child = command
+        .spawn()
+        .map_err(|_| "Übertragung konnte nicht gestartet werden".to_string())?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| "Übertragung konnte nicht gestartet werden".to_string())?;
+    let (log_tx, log_rx) = mpsc::channel::<String>();
+    let log_reader = std::thread::spawn(move || {
+        let mut collected = Vec::new();
+        for line in BufReader::new(stderr).lines() {
+            let Ok(line) = line else { break };
+            let _ = log_tx.send(line.clone());
+            collected.push(line);
+        }
+        collected.join("\n")
+    });
+    let mut last_percent = 0_u8;
+    progress(SftpCopyProgress::Percent(0));
+    loop {
+        while let Ok(line) = log_rx.try_recv() {
+            report_sftp_copy_log_line(progress, &mut last_percent, &line);
+        }
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                let stderr = log_reader.join().unwrap_or_default();
+                while let Ok(line) = log_rx.try_recv() {
+                    report_sftp_copy_log_line(progress, &mut last_percent, &line);
+                }
+                if status.success() {
+                    progress(SftpCopyProgress::Percent(100));
+                    // Der Mount zeigt sonst bis zum Ablauf von `dir-cache-time`
+                    // den alten Stand. Ohne dieses Verwerfen wäre eine eben
+                    // übertragene Datei im Fenster noch nicht zu sehen.
+                    if !source_is_remote {
+                        let touched = [destination.to_path_buf()];
+                        refresh_mount_after_direct_delete(&context.mount_path, &touched);
+                    }
+                    return Ok(());
+                }
+                return Err(sftp_client_error(stderr.as_bytes(), &password));
+            }
+            Ok(None) if cancel.load(std::sync::atomic::Ordering::SeqCst) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = log_reader.join();
+                return Ok(());
+            }
+            Ok(None) => std::thread::sleep(Duration::from_millis(50)),
+            Err(_) => return Err("Übertragung fehlgeschlagen".into()),
+        }
+    }
+}
+
 /// Extrahiert die Prozentzahl aus rclone `--stats-one-line`, zum Beispiel
 /// `12.3 MiB / 45.6 MiB, 27%, 1.0 MiB/s`. Fehlermeldungen haben kein solches
 /// Suffix und werden bewusst ignoriert.
-#[cfg(test)]
 fn rclone_progress_percent(line: &str) -> Option<u8> {
     let prefix = line.rsplit_once('%')?.0;
     let start = prefix
@@ -2028,7 +2292,6 @@ fn rclone_progress_percent(line: &str) -> Option<u8> {
 /// `rclone -v` meldet eine bestätigte Datei als
 /// `INFO : relativer/pfad: Copied (new)`. Die genaue Klammerbemerkung ist
 /// backendabhängig, der stabile Teil ist `: Copied (`.
-#[cfg(test)]
 fn rclone_copied_path(line: &str) -> Option<&str> {
     let prefix = line.trim().split_once(": Copied (")?.0;
     let (_, path) = prefix.rsplit_once(": ")?;
@@ -2038,8 +2301,6 @@ fn rclone_copied_path(line: &str) -> Option<&str> {
 /// Verarbeitet eine rclone-Protokollzeile für den sichtbaren SFTP-Job.
 /// Die Prozentanzeige bleibt bis zum erfolgreichen Prozessende bei höchstens
 /// 99 %, während jede rclone-bestätigte Datei sofort gezählt wird.
-#[cfg(test)]
-#[allow(dead_code)]
 fn report_sftp_copy_log_line(
     progress: &mut dyn FnMut(SftpCopyProgress),
     last_percent: &mut u8,
@@ -4499,6 +4760,58 @@ mod tests {
             domain: String::new(),
             base_path: String::new(),
             vendor: String::new(),
+        }
+    }
+
+    /// Baut ein Objekt-Speicher-Profil aus den Pflichtfeldern; alles Weitere
+    /// füllt serde selbst.
+    fn objekt_profil(protokoll: &str) -> crate::object_storage::ObjectStorageProfile {
+        serde_json::from_value(serde_json::json!({
+            "id": "1",
+            "name": "Testablage",
+            "protocol": protokoll,
+            "endpoint": "https://beispiel.example.com",
+        }))
+        .expect("Profil muss sich aus den Pflichtfeldern bauen lassen")
+    }
+
+    /// Sicherung gegen Rückschritte: Der direkte rclone-Weg wurde eingeführt,
+    /// weil WebDAV, SMB und FTP über den zwischengespeicherten Mount liefen.
+    /// Objekt-Speicher und SFTP hatten diesen Fehler nie und haben eigene,
+    /// erprobte Wege – sie dürfen von der neuen Weiche niemals erfasst werden.
+    #[test]
+    fn direkter_rclone_weg_laesst_objektspeicher_und_sftp_unberuehrt() {
+        for protokoll in ["s3", "swift"] {
+            let profil = objekt_profil(protokoll);
+            assert!(
+                !is_rclone_transfer_candidate(Some(&profil), None),
+                "Objekt-Speicher {protokoll} wurde erfasst"
+            );
+            // Auch mit gesetztem RemoteSpec bleibt das Profil ausschlaggebend.
+            assert!(
+                !is_rclone_transfer_candidate(Some(&profil), Some(&spec(RemoteProtocol::Webdav))),
+                "Objekt-Speicher {protokoll} mit Spec wurde erfasst"
+            );
+        }
+
+        assert!(
+            !is_rclone_transfer_candidate(None, Some(&spec(RemoteProtocol::Sftp))),
+            "SFTP wurde erfasst"
+        );
+
+        // Ohne Angaben gibt es nichts anzusprechen.
+        assert!(!is_rclone_transfer_candidate(None, None));
+
+        // Und das, wofür der Weg gebaut wurde:
+        for protokoll in [
+            RemoteProtocol::Webdav,
+            RemoteProtocol::Smb,
+            RemoteProtocol::Ftp,
+        ] {
+            assert!(
+                is_rclone_transfer_candidate(None, Some(&spec(protokoll))),
+                "{protokoll:?} wurde nicht erfasst"
+            );
         }
     }
 

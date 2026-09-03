@@ -4772,6 +4772,131 @@ fn copy_to_sftp_mount_with_native_client(
     Ok(CopyOutcome::Copied)
 }
 
+/// Überträgt zu oder von einem rclone-Laufwerk (WebDAV, SMB, FTP), ohne den
+/// eingehängten Pfad zu benutzen.
+///
+/// Der Mount führt einen Zwischenspeicher mit `--dir-cache-time`. Wer darüber
+/// schreibt, sieht die Datei kurzzeitig noch nicht im Verzeichnis; wer daneben
+/// direkt am Server löscht, sieht sie weiterhin. Beides erzeugte sprunghafte
+/// Fehler. SFTP und Objekt-Speicher gehen längst direkt zum Server – dieser
+/// Weg zieht die übrigen Laufwerke nach.
+fn copy_via_rclone_direct(
+    ctx: &mut JobCtx<'_>,
+    context: &remote::RcloneTransferContext,
+    source_is_remote: bool,
+    src: &Path,
+    dst: &Path,
+    overwrite: bool,
+) -> Result<CopyOutcome, String> {
+    if src
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(is_dualbeam_inprogress_name)
+    {
+        return Ok(CopyOutcome::Skipped);
+    }
+    let _ = ctx.app.emit(
+        "job-progress",
+        JobProgress {
+            job_id: ctx.job_id.to_string(),
+            done: ctx.done,
+            total: ctx.total,
+            files_done: ctx.files_done,
+            transfer_percent: None,
+            indeterminate: true,
+            current: src.to_string_lossy().into_owned(),
+            finished: false,
+            cancelled: false,
+            error: None,
+        },
+    );
+    let mut transfer_percent = 0;
+    let current = src.to_string_lossy().into_owned();
+    let cancel = ctx.cancel.clone();
+    let mut report = |event: remote::SftpCopyProgress| {
+        match event {
+            remote::SftpCopyProgress::Percent(percent) => transfer_percent = percent,
+            remote::SftpCopyProgress::FileCopied(path) => {
+                ctx.files_done += 1;
+                let _ = ctx.app.emit(
+                    "job-progress",
+                    JobProgress {
+                        job_id: ctx.job_id.to_string(),
+                        done: ctx.done,
+                        total: ctx.total,
+                        files_done: ctx.files_done,
+                        transfer_percent: Some(transfer_percent),
+                        indeterminate: false,
+                        current: path,
+                        finished: false,
+                        cancelled: false,
+                        error: None,
+                    },
+                );
+                return;
+            }
+        }
+        let _ = ctx.app.emit(
+            "job-progress",
+            JobProgress {
+                job_id: ctx.job_id.to_string(),
+                done: ctx.done,
+                total: ctx.total,
+                files_done: ctx.files_done,
+                transfer_percent: Some(transfer_percent),
+                indeterminate: false,
+                current: current.clone(),
+                finished: false,
+                cancelled: false,
+                error: None,
+            },
+        );
+    };
+    remote::copy_rclone_storage(
+        context,
+        source_is_remote,
+        src,
+        dst,
+        overwrite,
+        &cancel,
+        &mut report,
+    )?;
+    Ok(CopyOutcome::Copied)
+}
+
+/// Bestimmt, ob ein Auftrag über den direkten rclone-Weg laufen kann, und in
+/// welche Richtung. Liegen beide Seiten auf demselben Laufwerk, kopiert der
+/// Server unmittelbar in sich selbst. Liegen sie auf *verschiedenen*
+/// Netzlaufwerken, bleibt es beim bisherigen Weg: Diese Richtung ist selten
+/// und soll hier nicht neu erprobt werden.
+/// Beschriftet einen Kopierfehler mit der Seite, die ihn ausgelöst hat.
+///
+/// Bisher nannte die Meldung stets die Quelle. Scheiterte in Wahrheit das
+/// Ziel, wurde eine Datei als fehlend gemeldet, die durchaus vorhanden war –
+/// eine Fährte, die von der eigentlichen Ursache wegführt.
+fn describe_copy_failure(src: &Path, dst: &Path, error: &std::io::Error) -> String {
+    if error.kind() == std::io::ErrorKind::NotFound && src.symlink_metadata().is_ok() {
+        return format!("{}: {error}", dst.display());
+    }
+    format!("{}: {error}", src.display())
+}
+
+fn rclone_direct_plan(
+    src: &Path,
+    dst: &Path,
+) -> Option<(remote::RcloneTransferContext, bool)> {
+    let source = remote::rclone_transfer_context(src);
+    let target = remote::rclone_transfer_context(dst);
+    match (source, target) {
+        (Some(source), None) => Some((source, true)),
+        (None, Some(target)) => Some((target, false)),
+        (Some(source), Some(target)) => {
+            (source.mount_path == target.mount_path).then_some((target, false))
+        }
+        (None, None) => None,
+    }
+}
+
 #[tauri::command]
 async fn run_job(
     app: AppHandle,
@@ -4964,6 +5089,30 @@ async fn run_job(
                 ctx.emit(&it.src);
                 continue;
             }
+            // Laufwerke, die über rclone eingehängt sind, werden nicht mehr
+            // durch den Mount beschrieben oder gelesen. Dessen
+            // Verzeichnis-Zwischenspeicher lieferte je nach Zeitpunkt einen
+            // veralteten Stand und war die gemeinsame Ursache für fehlende
+            // Dateien, wiederauftauchende Löschungen und sprunghafte Fehler.
+            // Objekt-Speicher und SFTP sind hier nicht betroffen: Sie haben
+            // ihren eigenen direkten Weg und werden bereits oben behandelt.
+            if let Some((context, source_is_remote)) = rclone_direct_plan(&src, &dst) {
+                let outcome = copy_via_rclone_direct(
+                    &mut ctx,
+                    &context,
+                    source_is_remote,
+                    &src,
+                    &dst,
+                    it.overwrite,
+                )
+                .map_err(|error| format!("{}: {error}", src.display()))?;
+                if is_move {
+                    remove_source_after_move(&src, outcome)?;
+                }
+                ctx.done += 1;
+                ctx.emit(&it.src);
+                continue;
+            }
             let mut handled = false;
             if is_move && !path_occupied_no_follow(&dst) {
                 if let Some(parent) = dst.parent() {
@@ -4979,7 +5128,7 @@ async fn run_job(
                 match copy_recursive(&src, &dst, it.overwrite, &mut ctx) {
                     Err(e) => {
                         if e.kind() != std::io::ErrorKind::Interrupted {
-                            return Err(format!("{}: {}", src.display(), e));
+                            return Err(describe_copy_failure(&src, &dst, &e));
                         }
                     }
                     Ok(outcome) => {
