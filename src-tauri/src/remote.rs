@@ -2262,6 +2262,14 @@ pub fn purge_remote_storage(
                 "2m",
                 "--retries",
                 "3",
+                // Anbieter wie pCloud drosseln mehrere Zugriffe kurz
+                // hintereinander. Ohne Pause zwischen den Versuchen laeuft die
+                // Wiederholung in dieselbe Sperre und der Vorgang scheitert,
+                // obwohl der Zugang in Ordnung ist.
+                "--retries-sleep",
+                "3s",
+                "--low-level-retries",
+                "10",
             ])
             .arg(&target)
             .stdin(Stdio::null())
@@ -2333,14 +2341,15 @@ pub fn purge_remote_storage(
                     }
                     // rclone endet auch dann mit einem Fehlercode, wenn das
                     // Objekt bereits entfernt wurde und erst ein nachgelagerter
-                    // Schritt scheitert. Der Benutzer sah deshalb eine
-                    // Fehlermeldung fuer eine erfolgreiche Loeschung. Ueber den
-                    // Ausgang entscheidet nun der tatsaechliche Zustand auf dem
-                    // Server, nicht der Exitcode allein.
-                    if remote_target_gone(&rclone, &target, &environment) {
+                    // Schritt scheitert. Als Erfolg gilt der Vorgang aber nur,
+                    // wenn der Elternordner lesbar ist und den Namen nicht mehr
+                    // enthaelt. Laesst er sich nicht lesen, ist der Ausgang
+                    // unbekannt - und Unbekanntes ist hier ein Fehlschlag.
+                    if remote_entry_absent(&rclone, &target, &environment) == Some(true) {
                         on_removed(&path);
                         break;
                     }
+                    record_delete_failure(&target, &captured);
                     return Err(rclone_failure_message(&captured.join("\n")));
                 }
                 Ok(None) if cancel.load(std::sync::atomic::Ordering::SeqCst) => {
@@ -2359,16 +2368,23 @@ pub fn purge_remote_storage(
     Ok(())
 }
 
-/// Fragt nach, ob ein Objekt auf dem Server noch vorhanden ist. `lsjson --stat`
-/// liest ausschliesslich Metadaten und veraendert nichts. Nur eine eindeutige
-/// Fehlanzeige des Servers gilt als Beleg fuer eine erfolgte Loeschung; ein
-/// Verbindungsfehler darf niemals als Erfolg durchgehen.
-fn remote_target_gone(rclone: &Path, target: &str, environment: &[(String, String)]) -> bool {
+/// Prueft ueber den Elternordner, ob ein Eintrag wirklich verschwunden ist.
+///
+/// Ein Fehlertext taugt nicht als Beleg: Meldet der Server "not found", kann
+/// genauso gut der Elternpfad falsch sein - dann waere nie geloescht worden.
+/// Deshalb zaehlt nur ein positiver Nachweis: Die Auflistung des Elternordners
+/// muss gelingen und der Name darin fehlen. Gelingt die Auflistung nicht, ist
+/// der Ausgang unbekannt (`None`) und gilt als Fehlschlag.
+fn remote_entry_absent(
+    rclone: &Path,
+    target: &str,
+    environment: &[(String, String)],
+) -> Option<bool> {
+    let (parent, name) = split_remote_target(target)?;
     let mut command = Command::new(rclone);
     command
         .args([
-            "lsjson",
-            "--stat",
+            "lsf",
             "--contimeout",
             "15s",
             "--timeout",
@@ -2376,29 +2392,64 @@ fn remote_target_gone(rclone: &Path, target: &str, environment: &[(String, Strin
             "--retries",
             "1",
         ])
-        .arg(target)
+        .arg(parent)
         .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped());
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
     for (key, value) in environment {
         command.env(key, value);
     }
-    let Ok(output) = command.output() else {
-        return false;
-    };
-    if output.status.success() {
-        return false;
+    let output = command.output().ok()?;
+    if !output.status.success() {
+        return None;
     }
-    stderr_reports_missing(&String::from_utf8_lossy(&output.stderr))
+    let listing = String::from_utf8_lossy(&output.stdout);
+    Some(
+        !listing
+            .lines()
+            .any(|line| line.trim_end().trim_end_matches('/') == name),
+    )
 }
 
-/// Nur eine ausdrueckliche Fehlanzeige des Servers belegt, dass ein Objekt
-/// entfernt wurde. Jede andere Fehlerursache - etwa eine unterbrochene
-/// Verbindung - muss als Fehlschlag gelten, damit nie eine ausgebliebene
-/// Loeschung als Erfolg gemeldet wird.
-fn stderr_reports_missing(text: &str) -> bool {
-    let lower = text.to_lowercase();
-    lower.contains("not found") || lower.contains("no such file") || lower.contains("does not exist")
+/// Trennt ein rclone-Ziel in Elternpfad und Namen. Getrennt wird am letzten
+/// Schraegstrich hinter dem Doppelpunkt; fehlt er, ist die Wurzel des Zugangs
+/// der Elternpfad.
+fn split_remote_target(target: &str) -> Option<(&str, &str)> {
+    let colon = target.find(':')?;
+    let rest = target.get(colon + 1..)?;
+    let (parent, name) = match rest.rfind('/') {
+        Some(offset) => {
+            let cut = colon + 1 + offset;
+            (target.get(..cut)?, target.get(cut + 1..)?)
+        }
+        None => (target.get(..=colon)?, rest),
+    };
+    if name.is_empty() {
+        return None;
+    }
+    // `DUALBEAM:/datei` hinterlaesst als Elternpfad `DUALBEAM:/`. Der leere
+    // Schrittname wuerde rclone am Adresspfad vorbeigreifen lassen.
+    let parent = parent.trim_end_matches('/');
+    (!parent.is_empty()).then_some((parent, name))
+}
+
+/// Schreibt den Grund eines gescheiterten Loeschversuchs mit. Ohne diese Spur
+/// bleibt nur eine uebersetzte Sammelmeldung uebrig, aus der sich die Ursache
+/// nicht mehr rekonstruieren laesst.
+fn record_delete_failure(target: &str, captured: &[String]) {
+    let Ok(root) = mount_root() else { return };
+    let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(root.join("remote-delete.log"))
+    else {
+        return;
+    };
+    use std::io::Write as _;
+    let _ = writeln!(file, "--- {target}");
+    for line in captured {
+        let _ = writeln!(file, "{line}");
+    }
 }
 
 /// Meldungen des rclone-Verbose-Logs haben die Form
@@ -4262,15 +4313,29 @@ mod tests {
 
     /// Ein Verbindungsfehler darf niemals als vollzogene Loeschung gelten.
     #[test]
-    fn only_a_missing_object_counts_as_removed() {
-        assert!(stderr_reports_missing("ERROR : file.zip: object not found"));
-        assert!(stderr_reports_missing("directory not found"));
-        assert!(stderr_reports_missing("No such file or directory"));
-        assert!(!stderr_reports_missing(
-            "Failed to lsjson: couldn't connect: i/o timeout"
-        ));
-        assert!(!stderr_reports_missing("401 Unauthorized"));
-        assert!(!stderr_reports_missing(""));
+    fn targets_split_into_parent_and_name() {
+        assert_eq!(
+            split_remote_target("DUALBEAM:ordner/datei.zip"),
+            Some(("DUALBEAM:ordner", "datei.zip"))
+        );
+        // Ein fuehrender Schraegstrich gehoert nicht in den Elternpfad: Bei
+        // WebDAV griffe rclone damit am Adresspfad vorbei.
+        assert_eq!(
+            split_remote_target("DUALBEAM:/datei.zip"),
+            Some(("DUALBEAM:", "datei.zip"))
+        );
+        assert_eq!(
+            split_remote_target("DUALBEAM:datei.zip"),
+            Some(("DUALBEAM:", "datei.zip"))
+        );
+        assert_eq!(
+            split_remote_target("DUALBEAM:/freigabe/tief/datei.zip"),
+            Some(("DUALBEAM:/freigabe/tief", "datei.zip"))
+        );
+        // Ohne Namen gibt es nichts zu pruefen.
+        assert_eq!(split_remote_target("DUALBEAM:"), None);
+        assert_eq!(split_remote_target("DUALBEAM:ordner/"), None);
+        assert_eq!(split_remote_target("ohne-doppelpunkt"), None);
     }
 
     #[test]
