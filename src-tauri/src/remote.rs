@@ -419,7 +419,8 @@ fn rclone_executable() -> Result<PathBuf, String> {
         // Testbinäre liegen noch eine Ebene tiefer, in target/debug/deps.
         // Ohne diesen Ort ließe sich kein Praxistest gegen einen echten
         // Server fahren.
-        dir.join("../../../binaries").join(format!("rclone-{triple}")),
+        dir.join("../../../binaries")
+            .join(format!("rclone-{triple}")),
     ];
     candidates
         .iter()
@@ -2164,6 +2165,7 @@ pub fn purge_remote_storage(
     paths: &[PathBuf],
     cancel: &std::sync::atomic::AtomicBool,
     mut progress: Option<&mut dyn FnMut(&str)>,
+    mut on_removed: impl FnMut(&Path),
 ) -> Result<(), String> {
     if spec.protocol == RemoteProtocol::Sftp {
         return Err("SFTP-Löschvorgänge laufen über das eingehängte SSHFS-Dateisystem".into());
@@ -2239,7 +2241,7 @@ pub fn purge_remote_storage(
         }
         targets.push((path.clone(), target, is_dir));
     }
-    for (_, target, is_dir) in targets {
+    for (path, target, is_dir) in targets {
         if cancel.load(std::sync::atomic::Ordering::SeqCst) {
             return Ok(());
         }
@@ -2305,6 +2307,9 @@ pub fn purge_remote_storage(
                     if let Some(reader) = log_reader {
                         let _ = reader.join();
                     }
+                    // Nur der erfolgreiche Prozess bestätigt diesen Pfad;
+                    // spätere Teilfehler oder Abbrüche ändern daran nichts.
+                    on_removed(&path);
                     // Der Reader kann unmittelbar vor Prozessende noch
                     // Meldungen in die Queue geschrieben haben.
                     while let Ok(line) = log_rx.try_recv() {
@@ -4495,8 +4500,7 @@ mod tests {
         s.username = std::env::var("DUALBEAM_SMB_USER").unwrap_or("smbtest".into());
         s.path = std::env::var("DUALBEAM_SMB_SHARE").unwrap_or("Daten".into());
         s.label = "SMB-Praxistest".into();
-        let kennwort =
-            std::env::var("DUALBEAM_SMB_PASS").unwrap_or("DualBeam-Test-2026".into());
+        let kennwort = std::env::var("DUALBEAM_SMB_PASS").unwrap_or("DualBeam-Test-2026".into());
 
         let pfad = mount_blocking(s, kennwort, false).expect("Einhängen fehlgeschlagen");
         let dir = Path::new(&pfad);

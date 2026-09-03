@@ -11,6 +11,7 @@ import {
   unwatchPane,
 } from "./ipc";
 import { errMsg } from "./i18n";
+import { NetworkDeletes } from "./networkDeletes";
 
 export type PaneState = {
   cwd: string;
@@ -167,6 +168,34 @@ function reconcilePendingSftpEntries(path: string, raw: Entry[]): Entry[] {
     if (isDirectChild(path, copiedPath) && !listed.has(copiedPath)) visible.push(copied);
   }
   return visible;
+}
+
+const networkDeletes = new NetworkDeletes();
+
+/** Wird nur nach einer erfolgreichen Backend-Löschung aufgerufen. Die Anzeige
+ * braucht dafür keinen weiteren, möglicherweise langsamen Mount-Zugriff. */
+export function confirmDeletedNetworkPaths(paths: string[]) {
+  networkDeletes.confirm(paths);
+  for (const pane of ["left", "right"] as const) {
+    const current = state[pane];
+    const raw = networkDeletes.visible(current.entriesRaw);
+    if (raw.length === current.entriesRaw.length) continue;
+    const entries = networkDeletes.visible(current.entries);
+    const cursorPath = current.entries[current.cursor]?.path;
+    const cursor = entries.findIndex((entry) => entry.path === cursorPath);
+    const anchorPath = current.anchor === null ? undefined : current.entries[current.anchor]?.path;
+    const anchor = entries.findIndex((entry) => entry.path === anchorPath);
+    const visible = new Set(entries.map((entry) => entry.path));
+    setState(pane, {
+      entriesRaw: raw,
+      entries,
+      cursor: cursor >= 0 ? cursor : Math.max(0, Math.min(current.cursor, entries.length - 1)),
+      selected: new Set([...current.selected].filter((path) => visible.has(path))),
+      anchor: anchor >= 0 ? anchor : null,
+    });
+    if (state.editing?.pane === pane) setState("editing", null);
+  }
+  bumpSel();
 }
 
 // Signal um Filter-Input in einer Pane zu fokussieren.
@@ -338,9 +367,16 @@ export async function loadPane(
   }
   if (!isCurrent()) return;
   try {
-    const raw = await listDir(target, state.showHidden);
+    const deletionSnapshot = networkDeletes.beginListing();
+    const showHidden = state.showHidden;
+    const raw = await listDir(target, showHidden);
     if (!isCurrent()) return;
-    const freshRaw = reconcilePendingSftpEntries(target, raw);
+    const reconciled = networkDeletes.reconcile(target, raw, deletionSnapshot, showHidden);
+    if (reconciled === null) {
+      await loadPane(pane, target, options);
+      return;
+    }
+    const freshRaw = reconcilePendingSftpEntries(target, reconciled);
     const sorted = sortEntries(freshRaw, state[pane].sortKey, state[pane].sortDir);
     const filter = state[pane].filter;
     const visible = applyFilter(sorted, filter);
@@ -395,9 +431,9 @@ export async function forceRefreshAll() {
 }
 
 // Aktualisiert beide Panes. Damit wird auch ein im inaktiven Pane geöffnetes
-// Netzlaufwerk (z. B. WebDAV/SMB) neu eingelesen. Jeder loadPane-Aufruf
-// löst im Backend ein frisches read_dir aus, was bei webdavfs einen neuen
-// PROPFIND und damit einen serverseitigen Refresh bewirkt.
+// Netzlaufwerk (z. B. WebDAV/SMB) neu eingelesen. read_dir kann allerdings
+// weiterhin aus dem Mount-Cache lesen; bestätigte Löschungen werden deshalb
+// unabhängig davon aus der Anzeige entfernt.
 export async function refreshAll() {
   await Promise.all([refreshPane("left"), refreshPane("right")]);
 }

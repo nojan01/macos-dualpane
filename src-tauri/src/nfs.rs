@@ -219,7 +219,11 @@ impl NfsSpec {
         if self.security.uses_kerberos() {
             return Ok(());
         }
-        match self.host.trim_matches(|c| c == '[' || c == ']').parse::<IpAddr>() {
+        match self
+            .host
+            .trim_matches(|c| c == '[' || c == ']')
+            .parse::<IpAddr>()
+        {
             Ok(ip) if crate::is_local_network_address(ip) => Ok(()),
             Ok(_) => Err("err.nfs.remoteNeedsKerberos".to_string()),
             Err(_) => Err("err.nfs.hostnameNeedsKerberos".to_string()),

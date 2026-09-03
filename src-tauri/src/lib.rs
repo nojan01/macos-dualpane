@@ -1247,7 +1247,8 @@ fn path_exists_blocking(path: String) -> bool {
 async fn navigation_root(path: String) -> Option<String> {
     tauri::async_runtime::spawn_blocking(move || navigation_root_blocking(path))
         .await
-        .ok().flatten()
+        .ok()
+        .flatten()
 }
 
 fn navigation_root_blocking(path: String) -> Option<String> {
@@ -1593,7 +1594,10 @@ fn remember_network_volume_inner(path: &Path) -> Result<(), String> {
         .iter()
         .any(|mount| mount.path == mount_path_str)
     {
-        return Err("Von DualBeam eingebundene Laufwerke lassen sich nicht als Netzwerk-Lesezeichen merken".into());
+        return Err(
+            "Von DualBeam eingebundene Laufwerke lassen sich nicht als Netzwerk-Lesezeichen merken"
+                .into(),
+        );
     }
     let (source, fstype) = mount_source_and_fstype()
         .remove(&mount_path_str)
@@ -1845,8 +1849,7 @@ async fn mount_network_url(url: String, allow_insecure_local: bool) -> Result<St
             // meldet ihn auch dann, wenn er den Server gar nicht erst
             // anspricht — bei SMB war das der Regelfall. Deshalb geht SMB
             // heute über rclone und nicht mehr über diesen Weg.
-            if err.contains("-1409") || err.contains("-5016") || err.contains("NSURLErrorDomain")
-            {
+            if err.contains("-1409") || err.contains("-5016") || err.contains("NSURLErrorDomain") {
                 return Err("err.mount.unreachable".into());
             }
             return Err("err.mount.failed".into());
@@ -2366,6 +2369,13 @@ struct RemoteStorageDeleteRequest {
 }
 
 impl<'a> DeleteCtx<'a> {
+    fn confirmed_removed(&self, path: &Path) {
+        let _ = self.app.emit(
+            "network-paths-deleted",
+            vec![path.to_string_lossy().into_owned()],
+        );
+    }
+
     fn check_cancelled(&self) -> std::io::Result<()> {
         if self.cancel.load(Ordering::SeqCst) {
             Err(std::io::Error::new(
@@ -3803,6 +3813,7 @@ async fn run_network_delete(
                 &remote_paths,
                 &cancel_for_worker,
                 None,
+                |path| ctx.confirmed_removed(path),
             )?;
             if !cancel_for_worker.load(Ordering::SeqCst) {
                 remote::refresh_mount_after_direct_delete(&mount_path, &remote_paths);
@@ -3891,6 +3902,7 @@ async fn run_network_delete(
                     &cancel_for_worker,
                 ) {
                     Some(Ok(())) => {
+                        ctx.confirmed_removed(&path);
                         ctx.removed_bulk(&path, count);
                         if let Some(parent) = path.parent() {
                             stale_parents.push(parent.to_path_buf());

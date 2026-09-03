@@ -16,6 +16,7 @@ vi.mock("./ipc", () => ipc);
 import {
   _set,
   canNavigateUp,
+  confirmDeletedNetworkPaths,
   followFrom,
   loadPane,
   selectOnly,
@@ -86,6 +87,45 @@ describe("loadPane", () => {
 
     expect(state.left.cwd).toBe("/fast");
     expect(state.left.entries[0]?.path).toBe("/fast/file.txt");
+  });
+
+  it("entfernt bestätigte WebDAV-Löschungen sofort aus beiden Panes und ihrer Auswahl", async () => {
+    const deleted = entry("/pcloud-immediate/delete.txt");
+    const kept = entry("/pcloud-immediate/keep.txt");
+    ipc.listDir.mockResolvedValue([deleted, kept]);
+    await loadPane("left", "/pcloud-immediate");
+    await loadPane("right", "/pcloud-immediate");
+    for (const pane of ["left", "right"] as const) {
+      _set(pane, "selected", new Set([deleted.path, kept.path]));
+      _set(pane, "cursor", 1);
+      _set(pane, "anchor", 1);
+    }
+    confirmDeletedNetworkPaths([deleted.path]);
+    for (const pane of ["left", "right"] as const) {
+      expect(state[pane].entriesRaw).toEqual([kept]);
+      expect(state[pane].entries).toEqual([kept]);
+      expect(state[pane].selected).toEqual(new Set([kept.path]));
+      expect(state[pane].cursor).toBe(0);
+      expect(state[pane].anchor).toBe(0);
+    }
+    await loadPane("left", "/pcloud-immediate");
+    expect(state.left.entries).toEqual([kept]);
+  });
+
+  it("verwirft ein vor der WebDAV-Löschung gestartetes Listing und liest erneut", async () => {
+    const deleted = entry("/pcloud-race/delete.txt");
+    const kept = entry("/pcloud-race/keep.txt");
+    ipc.pathIsNetwork.mockResolvedValue(true);
+    const slow = deferred<Entry[]>();
+    ipc.listDir.mockReturnValueOnce(slow.promise).mockResolvedValue([deleted, kept]);
+    const loading = loadPane("left", "/pcloud-race");
+    await vi.waitFor(() => expect(ipc.listDir).toHaveBeenCalledTimes(1));
+    confirmDeletedNetworkPaths([deleted.path]);
+    slow.resolve([deleted, kept]);
+    await loading;
+    expect(ipc.listDir).toHaveBeenCalledTimes(2);
+    expect(state.left.entries).toEqual([kept]);
+    expect(state.left.loading).toBe(false);
   });
 
   it("begrenzt die Aufwärtsnavigation an der sichtbaren Mountwurzel", () => {

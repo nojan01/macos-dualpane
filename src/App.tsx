@@ -45,6 +45,7 @@ import {
   setActive,
   setState,
   refreshPane,
+  confirmDeletedNetworkPaths,
   forceRefreshAll,
   toggleCompareMode,
   toggleFollowMode,
@@ -309,6 +310,12 @@ export function App() {
             current: p.current,
           });
         }
+      }),
+    );
+
+    addUnlisten(
+      await listen<string[]>("network-paths-deleted", (ev) => {
+        confirmDeletedNetworkPaths(ev.payload);
       }),
     );
 
