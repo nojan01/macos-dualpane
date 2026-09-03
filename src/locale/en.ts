@@ -555,6 +555,16 @@ export const en: Record<string, string> = {
   "remote.path": "Path on the server",
   "remote.share": "Share",
   "remote.domain": "Domain or workgroup (optional)",
+  "remote.vendor": "Provider",
+  "remote.vendor.other": "Other / unknown",
+  "remote.vendor.nextcloud": "Nextcloud",
+  "remote.vendor.owncloud": "ownCloud",
+  "remote.vendor.fastmail": "Fastmail",
+  "remote.vendor.sharepoint": "SharePoint",
+  "remote.basePath": "Address path (optional)",
+  "err.remote.basePath": "Invalid address path. It must not contain ?, #, \\, // or ..",
+  "remote.webdavNote": 
+    "The address path belongs to the server address, not the content. pCloud and Fastmail do not need one; Nextcloud and ownCloud require /remote.php/dav/files/USER.",
   "remote.smbNote":
     "The password is never sent in clear text. File contents themselves are " +
     "unencrypted on older servers, so prefer SFTP on open networks.",

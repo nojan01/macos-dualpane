@@ -18,6 +18,7 @@ import { remoteDescriptor, saveRemoteProfile } from "../remoteProfiles";
 const PROTOCOLS: RemoteProtocol[] = [
   "sftp",
   "smb",
+  "webdav",
   "ftpsExplicit",
   "ftpsImplicit",
   "ftp",
@@ -29,7 +30,19 @@ const DEFAULT_PORTS: Record<RemoteProtocol, number> = {
   ftpsExplicit: 21,
   ftpsImplicit: 990,
   smb: 445,
+  webdav: 443,
 };
+
+/** Anbieterkennungen, die rclone bei WebDAV auswertet. Die Auswahl ändert das
+ * Verhalten spürbar: Nextcloud meldet etwa Prüfsummen, die andere nicht
+ * kennen. Ein falscher Wert führt zu unnötigen Nachfragen beim Server. */
+const WEBDAV_VENDORS = [
+  "other",
+  "nextcloud",
+  "owncloud",
+  "fastmail",
+  "sharepoint",
+] as const;
 
 type RemoteDialogState = {
   protocol: RemoteProtocol;
@@ -42,6 +55,12 @@ type RemoteDialogState = {
   label: string;
   /** Windows-Domäne oder Arbeitsgruppe. Nur für SMB von Belang. */
   domain: string;
+  /** Der Teil der Adresse hinter dem Rechnernamen — bei Nextcloud
+   * `/remote.php/dav/files/name`. Getrennt vom Startordner gehalten, damit ein
+   * Wechsel des Ordners die Adresse nicht zerstört. Nur bei WebDAV. */
+  basePath: string;
+  /** Anbieter bei WebDAV, siehe `WEBDAV_VENDORS`. */
+  vendor: string;
   savePassword: boolean;
   busy: boolean;
   error: string | null;
@@ -63,12 +82,21 @@ export function openRemoteDialog(preset: Partial<RemoteDialogState> = {}) {
     path: "",
     label: "",
     domain: "",
+    basePath: "",
+    vendor: "other",
     savePassword: true,
     busy: false,
     error: null,
     fingerprints: null,
     ...preset,
   };
+  // `Partial<…>` lässt ein ausdrückliches `undefined` durch. Wird ein Profil
+  // ausgebreitet, dessen Felder noch aus einer älteren Fassung stammen,
+  // überschriebe das die Vorbelegung — und `toSpec` stürbe an `.trim()` von
+  // `undefined`. Deshalb hier festnageln statt auf die Aufrufer zu vertrauen.
+  initial.basePath ??= "";
+  initial.vendor ||= "other";
+  initial.domain ??= "";
   setDialog(initial);
   // Ein gespeichertes Profil soll beim erneuten Öffnen kein neues Passwort
   // verlangen. Fehlt der Schlüsselbund-Eintrag, bleibt das Feld einfach leer.
@@ -119,6 +147,8 @@ function toSpec(current: RemoteDialogState): RemoteSpec {
     path: normalizeShare(current.protocol, current.path),
     label: current.label.trim(),
     domain: current.domain.trim(),
+    basePath: current.basePath.trim(),
+    vendor: current.vendor.trim(),
   };
 }
 
@@ -306,7 +336,9 @@ export function RemoteDialog() {
                       placeholder={
                         current().protocol === "smb"
                           ? "nas.local"
-                          : "sftp.example.com"
+                          : current().protocol === "webdav"
+                            ? "ewebdav.pcloud.com"
+                            : "sftp.example.com"
                       }
                       value={current().host}
                       disabled={current().busy}
@@ -315,6 +347,46 @@ export function RemoteDialog() {
                       }
                     />
                   </label>
+                  <Show when={current().protocol === "webdav"}>
+                    <label>
+                      {t("remote.vendor")}
+                      <select
+                        value={current().vendor}
+                        disabled={current().busy}
+                        onChange={(event) =>
+                          update({ vendor: event.currentTarget.value })
+                        }
+                      >
+                        <For each={WEBDAV_VENDORS}>
+                          {(vendor) => (
+                            <option value={vendor}>
+                              {t(`remote.vendor.${vendor}`)}
+                            </option>
+                          )}
+                        </For>
+                      </select>
+                    </label>
+                    <label>
+                      {t("remote.basePath")}
+                      <input
+                        type="text"
+                        placeholder={
+                          current().vendor === "nextcloud" ||
+                          current().vendor === "owncloud"
+                            ? `/remote.php/dav/files/${current().username || "name"}`
+                            : "/"
+                        }
+                        value={current().basePath}
+                        disabled={current().busy}
+                        onInput={(event) =>
+                          update({ basePath: event.currentTarget.value })
+                        }
+                      />
+                    </label>
+                    <p class="network-storage-note">
+                      {t("remote.webdavNote")}
+                    </p>
+                  </Show>
                   <label>
                     {t("remote.port", {
                       port: String(DEFAULT_PORTS[current().protocol]),

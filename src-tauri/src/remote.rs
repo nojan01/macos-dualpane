@@ -53,6 +53,15 @@ pub enum RemoteProtocol {
     /// eigenen Ordner der App, womit Aushängen, Löschschutz und Übertragungen
     /// unverändert greifen.
     Smb,
+    /// WebDAV über HTTPS — Nextcloud, ownCloud, pCloud, Fastmail und andere.
+    ///
+    /// Lief früher über den Finder (`mount volume`). Der fragt Benutzer und
+    /// Kennwort in einem eigenen Fenster ab, weshalb DualBeam dafür keine
+    /// Felder anbieten konnte: kein Anbieter, kein Adresspfad, kein
+    /// Lesezeichen, ein wirkungsloses Zahnrad. Über rclone liegt die Freigabe
+    /// wie alle anderen im Ordner der App, womit Aushängen, Löschschutz und
+    /// Übertragungen unverändert greifen.
+    Webdav,
 }
 
 impl RemoteProtocol {
@@ -62,6 +71,9 @@ impl RemoteProtocol {
             Self::Ftp | Self::FtpsExplicit => 21,
             Self::FtpsImplicit => 990,
             Self::Smb => 445,
+            // WebDAV ist bei DualBeam immer TLS-gesichert; unverschlüsseltes
+            // HTTP auf Port 80 überträgt das Kennwort im Klartext.
+            Self::Webdav => 443,
         }
     }
 
@@ -72,6 +84,7 @@ impl RemoteProtocol {
             Self::Sftp => "sftp",
             Self::Ftp | Self::FtpsExplicit | Self::FtpsImplicit => "ftp",
             Self::Smb => "smb",
+            Self::Webdav => "webdav",
         }
     }
 
@@ -92,6 +105,7 @@ impl RemoteProtocol {
             Self::Ftp => "ftp",
             Self::FtpsExplicit | Self::FtpsImplicit => "ftps",
             Self::Smb => "smb",
+            Self::Webdav => "webdav",
         }
     }
 }
@@ -114,6 +128,21 @@ pub struct RemoteSpec {
     /// als `DOMAENE\benutzer` anmeldet, trägt hier `DOMAENE` ein.
     #[serde(default)]
     pub domain: String,
+    /// Pfad, der bei WebDAV noch zur Adresse gehört, nicht zum Inhalt.
+    ///
+    /// Nextcloud und ownCloud stellen ihre Dateien unter einem festen
+    /// Unterpfad bereit (`/remote.php/dav/files/name`); pCloud und Fastmail
+    /// antworten direkt auf der Wurzel. Getrennt von `path` gehalten, damit
+    /// der Ordner innerhalb der Freigabe frei wählbar bleibt: Beides in ein
+    /// Feld zu werfen hieße, dass ein Wechsel des Startordners die Adresse
+    /// zerstört. Bei allen anderen Protokollen leer.
+    #[serde(default)]
+    pub base_path: String,
+    /// Anbieterkennung für WebDAV (`nextcloud`, `owncloud`, `fastmail`,
+    /// `sharepoint`, `other`). rclone passt danach sein Verhalten an, etwa
+    /// stückweises Hochladen bei Nextcloud. Leer bedeutet `other`.
+    #[serde(default)]
+    pub vendor: String,
 }
 
 impl RemoteSpec {
@@ -276,6 +305,16 @@ fn validate(spec: &RemoteSpec, allow_insecure: bool) -> Result<(), String> {
     }
     if !valid_remote_path(&spec.path) {
         return Err("err.remote.path".into());
+    }
+    // Der Adresspfad wird Teil der URL. Ein Fragezeichen oder Rautenzeichen
+    // schnitte alles Folgende ab, ein Doppelpunkt-Doppelschrägstrich führte auf
+    // einen fremden Server — die Verbindung ginge dann stillschweigend woanders
+    // hin, als der Benutzer eingetragen hat.
+    if !spec.base_path.is_empty() {
+        let base = spec.base_path.trim();
+        if !valid_remote_path(base) || base.contains(['?', '#', '\\']) || base.contains("//") {
+            return Err("err.remote.basePath".into());
+        }
     }
     // Ohne Freigabe zeigt SMB nur auf die Liste der Freigaben. Der Finder kann
     // daraus eine Auswahl anbieten, ein Einhängepunkt lässt sich daraus nicht
@@ -862,6 +901,26 @@ fn rclone_env(
     obscured: &str,
     known_hosts: Option<&Path>,
 ) -> Vec<(String, String)> {
+    // WebDAV kennt weder `host` noch `port`, sondern ausschliesslich eine
+    // vollstaendige Adresse. Deshalb ein eigener Zweig statt eines Zusatzes zur
+    // gemeinsamen Grundliste: Ein `host`, das das Backend nicht auswertet,
+    // wuerde stillschweigend ignoriert — die Verbindung ginge dann auf eine
+    // leere Adresse und scheiterte ohne erkennbaren Grund.
+    if spec.protocol == RemoteProtocol::Webdav {
+        let mut env = vec![
+            (env_key("type"), spec.protocol.rclone_type().to_string()),
+            (env_key("url"), webdav_url(spec)),
+            (env_key("user"), spec.username.clone()),
+            (env_key("pass"), obscured.to_string()),
+        ];
+        let vendor = spec.vendor.trim();
+        env.push((
+            env_key("vendor"),
+            if vendor.is_empty() { "other" } else { vendor }.to_string(),
+        ));
+        return env;
+    }
+
     let mut env = vec![
         (env_key("type"), spec.protocol.rclone_type().to_string()),
         (env_key("host"), spec.host.clone()),
@@ -891,18 +950,45 @@ fn rclone_env(
                 env.push((env_key("domain"), spec.domain.trim().to_string()));
             }
         }
+        // Oben bereits vollstaendig behandelt und zurueckgegeben.
+        RemoteProtocol::Webdav => {}
     }
     env
+}
+
+/// Setzt die Adresse zusammen, unter der rclone den WebDAV-Dienst anspricht.
+///
+/// Der Standardport bleibt weg, weil manche Dienste — pCloud darunter — bei
+/// `https://host:443/` mit einer Umleitung antworten, die rclone als Fehler
+/// wertet. Ein abweichender Port wird dagegen ausdrücklich genannt.
+fn webdav_url(spec: &RemoteSpec) -> String {
+    let host = spec.host.trim().trim_end_matches('/');
+    let port = spec.port_or_default();
+    let authority = if port == RemoteProtocol::Webdav.default_port() {
+        host.to_string()
+    } else {
+        format!("{host}:{port}")
+    };
+    let base = spec.base_path.trim().trim_matches('/');
+    if base.is_empty() {
+        format!("https://{authority}")
+    } else {
+        format!("https://{authority}/{base}")
+    }
 }
 
 fn remote_argument(spec: &RemoteSpec) -> String {
     let path = spec.path.trim();
     if path.is_empty() || path == "/" {
         format!("{RCLONE_REMOTE}:")
-    } else if spec.protocol == RemoteProtocol::Smb {
+    } else if spec.protocol == RemoteProtocol::Smb || spec.protocol == RemoteProtocol::Webdav {
         // Bei SMB ist der erste Pfadteil kein Ordner, sondern die Freigabe.
         // Die Wurzel des Zugangs ist die Liste der Freigaben, deshalb darf hier
         // kein führender Schrägstrich stehen.
+        //
+        // Bei WebDAV gilt dasselbe aus anderem Grund: Dort ist die Wurzel die
+        // konfigurierte Adresse samt Adresspfad. Ein führender Schrägstrich
+        // ließe rclone am Adresspfad vorbeigreifen.
         format!(
             "{RCLONE_REMOTE}:{path}",
             path = path.trim_start_matches('/')
@@ -2543,10 +2629,19 @@ struct SftpMountContext {
 /// SFTP-Profil zu. Auch ein noch nicht angelegtes Ziel bleibt dadurch
 /// eindeutig erkennbar.
 fn sftp_mount_context(path: &Path) -> Option<SftpMountContext> {
-    let real_path = canonicalize_with_missing_suffix(path);
     let Ok(list) = registry().lock() else {
         return None;
     };
+    // Wie oben: ohne aktiven SFTP-Mount ist der teure Pfadabgleich zwecklos.
+    if !list.iter().any(|entry| {
+        entry
+            .remote_spec
+            .as_ref()
+            .is_some_and(|spec| spec.protocol == RemoteProtocol::Sftp)
+    }) {
+        return None;
+    }
+    let real_path = canonicalize_with_missing_suffix(path);
     list.iter()
         .filter_map(|entry| {
             let spec = entry.remote_spec.as_ref()?;
@@ -3227,10 +3322,17 @@ pub fn upload_to_sftp_mount(
 }
 
 fn object_storage_mount_context(path: &Path) -> Option<ObjectStorageMountContext> {
-    let real_path = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
     let Ok(list) = registry().lock() else {
         return None;
     };
+    // Erst prüfen, ob überhaupt ein Objekt-Speicher eingehängt ist. `canonicalize`
+    // löst ein `lstat` aus; zeigt der Pfad auf eine lastende Netz-Einhängung,
+    // wartet das bis zum Mount-Timeout. Ohne S3/Swift gäbe es hier ohnehin
+    // nichts zu finden — dieses Warten wäre also vollständig umsonst.
+    if !list.iter().any(|entry| entry.object_profile.is_some()) {
+        return None;
+    }
+    let real_path = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
     list.iter().find_map(|entry| {
         let profile = entry.object_profile.as_ref()?;
         let mount_path = std::fs::canonicalize(&entry.path).unwrap_or_else(|_| entry.path.clone());
@@ -4190,7 +4292,86 @@ mod tests {
             path: "/data".into(),
             label: String::new(),
             domain: String::new(),
+            base_path: String::new(),
+            vendor: String::new(),
         }
+    }
+
+    #[test]
+    fn webdav_adresspfad_darf_die_adresse_nicht_umlenken() {
+        let mut s = spec(RemoteProtocol::Webdav);
+        s.path = String::new();
+        for boese in [
+            "/dav?x=1",
+            "/dav#weg",
+            "//fremder.example.net/dav",
+            "/../oben",
+            "/dav\\zurueck",
+        ] {
+            s.base_path = boese.into();
+            assert_eq!(
+                validate(&s, false).unwrap_err(),
+                "err.remote.basePath",
+                "durchgelassen: {boese}"
+            );
+        }
+        s.base_path = "/remote.php/dav/files/norbert".into();
+        assert!(validate(&s, false).is_ok());
+        s.base_path = String::new();
+        assert!(validate(&s, false).is_ok(), "leer ist zulässig");
+    }
+
+    #[test]
+    fn webdav_adresse_laesst_den_standardport_weg() {
+        // pCloud antwortet auf `https://host:443/` mit einer Umleitung, die
+        // rclone als Fehler wertet. Ohne Portangabe verbindet es sauber.
+        let mut s = spec(RemoteProtocol::Webdav);
+        s.host = "ewebdav.pcloud.com".into();
+        assert_eq!(webdav_url(&s), "https://ewebdav.pcloud.com");
+        s.port = Some(443);
+        assert_eq!(webdav_url(&s), "https://ewebdav.pcloud.com");
+        s.port = Some(8443);
+        assert_eq!(webdav_url(&s), "https://ewebdav.pcloud.com:8443");
+    }
+
+    #[test]
+    fn webdav_adresse_haengt_den_adresspfad_an() {
+        // Nextcloud stellt die Dateien unter einem festen Unterpfad bereit.
+        // Führende und abschließende Schrägstriche darf der Benutzer setzen
+        // oder weglassen, ohne dass eine doppelte Trennung entsteht.
+        let mut s = spec(RemoteProtocol::Webdav);
+        s.host = "wolke.example.net".into();
+        for eingabe in ["/remote.php/dav/files/nojan", "remote.php/dav/files/nojan/"] {
+            s.base_path = eingabe.into();
+            assert_eq!(
+                webdav_url(&s),
+                "https://wolke.example.net/remote.php/dav/files/nojan",
+                "Eingabe: {eingabe}"
+            );
+        }
+    }
+
+    #[test]
+    fn webdav_umgebung_nennt_adresse_statt_rechnername() {
+        // rclone wertet bei WebDAV weder `host` noch `port` aus. Stuenden sie
+        // dennoch in der Umgebung, ginge die Verbindung auf eine leere Adresse.
+        let mut s = spec(RemoteProtocol::Webdav);
+        s.host = "ewebdav.pcloud.com".into();
+        let env = rclone_env(&s, "geheim", None);
+        let key = |name: &str| {
+            env.iter()
+                .find(|(k, _)| *k == env_key(name))
+                .map(|(_, v)| v.as_str())
+        };
+        assert_eq!(key("type"), Some("webdav"));
+        assert_eq!(key("url"), Some("https://ewebdav.pcloud.com"));
+        assert_eq!(key("vendor"), Some("other"), "leer bedeutet other");
+        assert_eq!(key("host"), None, "host darf nicht gesetzt sein");
+        assert_eq!(key("port"), None, "port darf nicht gesetzt sein");
+
+        s.vendor = "nextcloud".into();
+        let env = rclone_env(&s, "geheim", None);
+        assert!(env.contains(&(env_key("vendor"), "nextcloud".to_string())));
     }
 
     #[test]

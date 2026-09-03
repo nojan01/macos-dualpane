@@ -560,6 +560,16 @@ export const de: Record<string, string> = {
   "remote.path": "Pfad auf dem Server",
   "remote.share": "Freigabe",
   "remote.domain": "Domäne oder Arbeitsgruppe (optional)",
+  "remote.vendor": "Anbieter",
+  "remote.vendor.other": "Anderer / unbekannt",
+  "remote.vendor.nextcloud": "Nextcloud",
+  "remote.vendor.owncloud": "ownCloud",
+  "remote.vendor.fastmail": "Fastmail",
+  "remote.vendor.sharepoint": "SharePoint",
+  "remote.basePath": "Adresspfad (optional)",
+  "err.remote.basePath": "Ungültiger Adresspfad. Er darf weder ?, # oder \\ noch // oder .. enthalten.",
+  "remote.webdavNote": 
+    "Der Adresspfad gehört zur Serveradresse, nicht zum Inhalt. pCloud und Fastmail brauchen ihn nicht; Nextcloud und ownCloud verlangen /remote.php/dav/files/BENUTZER.",
   "remote.smbNote":
     "Das Passwort wird nicht im Klartext übertragen. Die Dateiinhalte selbst " +
     "sind bei älteren Servern jedoch unverschlüsselt – im offenen Netz besser " +

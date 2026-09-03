@@ -196,7 +196,8 @@ export type RemoteProtocol =
   | "ftp"
   | "ftpsExplicit"
   | "ftpsImplicit"
-  | "smb";
+  | "smb"
+  | "webdav";
 
 export type RemoteSpec = {
   protocol: RemoteProtocol;
@@ -210,6 +211,12 @@ export type RemoteSpec = {
   label: string;
   /** Windows-Domäne oder Arbeitsgruppe. Nur bei SMB gefüllt. */
   domain?: string;
+  /** Pfad, der bei WebDAV noch zur Adresse gehört, nicht zum Inhalt —
+   * bei Nextcloud etwa `/remote.php/dav/files/name`. Sonst leer. */
+  basePath?: string;
+  /** Anbieter bei WebDAV: `nextcloud`, `owncloud`, `fastmail`, `sharepoint`
+   * oder `other`. Leer bedeutet `other`. */
+  vendor?: string;
 };
 
 export type HostKeyReport = {

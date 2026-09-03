@@ -55,8 +55,44 @@ const PROTOKOLL_TAFEL: Record<RemoteSpec["protocol"], true> = {
   ftpsExplicit: true,
   ftpsImplicit: true,
   smb: true,
+  webdav: true,
 };
 const ALLE_PROTOKOLLE = Object.keys(PROTOKOLL_TAFEL) as RemoteSpec["protocol"][];
+
+describe("WebDAV-Profile", () => {
+  it("führt Anbieter und Adresspfad über einen Neustart hinweg mit", async () => {
+    const { saveRemoteProfile } = await remote();
+    saveRemoteProfile({
+      protocol: "webdav", host: "wolke.example.net", port: null,
+      username: "norbert", path: "", label: "Wolke",
+      basePath: "/remote.php/dav/files/norbert", vendor: "nextcloud",
+    });
+    // Neustart nachbilden: Modul neu laden, damit erneut aus dem Speicher
+    // gelesen wird. Fehlte eines der beiden Felder beim Laden, ginge die
+    // Adresse verloren und die Verbindung liefe auf die nackte Wurzel.
+    vi.resetModules();
+    const { remoteProfiles } = await remote();
+    expect(remoteProfiles().find((p) => p.host === "wolke.example.net")).toMatchObject({
+      vendor: "nextcloud", basePath: "/remote.php/dav/files/norbert",
+    });
+  });
+
+  it("ersetzt dasselbe Konto, statt einen zweiten Eintrag anzulegen", async () => {
+    const { remoteProfiles, saveRemoteProfile } = await remote();
+    const base: RemoteSpec = {
+      protocol: "webdav", host: "wolke.example.net", port: null,
+      username: "norbert", path: "", label: "",
+    };
+    // Lesezeichen werden über „schema://benutzer@rechner:port“ unterschieden,
+    // nicht über den Adresspfad. Ein im Dialog geänderter Adresspfad muss den
+    // bisherigen Eintrag ersetzen — sonst stünde dasselbe Konto doppelt da.
+    saveRemoteProfile({ ...base, basePath: "/remote.php/dav/files/norbert" });
+    saveRemoteProfile({ ...base, basePath: "/remote.php/dav/files/neu" });
+    const gefunden = remoteProfiles().filter((p) => p.protocol === "webdav");
+    expect(gefunden).toHaveLength(1);
+    expect(gefunden[0].basePath).toBe("/remote.php/dav/files/neu");
+  });
+});
 
 describe("remoteFromDescriptor", () => {
   it("erkennt implizites FTPS am Port statt es für explizites zu halten", async () => {

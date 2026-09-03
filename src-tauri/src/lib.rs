@@ -550,8 +550,17 @@ fn create_file(path: String) -> Result<(), String> {
         .map_err(|e| format!("{}: {}", p.display(), e))
 }
 
+/// Läuft im Worker-Thread. Auf einer hängenden Netz-Einhängung
+/// blockieren die Dateisystem-Aufrufe bis zum Mount-Timeout; als
+/// synchroner Befehl stünde währenddessen die gesamte Oberfläche.
 #[tauri::command]
-fn create_symlink(target: String, link_path: String) -> Result<(), String> {
+async fn create_symlink(target: String, link_path: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || create_symlink_blocking(target, link_path))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+fn create_symlink_blocking(target: String, link_path: String) -> Result<(), String> {
     let t = expand_tilde(&target);
     let l = expand_tilde(&link_path);
     if l.exists() || std::fs::symlink_metadata(&l).is_ok() {
@@ -560,8 +569,17 @@ fn create_symlink(target: String, link_path: String) -> Result<(), String> {
     std::os::unix::fs::symlink(&t, &l).map_err(|e| format!("{}: {}", l.display(), e))
 }
 
+/// Läuft im Worker-Thread. Auf einer hängenden Netz-Einhängung
+/// blockieren die Dateisystem-Aufrufe bis zum Mount-Timeout; als
+/// synchroner Befehl stünde währenddessen die gesamte Oberfläche.
 #[tauri::command]
-fn create_finder_alias(target: String, link_path: String) -> Result<(), String> {
+async fn create_finder_alias(target: String, link_path: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || create_finder_alias_blocking(target, link_path))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+fn create_finder_alias_blocking(target: String, link_path: String) -> Result<(), String> {
     let t = expand_tilde(&target);
     let l = expand_tilde(&link_path);
     if l.exists() || std::fs::symlink_metadata(&l).is_ok() {
@@ -964,8 +982,17 @@ fn stage_delete_for_undo_blocking(paths: Vec<String>) -> Result<UndoDeleteBatch,
     Ok(UndoDeleteBatch { token, items })
 }
 
+/// Läuft im Worker-Thread. Auf einer hängenden Netz-Einhängung
+/// blockieren die Dateisystem-Aufrufe bis zum Mount-Timeout; als
+/// synchroner Befehl stünde währenddessen die gesamte Oberfläche.
 #[tauri::command]
-fn undo_staged_delete(items: Vec<UndoDeleteItem>) -> Result<(), String> {
+async fn undo_staged_delete(items: Vec<UndoDeleteItem>) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || undo_staged_delete_blocking(items))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+fn undo_staged_delete_blocking(items: Vec<UndoDeleteItem>) -> Result<(), String> {
     let mut staging_dirs: Vec<PathBuf> = Vec::new();
     for item in &items {
         let original = PathBuf::from(&item.original);
@@ -1192,8 +1219,17 @@ fn force_delete_admin_blocking(paths: Vec<String>) -> Result<(), String> {
     Ok(())
 }
 
+/// Läuft im Worker-Thread. Auf einer hängenden Netz-Einhängung
+/// blockieren die Dateisystem-Aufrufe bis zum Mount-Timeout; als
+/// synchroner Befehl stünde währenddessen die gesamte Oberfläche.
 #[tauri::command]
-fn path_exists(path: String) -> bool {
+async fn path_exists(path: String) -> bool {
+    tauri::async_runtime::spawn_blocking(move || path_exists_blocking(path))
+        .await
+        .unwrap_or(false)
+}
+
+fn path_exists_blocking(path: String) -> bool {
     let path = expand_tilde(&path);
     remote::object_storage_path_exists(&path)
         .map(|result| result.unwrap_or(false))
@@ -1204,8 +1240,17 @@ fn path_exists(path: String) -> bool {
 /// Systempfade oberhalb dieser Grenze sind nur der lokale Träger des Mounts
 /// bzw. der internen Objekt-Speicherkennung und gehören nicht zur Navigation
 /// eines geöffneten Laufwerks.
+/// Läuft im Worker-Thread. Auf einer hängenden Netz-Einhängung
+/// blockieren die Dateisystem-Aufrufe bis zum Mount-Timeout; als
+/// synchroner Befehl stünde währenddessen die gesamte Oberfläche.
 #[tauri::command]
-fn navigation_root(path: String) -> Option<String> {
+async fn navigation_root(path: String) -> Option<String> {
+    tauri::async_runtime::spawn_blocking(move || navigation_root_blocking(path))
+        .await
+        .ok().flatten()
+}
+
+fn navigation_root_blocking(path: String) -> Option<String> {
     let path = expand_tilde(&path);
     if let Some(root) = remote::object_storage_mount_root(&path) {
         return Some(root.to_string_lossy().into_owned());
@@ -1578,8 +1623,17 @@ fn remember_network_volume_inner(path: &Path) -> Result<(), String> {
     save_network_bookmark_settings(&settings)
 }
 
+/// Läuft im Worker-Thread. Auf einer hängenden Netz-Einhängung
+/// blockieren die Dateisystem-Aufrufe bis zum Mount-Timeout; als
+/// synchroner Befehl stünde währenddessen die gesamte Oberfläche.
 #[tauri::command]
-fn list_network_bookmarks() -> Result<Vec<NetworkBookmark>, String> {
+async fn list_network_bookmarks() -> Result<Vec<NetworkBookmark>, String> {
+    tauri::async_runtime::spawn_blocking(list_network_bookmarks_blocking)
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+fn list_network_bookmarks_blocking() -> Result<Vec<NetworkBookmark>, String> {
     let fs = mount_fs_types();
     let mut out = Vec::new();
     for (name, url, mp) in known_network_bookmarks() {
@@ -6517,8 +6571,17 @@ fn preview_info_blocking(path: String) -> Result<PreviewInfo, String> {
     })
 }
 
+/// Läuft im Worker-Thread. Auf einer hängenden Netz-Einhängung
+/// blockieren die Dateisystem-Aufrufe bis zum Mount-Timeout; als
+/// synchroner Befehl stünde währenddessen die gesamte Oberfläche.
 #[tauri::command]
-fn read_text_preview(path: String, max_bytes: usize) -> Result<String, String> {
+async fn read_text_preview(path: String, max_bytes: usize) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || read_text_preview_blocking(path, max_bytes))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+fn read_text_preview_blocking(path: String, max_bytes: usize) -> Result<String, String> {
     use std::io::Read;
     let p = expand_tilde(&path);
     let mut f = std::fs::File::open(&p).map_err(|e| e.to_string())?;

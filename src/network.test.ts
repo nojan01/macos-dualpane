@@ -52,8 +52,25 @@ describe("remoteFromUrl", () => {
     );
   });
 
+  it("führt WebDAV in den eigenen Dialog statt zum Finder", () => {
+    // Früher landete jede https-Adresse beim Finder. Der fragte Benutzer und
+    // Kennwort selbst ab; DualBeam konnte weder Anbieter noch Adresspfad
+    // anbieten und legte kein Lesezeichen an.
+    expect(remoteFromUrl(new URL("https://ewebdav.pcloud.com/"))).toEqual({
+      protocol: "webdav", host: "ewebdav.pcloud.com", port: "", path: "", basePath: "",
+    });
+    // Der Pfad gehört bei Nextcloud zur Adresse, nicht zum Startordner.
+    expect(
+      remoteFromUrl(new URL("https://wolke.example.net:8443/remote.php/dav/files/norbert")),
+    ).toEqual({
+      protocol: "webdav", host: "wolke.example.net", port: "8443", path: "",
+      basePath: "/remote.php/dav/files/norbert",
+    });
+    expect(remoteFromUrl(new URL("davs://dav.example.com/"))?.protocol).toBe("webdav");
+  });
+
   it("lässt Protokolle unberührt, die macOS selbst einhängt", () => {
-    for (const url of ["https://dav.example.com/", "ftp://10.0.0.5/", "afp://10.0.0.5/"]) {
+    for (const url of ["ftp://10.0.0.5/", "afp://10.0.0.5/"]) {
       expect(remoteFromUrl(new URL(url))).toBeNull();
     }
   });

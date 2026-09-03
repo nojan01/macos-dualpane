@@ -3,15 +3,20 @@ import { mountNetworkUrl } from "./ipc";
 import { askPrompt, askConfirm } from "./components/Dialogs";
 import { t, errMsg } from "./i18n";
 import { openRemoteDialog } from "./components/RemoteDialog";
+import { webdavPresetFromUrl } from "./remoteProfiles";
 
-// `smb:` und `cifs:` stehen hier bewusst nicht mehr: Sie gehen über rclone und
-// werden weiter unten vor dieser Prüfung abgefangen.
-const SECURE_SCHEMES = new Set(["https:"]);
+// `smb:`, `cifs:`, `https:` und `davs:` stehen hier bewusst nicht: Sie gehen
+// über rclone und werden weiter unten vor dieser Prüfung abgefangen. Übrig
+// bleiben allein die Protokolle, die macOS selbst einhängt — und die sind
+// sämtlich unverschlüsselt.
 const INSECURE_SCHEMES = new Set(["http:", "ftp:", "afp:", "nfs:"]);
 /** Protokolle, die DualBeam über das mitgelieferte rclone einhängt statt über
  * macOS. Sie führen in den eigenen Verbindungsdialog, weil dafür Benutzername
  * und Kennwort einzeln gebraucht werden. */
-const RCLONE_SCHEMES: Record<string, "sftp" | "ftps" | "ftpes" | "smb"> = {
+const RCLONE_SCHEMES: Record<
+  string,
+  "sftp" | "ftps" | "ftpes" | "smb" | "webdav"
+> = {
   "sftp:": "sftp",
   "ssh:": "sftp",
   "ftps:": "ftps",
@@ -20,6 +25,11 @@ const RCLONE_SCHEMES: Record<string, "sftp" | "ftps" | "ftpes" | "smb"> = {
   // „Server antwortet nicht" (-5016) und kam nie bis zur Anmeldung.
   "smb:": "smb",
   "cifs:": "smb",
+  // WebDAV lief ebenfalls über den Finder. Der fragte Benutzer und Kennwort
+  // selbst ab, weshalb DualBeam weder Anbieter noch Adresspfad anbieten konnte
+  // und kein Lesezeichen entstand.
+  "https:": "webdav",
+  "davs:": "webdav",
 };
 let connecting = false;
 
@@ -53,13 +63,20 @@ function isDirectLocalIp(hostname: string): boolean {
  * Liefert `null`, wenn das Schema nicht zu rclone gehört. Exportiert, damit es
  * sich einzeln prüfen lässt. */
 export function remoteFromUrl(parsed: URL): {
-  protocol: "sftp" | "ftpsExplicit" | "ftpsImplicit" | "smb";
+  protocol: "sftp" | "ftpsExplicit" | "ftpsImplicit" | "smb" | "webdav";
   host: string;
   port: string;
   path: string;
+  /** Nur bei WebDAV gefüllt: der Teil der Adresse hinter dem Rechnernamen.
+   * Er gehört zur Adresse, nicht zum Startordner. */
+  basePath?: string;
 } | null {
   const kind = RCLONE_SCHEMES[parsed.protocol];
   if (!kind) return null;
+  if (kind === "webdav") {
+    const preset = webdavPresetFromUrl(parsed.href);
+    return { protocol: "webdav", path: "", ...preset };
+  }
   // `ftps:` meint hier die implizite Variante (Port 990), `ftpes:` die
   // explizite. Wer es anders braucht, stellt es im Dialog um.
   const protocol =
@@ -132,14 +149,12 @@ export async function connectToServer(): Promise<void> {
       host: remote.host,
       port: remote.port,
       path: remote.path,
+      basePath: remote.basePath ?? "",
       username: decodeURIComponent(parsed.username || ""),
     });
     return;
   }
-  if (
-    !SECURE_SCHEMES.has(parsed.protocol) &&
-    !INSECURE_SCHEMES.has(parsed.protocol)
-  ) {
+  if (!INSECURE_SCHEMES.has(parsed.protocol)) {
     await askConfirm({
       title: t("network.connectFailed"),
       message: t("err.network.scheme"),
@@ -149,8 +164,11 @@ export async function connectToServer(): Promise<void> {
     return;
   }
 
-  const insecure = INSECURE_SCHEMES.has(parsed.protocol);
-  if (insecure && !isDirectLocalIp(parsed.hostname)) {
+  // Ab hier bleiben nur noch die Protokolle übrig, die macOS selbst einhängt.
+  // Sie sind ausnahmslos unverschlüsselt — die Prüfung oben hat alles andere
+  // bereits an den eigenen Verbindungsdialog abgegeben.
+  const insecure = true;
+  if (!isDirectLocalIp(parsed.hostname)) {
     await askConfirm({
       title: t("network.connectFailed"),
       message: t("err.network.localIpOnly"),
@@ -160,7 +178,6 @@ export async function connectToServer(): Promise<void> {
     return;
   }
   if (
-    insecure &&
     !(await askConfirm({
       title: t("network.insecureTitle"),
       message: t("network.insecureWarning", { url: trimmed }),

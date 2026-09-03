@@ -32,6 +32,7 @@ const SCHEME: Record<RemoteSpec["protocol"], string> = {
   ftpsExplicit: "ftps",
   ftpsImplicit: "ftps",
   smb: "smb",
+  webdav: "webdav",
 };
 
 const DEFAULT_PORT: Record<RemoteSpec["protocol"], number> = {
@@ -40,6 +41,7 @@ const DEFAULT_PORT: Record<RemoteSpec["protocol"], number> = {
   ftpsExplicit: 21,
   ftpsImplicit: 990,
   smb: 445,
+  webdav: 443,
 };
 
 export function remoteDescriptor(spec: RemoteSpec): string {
@@ -88,13 +90,47 @@ function load(): RemoteProfile[] {
       // zwar gespeichert, beim nächsten Start aber stillschweigend verworfen —
       // das Laufwerk wäre einfach verschwunden. Genau so ging SMB verloren.
       if (!(PROTOCOLS as string[]).includes(p.protocol)) return [];
-      const spec: RemoteSpec = { protocol: p.protocol as RemoteSpec["protocol"], host: p.host, username: p.username, port: p.port ?? null, path: p.path ?? "", label: p.label ?? "", domain: p.domain ?? "" };
+      const spec: RemoteSpec = { protocol: p.protocol as RemoteSpec["protocol"], host: p.host, username: p.username, port: p.port ?? null, path: p.path ?? "", label: p.label ?? "", domain: p.domain ?? "", basePath: p.basePath ?? "", vendor: p.vendor ?? "" };
       return [{ ...spec, id: idFor(spec) }];
     });
   } catch { return []; }
 }
 
 export const [remoteProfiles, setRemoteProfiles] = createSignal<RemoteProfile[]>(load());
+
+/** Zerlegt eine eingetippte oder aus einem alten Finder-Lesezeichen stammende
+ * WebDAV-Adresse in die Felder des Verbindungsdialogs.
+ *
+ * Der Pfad wird als `basePath` geführt, nicht als Startordner: Bei Nextcloud
+ * gehört `/remote.php/dav/files/name` zur Adresse. Läge er im Startordner,
+ * zerstörte ein Wechsel des Ordners die Verbindung.
+ *
+ * DualBeam spricht WebDAV ausschließlich über HTTPS an. Eine `http://`-Adresse
+ * wird deshalb übernommen, aber später verschlüsselt angesprochen; scheitert
+ * das, ist der Server schlicht ungeeignet. */
+export function webdavPresetFromUrl(url: string): {
+  host: string;
+  port: string;
+  basePath: string;
+} {
+  const leer = { host: "", port: "", basePath: "" };
+  const text = url.trim();
+  if (!text) return leer;
+  let zerlegt: URL;
+  try {
+    zerlegt = new URL(/^[a-z]+:\/\//i.test(text) ? text : `https://${text}`);
+  } catch {
+    return leer;
+  }
+  const pfad = zerlegt.pathname.replace(/\/+$/, "");
+  return {
+    host: zerlegt.hostname,
+    // Der Standardport bleibt leer, damit im Dialog der Hinweis „(443)“ steht
+    // statt einer Zahl, die der Benutzer nie eingegeben hat.
+    port: zerlegt.port && zerlegt.port !== "443" ? zerlegt.port : "",
+    basePath: pfad === "/" ? "" : pfad,
+  };
+}
 
 export function saveRemoteProfile(spec: RemoteSpec) {
   const profile = { ...spec, id: idFor(spec) };
