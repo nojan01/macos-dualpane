@@ -15,7 +15,7 @@ export type SyncProfile = {
    * den gesamten Abgleich.
    */
   maxFileSizeMb: number;
-  /** Stabile Zuordnung für rclone-Laufwerke. Der lokale Mount-Pfad ist nur
+  /** Stabile Zuordnung für Remote-Laufwerke einschließlich NFS. Der lokale Mount-Pfad ist nur
    * eine Momentaufnahme und kann nach einem Neustart anders heißen. */
   remotePaths?: {
     src?: { descriptor: string; relativePath: string };

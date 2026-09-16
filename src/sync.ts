@@ -11,6 +11,7 @@ import {
   remoteMounts,
   loadRemotePassword,
   mountRemote,
+  mountNfs,
   mountObjectStorage,
   listNetworkBookmarks,
   mountNetworkUrl,
@@ -18,6 +19,7 @@ import {
   type SyncEntry,
 } from "./ipc";
 import type { PaneId } from "./types";
+import { nfsDescriptor, nfsProfiles } from "./nfsProfiles";
 import { t, errMsg } from "./i18n";
 import { folderCopyDestination, joinPath } from "./paths";
 import { askConfirm, askPrompt, notifyError } from "./components/Dialogs";
@@ -163,6 +165,11 @@ function resolvedNetworkPath(
 }
 
 async function mountRemoteForSync(ref: RemotePathRef): Promise<string | null> {
+  const nfs = nfsProfiles().find((item) => nfsDescriptor(item) === ref.descriptor);
+  if (nfs) {
+    await mountNfs(nfs);
+    return null;
+  }
   const profile = remoteProfiles().find(
     (item) => remoteDescriptor(item) === ref.descriptor,
   );
@@ -208,6 +215,7 @@ function migrateLegacyRemotePath(
       remoteProfiles().some(
         (profile) => remoteDescriptor(profile) === mount.descriptor,
       ) ||
+      nfsProfiles().some((profile) => nfsDescriptor(profile) === mount.descriptor) ||
       // S3 und Swift werden über eigene Profile verwaltet. Ohne sie bliebe ein
       // Altprofil auf einem Objekt-Speicher dauerhaft unreparierbar.
       objectStorageProfiles().some(
