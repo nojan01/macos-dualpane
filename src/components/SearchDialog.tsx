@@ -55,7 +55,7 @@ export function SearchDialog() {
     setBusy(true);
     setInfo(t("search.searchingIn", { path: root }));
     try {
-      const list = await searchInDir(
+      const { entries: list, skipped } = await searchInDir(
         root,
         q,
         state.showHidden,
@@ -64,10 +64,14 @@ export function SearchDialog() {
       if (requestId !== request || !searchOpen()) return;
       resultPane = pane;
       setResults(list);
-      setInfo(
+      const hits =
         list.length >= SEARCH_RESULT_LIMIT
           ? t("search.hitsMax", { count: list.length })
-          : t("search.hits", { count: list.length }),
+          : t("search.hits", { count: list.length });
+      setInfo(
+        skipped > 0
+          ? `${hits} · ${t("search.skipped", { count: skipped })}`
+          : hits,
       );
     } catch (e) {
       if (requestId !== request || !searchOpen()) return;

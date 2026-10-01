@@ -810,6 +810,18 @@ body.col-resizing * {
   border-top: 1px solid #333;
   font-size: 12px;
 }
+.jobbar .job-spinner {
+  flex: none;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  border: 2px solid rgba(128, 128, 128, 0.35);
+  border-top-color: #4a90e2;
+  animation: job-spin 0.9s linear infinite;
+}
+@keyframes job-spin {
+  to { transform: rotate(360deg); }
+}
 .jobbar .kind {
   font-weight: 600;
   min-width: 90px;
@@ -2303,6 +2315,15 @@ body.dragging * {
 }
 
 /* utility classes replacing inline styles */
+.pane-warning {
+  padding: 4px 10px;
+  font-size: 11px;
+  color: var(--warning, #b8860b);
+  border-bottom: 1px solid var(--border, rgba(127, 127, 127, 0.3));
+}
+.props-warning {
+  color: var(--warning, #b8860b);
+}
 .pane-error-detail {
   font-size: 11px;
   opacity: 0.7;

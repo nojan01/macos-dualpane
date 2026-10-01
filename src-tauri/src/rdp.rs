@@ -186,10 +186,13 @@ pub fn rdp_profiles() -> Vec<RdpProfile> {
 pub fn rdp_connect(id: String) -> Result<(), String> {
     let known = read_profiles();
     let link = link_for(&id, &known).ok_or("err.rdp.unknown")?;
-    Command::new("open")
+    let status = Command::new("open")
         .arg(&link)
         .status()
         .map_err(|e| format!("err.rdp.open\u{1f}{e}"))?;
+    if !status.success() {
+        return Err(format!("err.rdp.open\u{1f}{status}"));
+    }
     Ok(())
 }
 

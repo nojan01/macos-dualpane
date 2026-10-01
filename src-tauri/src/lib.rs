@@ -7,6 +7,7 @@ use std::net::IpAddr;
 use std::process::{Command, Stdio};
 
 mod nfs;
+mod nfs_delete;
 mod object_storage;
 mod promise_drag;
 mod rdp;
@@ -57,6 +58,25 @@ fn run_cancellable_preview<T>(
 /// Halten des Locks paniert.
 fn lock_safe<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// Ergebnis einer Auflistung oder Suche. `skipped` zählt Einträge, die wegen
+/// eines Lesefehlers (etwa fehlender Berechtigung) nicht aufgenommen werden
+/// konnten – die Oberfläche weist darauf hin, statt sie still wegzulassen.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Listing {
+    pub entries: Vec<Entry>,
+    pub skipped: usize,
+}
+
+impl Listing {
+    fn complete(entries: Vec<Entry>) -> Self {
+        Listing {
+            entries,
+            skipped: 0,
+        }
+    }
 }
 
 #[derive(Serialize)]
@@ -223,9 +243,9 @@ pub(crate) fn open_new_window(app: &AppHandle) {
 }
 
 fn expand_tilde(p: &str) -> PathBuf {
-    if let Some(stripped) = p.strip_prefix("~") {
+    if p == "~" || p.starts_with("~/") {
         if let Some(home) = dirs::home_dir() {
-            let rest = stripped.trim_start_matches('/');
+            let rest = p[1..].trim_start_matches('/');
             return if rest.is_empty() {
                 home
             } else {
@@ -248,13 +268,13 @@ fn home_dir() -> Result<String, String> {
 /// je Eintrag bis zum Mount-Timeout und würden sonst die gesamte Oberfläche
 /// einfrieren.
 #[tauri::command]
-async fn list_dir(path: String, show_hidden: bool) -> Result<Vec<Entry>, String> {
+async fn list_dir(path: String, show_hidden: bool) -> Result<Listing, String> {
     tauri::async_runtime::spawn_blocking(move || list_dir_blocking(path, show_hidden))
         .await
         .map_err(|e| e.to_string())?
 }
 
-fn list_dir_blocking(path: String, show_hidden: bool) -> Result<Vec<Entry>, String> {
+fn list_dir_blocking(path: String, show_hidden: bool) -> Result<Listing, String> {
     let p = expand_tilde(&path);
     // S3 und Swift sind ab Version 0.4.17 direkte DualBeam-Dateiräume. Ihre
     // Inhalte werden über die Objekt-Speicher-API gelesen, nicht über einen
@@ -263,7 +283,7 @@ fn list_dir_blocking(path: String, show_hidden: bool) -> Result<Vec<Entry>, Stri
     if let Some(result) = remote::list_object_storage_dir(&p) {
         let remembered_times = remote::object_directory_times_in(&p);
         return result.map(|entries| {
-            entries
+            let entries = entries
                 .into_iter()
                 .filter(|entry| {
                     (show_hidden || !entry.name.starts_with('.')) && entry.name != ".DualBeamUndo"
@@ -300,7 +320,8 @@ fn list_dir_blocking(path: String, show_hidden: bool) -> Result<Vec<Entry>, Stri
                         mode_str: String::new(),
                     }
                 })
-                .collect()
+                .collect();
+            Listing::complete(entries)
         });
     }
     // WebDAV, SMB und FTP werden ebenfalls unmittelbar am Server gelesen. Ihre
@@ -310,7 +331,7 @@ fn list_dir_blocking(path: String, show_hidden: bool) -> Result<Vec<Entry>, Stri
     // aufholt.
     if let Some(result) = remote::list_rclone_dir(&p) {
         return result.map(|entries| {
-            entries
+            let entries = entries
                 .into_iter()
                 .filter(|entry| {
                     (show_hidden || !entry.name.starts_with('.')) && entry.name != ".DualBeamUndo"
@@ -342,7 +363,8 @@ fn list_dir_blocking(path: String, show_hidden: bool) -> Result<Vec<Entry>, Stri
                         mode_str: String::new(),
                     }
                 })
-                .collect()
+                .collect();
+            Listing::complete(entries)
         });
     }
     let read = std::fs::read_dir(&p).map_err(|e| format!("{}: {}", p.display(), e))?;
@@ -359,7 +381,12 @@ fn list_dir_blocking(path: String, show_hidden: bool) -> Result<Vec<Entry>, Stri
 
     use std::os::unix::fs::MetadataExt;
     let mut out: Vec<Entry> = Vec::new();
-    for ent in read.flatten() {
+    let mut skipped = 0usize;
+    for ent in read {
+        let Ok(ent) = ent else {
+            skipped += 1;
+            continue;
+        };
         let path = ent.path();
         let name = ent.file_name().to_string_lossy().into_owned();
         let hidden = name.starts_with('.');
@@ -446,7 +473,10 @@ fn list_dir_blocking(path: String, show_hidden: bool) -> Result<Vec<Entry>, Stri
         });
     }
     repair_webdav_entries(&mut out, &p);
-    Ok(out)
+    Ok(Listing {
+        entries: out,
+        skipped,
+    })
 }
 
 /// Füllt Lücken, die `webdavfs` hinterlässt, aus einer Serverabfrage auf.
@@ -1036,7 +1066,7 @@ async fn undo_staged_delete(items: Vec<UndoDeleteItem>) -> Result<(), String> {
 
 fn undo_staged_delete_blocking(items: Vec<UndoDeleteItem>) -> Result<(), String> {
     let mut staging_dirs: Vec<PathBuf> = Vec::new();
-    for item in &items {
+    for (index, item) in items.iter().enumerate() {
         let original = PathBuf::from(&item.original);
         let staged = PathBuf::from(&item.staged);
         if let Some(parent) = staged.parent() {
@@ -1045,14 +1075,30 @@ fn undo_staged_delete_blocking(items: Vec<UndoDeleteItem>) -> Result<(), String>
                 staging_dirs.push(parent);
             }
         }
-        if original.exists() {
-            return Err(format!("{} existiert bereits", original.display()));
+        let restore = || -> std::io::Result<()> {
+            if let Some(parent) = original.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            // Auch hängende Symlinks und zwischenzeitlich angelegte Dateien schützen.
+            rename_no_clobber(&staged, &original)
+        };
+        if let Err(error) = restore() {
+            // Der Frontend-Undo-Eintrag enthält weiterhin die gesamte Auswahl.
+            // Bereits wiederhergestellte Dateien zurücklegen, damit ein erneuter
+            // Versuch nicht an den eigenen, teilweise restaurierten Dateien scheitert.
+            let mut message = format!("{}: {}", original.display(), error);
+            for restored in items[..index].iter().rev() {
+                if let Err(rollback_error) =
+                    rename_no_clobber(Path::new(&restored.original), Path::new(&restored.staged))
+                {
+                    message.push_str(&format!(
+                        "\nRückabwicklung für {} fehlgeschlagen: {}",
+                        restored.original, rollback_error
+                    ));
+                }
+            }
+            return Err(message);
         }
-        if let Some(parent) = original.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-        }
-        std::fs::rename(&staged, &original)
-            .map_err(|e| format!("{}: {}", original.display(), e))?;
     }
     remove_empty_staging_dirs(&staging_dirs);
     Ok(())
@@ -1412,6 +1458,26 @@ fn statfs_fstype(path: &Path) -> Option<String> {
     None
 }
 
+// Mounts mit `nobrowse` (z.B. Recovery, Preboot, Disk-Images von Installern)
+// blendet auch der Finder aus. Nur der Mountpoint selbst zählt: Ein normaler
+// Ordner unter /Volumes läge sonst auf dem ebenfalls `nobrowse` markierten
+// Data-Volume und würde fälschlich versteckt.
+fn is_nobrowse_mount(path: &Path) -> bool {
+    use std::os::unix::ffi::OsStrExt;
+    let Ok(raw) = std::ffi::CString::new(path.as_os_str().as_bytes()) else {
+        return false;
+    };
+    let mut info: libc::statfs = unsafe { std::mem::zeroed() };
+    if unsafe { libc::statfs(raw.as_ptr(), &mut info) } != 0 {
+        return false;
+    }
+    if info.f_flags & (libc::MNT_DONTBROWSE as u32) == 0 {
+        return false;
+    }
+    let mounted_on = unsafe { std::ffi::CStr::from_ptr(info.f_mntonname.as_ptr()) };
+    Path::new(std::ffi::OsStr::from_bytes(mounted_on.to_bytes())) == path
+}
+
 fn is_network_path(path: &Path, mounts: &std::collections::HashMap<String, String>) -> bool {
     // SFTP/FTP/FTPS werden von DualBeam über rclone unterhalb des eigenen
     // App-Ordners eingehängt. Sie erscheinen nicht zuverlässig in der
@@ -1477,6 +1543,9 @@ fn list_volumes_blocking() -> Result<Vec<Volume>, String> {
             }
             // Synthetische APFS-Firmlinks (z.B. TimeMachine-Snapshots) ausblenden.
             if name == "com.apple.TimeMachine.localsnapshots" {
+                continue;
+            }
+            if is_nobrowse_mount(&path) {
                 continue;
             }
             let path_str = path.to_string_lossy().into_owned();
@@ -1839,10 +1908,15 @@ fn mounted_volume_for_url(url: &str) -> Option<String> {
     let normalized = url.trim_end_matches('/');
     // Die Mount-Tabelle ist verlässlicher als eine Namensableitung. Sie löst
     // auch einen automatisch angehängten „ 2“-Suffix am macOS-Volume auf.
-    if let Some((path, _)) = mount_source_and_fstype().into_iter().find(|(_, (source, fstype))| {
-        fstype == "webdav"
-            && source.trim_end_matches('/').eq_ignore_ascii_case(normalized)
-    }) {
+    if let Some((path, _)) = mount_source_and_fstype()
+        .into_iter()
+        .find(|(_, (source, fstype))| {
+            fstype == "webdav"
+                && source
+                    .trim_end_matches('/')
+                    .eq_ignore_ascii_case(normalized)
+        })
+    {
         return Some(path);
     }
     let pfad = format!("/Volumes/{}", volume_name_from_url(url)?);
@@ -2251,10 +2325,152 @@ struct JobProgress {
     /// 0%-Balkens.
     #[serde(default)]
     indeterminate: bool,
+    /// Fortschritt der gerade laufenden Einzeldatei. Große Dateien über
+    /// langsame Verbindungen liefern sonst minutenlang kein Ereignis, und die
+    /// Oberfläche wirkt eingefroren.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    file_progress: Option<FileProgress>,
     current: String,
     finished: bool,
     cancelled: bool,
     error: Option<String>,
+}
+
+#[derive(Serialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+struct FileProgress {
+    /// Bereits übertragene Bytes. `None`, wenn der Übertragungsweg (etwa ein
+    /// WebDAV-Upload per curl) keinen Zwischenstand liefert.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    bytes_done: Option<u64>,
+    bytes_total: u64,
+    /// Laufzeit der aktuellen Datei. Sie ändert sich auch ohne Bytezähler und
+    /// zeigt damit, dass der Auftrag noch aktiv ist.
+    elapsed_ms: u64,
+}
+
+/// Gemeinsamer Zwischenstand einer Einzeldatei-Kopie. Die Kopierfunktionen
+/// laufen im Job-Thread und melden hierüber ihren Fortschritt, ohne dass jede
+/// Signatur (und jeder Test) einen zusätzlichen Parameter benötigt.
+#[derive(Default)]
+struct CopyProgressSink {
+    bytes: AtomicU64,
+    /// Ziel, dessen wachsende Größe beobachtet wird, solange `copyfile(3)`
+    /// selbst keinen Zwischenstand liefert.
+    probe: Mutex<Option<PathBuf>>,
+}
+
+impl CopyProgressSink {
+    fn reset(&self, probe: Option<&Path>) {
+        self.bytes.store(0, Ordering::Relaxed);
+        if let Ok(mut guard) = self.probe.lock() {
+            *guard = probe.map(Path::to_path_buf);
+        }
+    }
+
+    fn bytes_done(&self) -> u64 {
+        let counted = self.bytes.load(Ordering::Relaxed);
+        let probed = self
+            .probe
+            .lock()
+            .ok()
+            .and_then(|guard| guard.clone())
+            .and_then(|path| std::fs::symlink_metadata(path).ok())
+            .map(|meta| meta.len())
+            .unwrap_or(0);
+        counted.max(probed)
+    }
+}
+
+thread_local! {
+    static COPY_PROGRESS: RefCell<Option<Arc<CopyProgressSink>>> = const { RefCell::new(None) };
+}
+
+fn copy_progress_reset(probe: Option<&Path>) {
+    COPY_PROGRESS.with(|slot| {
+        if let Some(sink) = slot.borrow().as_ref() {
+            sink.reset(probe);
+        }
+    });
+}
+
+fn copy_progress_add(bytes: u64) {
+    COPY_PROGRESS.with(|slot| {
+        if let Some(sink) = slot.borrow().as_ref() {
+            sink.bytes.fetch_add(bytes, Ordering::Relaxed);
+        }
+    });
+}
+
+/// Meldet während einer einzelnen, möglicherweise langen Dateikopie
+/// regelmäßig einen Zwischenstand. Beim Drop wird der Beobachter sofort
+/// beendet, damit das abschließende Ereignis des Jobs nicht überholt wird.
+struct FileProgressMonitor {
+    stop: Arc<AtomicBool>,
+    handle: Option<std::thread::JoinHandle<()>>,
+}
+
+impl FileProgressMonitor {
+    const INTERVAL: Duration = Duration::from_millis(500);
+
+    fn start(ctx: &JobCtx<'_>, src: &Path, measurable: bool) -> Self {
+        let sink = Arc::new(CopyProgressSink::default());
+        COPY_PROGRESS.with(|slot| *slot.borrow_mut() = Some(sink.clone()));
+        let stop = Arc::new(AtomicBool::new(false));
+        let bytes_total = std::fs::metadata(src).map(|meta| meta.len()).unwrap_or(0);
+        let app = ctx.app.clone();
+        let job_id = ctx.job_id.to_string();
+        let done = ctx.done;
+        let total = ctx.total.max(ctx.done);
+        let files_done = ctx.files_done;
+        let current = src.to_string_lossy().to_string();
+        let thread_stop = stop.clone();
+        let handle = std::thread::Builder::new()
+            .name("dualbeam-copy-progress".into())
+            .spawn(move || {
+                let started = Instant::now();
+                loop {
+                    std::thread::park_timeout(Self::INTERVAL);
+                    if thread_stop.load(Ordering::SeqCst) {
+                        break;
+                    }
+                    let bytes_done = measurable.then(|| sink.bytes_done().min(bytes_total));
+                    let _ = app.emit(
+                        "job-progress",
+                        JobProgress {
+                            job_id: job_id.clone(),
+                            done,
+                            total,
+                            files_done,
+                            transfer_percent: None,
+                            file_progress: Some(FileProgress {
+                                bytes_done,
+                                bytes_total,
+                                elapsed_ms: started.elapsed().as_millis() as u64,
+                            }),
+                            indeterminate: false,
+                            current: current.clone(),
+                            finished: false,
+                            cancelled: false,
+                            error: None,
+                        },
+                    );
+                }
+            })
+            .ok();
+        Self { stop, handle }
+    }
+}
+
+impl Drop for FileProgressMonitor {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::SeqCst);
+        if let Some(handle) = self.handle.take() {
+            handle.thread().unpark();
+            let _ = handle.join();
+        }
+        COPY_PROGRESS.with(|slot| *slot.borrow_mut() = None);
+    }
 }
 
 #[derive(Default)]
@@ -2328,6 +2544,28 @@ impl<'a> JobCtx<'a> {
         self.target_is_webdav
     }
 
+    /// Nach einem Einzeldatei-Zwischenstand muss das nächste reguläre
+    /// Ereignis ungedrosselt folgen, sonst bliebe ein veralteter Bytestand
+    /// sichtbar.
+    fn force_next_emit(&self) {
+        self.last_reported_done.set(u64::MAX);
+    }
+
+    /// Kopiert eine Einzeldatei und meldet währenddessen Zwischenstände.
+    fn copy_single_file<T>(
+        &self,
+        src: &Path,
+        copy: impl FnOnce() -> std::io::Result<T>,
+    ) -> std::io::Result<T> {
+        // Ein WebDAV-Upload läuft per curl am Mount vorbei; dort steht nur die
+        // Laufzeit, aber kein Bytezähler zur Verfügung.
+        let monitor = FileProgressMonitor::start(self, src, self.webdav_target.is_none());
+        let result = copy();
+        drop(monitor);
+        self.force_next_emit();
+        result
+    }
+
     fn emit(&self, current: &str) {
         const MIN_PROGRESS_INTERVAL: Duration = Duration::from_millis(125);
         let now = Instant::now();
@@ -2352,6 +2590,7 @@ impl<'a> JobCtx<'a> {
                 total,
                 files_done: self.files_done,
                 transfer_percent: None,
+                file_progress: None,
                 indeterminate: false,
                 current: current.to_string(),
                 finished: false,
@@ -2466,6 +2705,7 @@ impl<'a> DeleteCtx<'a> {
                     total: self.total,
                     files_done: self.done,
                     transfer_percent: None,
+                    file_progress: None,
                     indeterminate: false,
                     current: path.to_string_lossy().into_owned(),
                     finished: false,
@@ -2490,6 +2730,7 @@ impl<'a> DeleteCtx<'a> {
                 total: self.total,
                 files_done: self.done,
                 transfer_percent: None,
+                file_progress: None,
                 indeterminate: false,
                 current: path.to_string_lossy().into_owned(),
                 finished: false,
@@ -2514,6 +2755,7 @@ impl<'a> DeleteCtx<'a> {
                 total: self.total,
                 files_done: self.done,
                 transfer_percent: None,
+                file_progress: None,
                 indeterminate: false,
                 current: path.to_string_lossy().into_owned(),
                 finished: false,
@@ -3802,6 +4044,7 @@ async fn run_network_delete(
                 total: 0,
                 files_done: 0,
                 transfer_percent: None,
+                file_progress: None,
                 indeterminate: false,
                 current: String::new(),
                 finished: false,
@@ -3892,7 +4135,7 @@ async fn run_network_delete(
         // Badge einen echten Wert statt „?". Die Vorschau ist aber nur ein
         // Komfortgewinn: Sie darf den eigentlichen Löschvorgang nicht aufhalten
         // und wird deshalb übersprungen, sobald sie zu teuer wird.
-        let mut planned: Vec<(PathBuf, u64)> = Vec::with_capacity(paths.len());
+        let mut planned: Vec<(PathBuf, u64, bool)> = Vec::with_capacity(paths.len());
         let mut count_ok = true;
         // Zeitbudget für die gesamte Vorschau. Läuft es ab, wird ohne
         // Gesamtzahl gelöscht statt den Auftrag weiter aufzuhalten.
@@ -3906,23 +4149,25 @@ async fn run_network_delete(
             // WebDAV wird unabhängig vom Mount direkt auf dem Server gelöscht.
             // Die lokale Cache-Anzeige ist keine zuverlässige Quelle für eine
             // rekursive Zählung und darf den DELETE-Auftrag nicht verzögern.
-            if best_webdav_mount(&mount_list, &path).is_some() {
+            // Bei echtem NFS ebenfalls ohne zweiten Baumdurchlauf sofort löschen.
+            let is_nfs = statfs_fstype(&path).as_deref() == Some("nfs");
+            if is_nfs || best_webdav_mount(&mount_list, &path).is_some() {
                 count_ok = false;
-                planned.push((path, 0));
+                planned.push((path, 0, is_nfs));
                 continue;
             }
             match count_delete_entries(&path, &cancel_for_worker, count_deadline) {
-                Ok(n) => planned.push((path, n)),
+                Ok(n) => planned.push((path, n, false)),
                 // Lässt sich ein Pfad nicht zählen, bleibt die Gesamtzahl offen
                 // (unbestimmter Balken) statt eine falsche Zahl anzuzeigen.
                 Err(_) => {
                     count_ok = false;
-                    planned.push((path, 0));
+                    planned.push((path, 0, false));
                 }
             }
         }
         ctx.total = if count_ok {
-            planned.iter().map(|(_, n)| *n).sum()
+            planned.iter().map(|(_, n, _)| *n).sum()
         } else {
             0
         };
@@ -3936,6 +4181,7 @@ async fn run_network_delete(
                     total: ctx.total,
                     files_done: 0,
                     transfer_percent: None,
+                    file_progress: None,
                     indeterminate: false,
                     current: String::new(),
                     finished: false,
@@ -3949,9 +4195,22 @@ async fn run_network_delete(
         // DELETE neu einlesen muss (siehe Aufräumen unterhalb der Schleife).
         let mut stale_parents: Vec<PathBuf> = Vec::new();
         let mut outcome: Result<(), String> = Ok(());
-        for (path, count) in planned {
+        for (path, count, is_nfs) in planned {
             if cancel_for_worker.load(Ordering::SeqCst) {
                 break;
+            }
+            if is_nfs {
+                ctx.working_on(&path);
+                match nfs_delete::remove_tree(&path, &cancel_for_worker, |removed| ctx.removed(removed)) {
+                    Ok(()) => ctx.confirmed_removed(&path),
+                    Err(error) if cancel_for_worker.load(Ordering::SeqCst)
+                        && error.kind() == std::io::ErrorKind::Interrupted => break,
+                    Err(error) => {
+                        outcome = Err(delete_error_message(&path, &error));
+                        break;
+                    }
+                }
+                continue;
             }
             // Verbindlicher, vom Objekt-Speicher vollständig getrennter
             // WebDAV-Weg: genau ein serverseitiger DELETE für Datei oder
@@ -4080,6 +4339,7 @@ async fn run_network_delete(
             total: 0,
             files_done: 0,
             transfer_percent: None,
+            file_progress: None,
             indeterminate: false,
             current: String::new(),
             finished: true,
@@ -4192,6 +4452,7 @@ fn copy_file_with_metadata(src: &Path, dst: &Path) -> std::io::Result<()> {
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
 
     let call = |flags: u32| -> std::io::Result<()> {
+        copy_progress_reset(Some(dst));
         let ret = unsafe { copyfile(s.as_ptr(), d.as_ptr(), std::ptr::null_mut(), flags) };
         if ret != 0 {
             Err(std::io::Error::last_os_error())
@@ -4253,7 +4514,7 @@ fn copy_file_with_metadata(src: &Path, dst: &Path) -> std::io::Result<()> {
 /// zum Server übergeben wurde. Die Größenprüfung verhindert, dass ein Server
 /// eine nur angelegte 0-Byte-Datei als erfolgreiche Kopie erscheinen lässt.
 fn copy_file_data_synchronously(src: &Path, dst: &Path) -> std::io::Result<()> {
-    use std::io::{BufReader, BufWriter, Write};
+    use std::io::{BufReader, BufWriter};
 
     let expected_len = std::fs::metadata(src)?.len();
     let input = std::fs::File::open(src)?;
@@ -4262,9 +4523,24 @@ fn copy_file_data_synchronously(src: &Path, dst: &Path) -> std::io::Result<()> {
         .create(true)
         .truncate(true)
         .open(dst)?;
+    copy_progress_reset(None);
     let mut reader = BufReader::with_capacity(1024 * 1024, input);
     let mut writer = BufWriter::with_capacity(1024 * 1024, output);
-    let written = std::io::copy(&mut reader, &mut writer)?;
+    // Eigene Schleife statt `io::copy`, damit der Zwischenstand großer
+    // Dateien über langsame Verbindungen sichtbar bleibt.
+    let mut buffer = vec![0u8; 1024 * 1024];
+    let mut written: u64 = 0;
+    loop {
+        let read = match reader.read(&mut buffer) {
+            Ok(0) => break,
+            Ok(read) => read,
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(error) => return Err(error),
+        };
+        writer.write_all(&buffer[..read])?;
+        written += read as u64;
+        copy_progress_add(read as u64);
+    }
     writer.flush()?;
     let output = writer.into_inner().map_err(|e| e.into_error())?;
     // macOS' `webdavfs` schreibt die Daten korrekt zum Server, unterstützt
@@ -4674,18 +4950,23 @@ fn copy_recursive(
                                 // WebDAV und SSHFS erhalten keinen
                                 // `copyfile`-Schnellpfad, sondern einen
                                 // synchron bestätigten Datenstrom.
-                                ensure_copy_target_file_parent(dst, ctx)?;
-                                copy_file_retry(
-                                    src,
-                                    dst,
-                                    ctx.cancel,
-                                    ctx.force_synchronous_data_copy(),
-                                    ctx.webdav_target.as_ref(),
-                                )
-                                .map(|_| {
-                                    ctx.files_done += 1;
-                                    ctx.emit(&src.to_string_lossy());
-                                    CopyOutcome::Copied
+                                // Kein `?`: deref_depth muss unten immer
+                                // wieder verringert werden.
+                                ensure_copy_target_file_parent(dst, ctx).and_then(|_| {
+                                    ctx.copy_single_file(src, || {
+                                        copy_file_retry(
+                                            src,
+                                            dst,
+                                            ctx.cancel,
+                                            ctx.force_synchronous_data_copy(),
+                                            ctx.webdav_target.as_ref(),
+                                        )
+                                    })
+                                    .map(|_| {
+                                        ctx.files_done += 1;
+                                        ctx.emit(&src.to_string_lossy());
+                                        CopyOutcome::Copied
+                                    })
                                 })
                             };
                             ctx.deref_depth -= 1;
@@ -4734,25 +5015,27 @@ fn copy_recursive(
             return Ok(CopyOutcome::Skipped);
         }
         ensure_copy_target_file_parent(dst, ctx)?;
-        if ctx.webdav_target.is_some() {
-            copy_file_retry(
-                src,
-                dst,
-                ctx.cancel,
-                ctx.force_synchronous_data_copy(),
-                ctx.webdav_target.as_ref(),
-            )
-        } else if replacing {
-            replace_file_after_copy(src, dst, ctx.cancel, ctx.force_synchronous_data_copy())
-        } else {
-            copy_file_retry(
-                src,
-                dst,
-                ctx.cancel,
-                ctx.force_synchronous_data_copy(),
-                None,
-            )
-        }?;
+        ctx.copy_single_file(src, || {
+            if ctx.webdav_target.is_some() {
+                copy_file_retry(
+                    src,
+                    dst,
+                    ctx.cancel,
+                    ctx.force_synchronous_data_copy(),
+                    ctx.webdav_target.as_ref(),
+                )
+            } else if replacing {
+                replace_file_after_copy(src, dst, ctx.cancel, ctx.force_synchronous_data_copy())
+            } else {
+                copy_file_retry(
+                    src,
+                    dst,
+                    ctx.cancel,
+                    ctx.force_synchronous_data_copy(),
+                    None,
+                )
+            }
+        })?;
         ctx.files_done += 1;
         ctx.emit(&src.to_string_lossy());
         Ok(CopyOutcome::Copied)
@@ -4783,6 +5066,7 @@ fn copy_to_sftp_mount_with_native_client(
             total: ctx.total,
             files_done: ctx.files_done,
             transfer_percent: None,
+            file_progress: None,
             indeterminate: true,
             current: src.to_string_lossy().into_owned(),
             finished: false,
@@ -4806,6 +5090,7 @@ fn copy_to_sftp_mount_with_native_client(
                         total: ctx.total,
                         files_done: ctx.files_done,
                         transfer_percent: Some(transfer_percent),
+                        file_progress: None,
                         indeterminate: false,
                         current: path,
                         finished: false,
@@ -4824,6 +5109,7 @@ fn copy_to_sftp_mount_with_native_client(
                 total: ctx.total,
                 files_done: ctx.files_done,
                 transfer_percent: Some(transfer_percent),
+                file_progress: None,
                 indeterminate: false,
                 current: current.clone(),
                 finished: false,
@@ -4867,6 +5153,7 @@ fn copy_via_rclone_direct(
             total: ctx.total,
             files_done: ctx.files_done,
             transfer_percent: None,
+            file_progress: None,
             indeterminate: true,
             current: src.to_string_lossy().into_owned(),
             finished: false,
@@ -4890,6 +5177,7 @@ fn copy_via_rclone_direct(
                         total: ctx.total,
                         files_done: ctx.files_done,
                         transfer_percent: Some(transfer_percent),
+                        file_progress: None,
                         indeterminate: false,
                         current: path,
                         finished: false,
@@ -4908,6 +5196,7 @@ fn copy_via_rclone_direct(
                 total: ctx.total,
                 files_done: ctx.files_done,
                 transfer_percent: Some(transfer_percent),
+                file_progress: None,
                 indeterminate: false,
                 current: current.clone(),
                 finished: false,
@@ -4945,10 +5234,7 @@ fn describe_copy_failure(src: &Path, dst: &Path, error: &std::io::Error) -> Stri
     format!("{}: {error}", src.display())
 }
 
-fn rclone_direct_plan(
-    src: &Path,
-    dst: &Path,
-) -> Option<(remote::RcloneTransferContext, bool)> {
+fn rclone_direct_plan(src: &Path, dst: &Path) -> Option<(remote::RcloneTransferContext, bool)> {
     let source = remote::rclone_transfer_context(src);
     let target = remote::rclone_transfer_context(dst);
     match (source, target) {
@@ -5223,6 +5509,7 @@ async fn run_job(
             total: 0,
             files_done: 0,
             transfer_percent: None,
+            file_progress: None,
             indeterminate: false,
             current: String::new(),
             finished: true,
@@ -6398,7 +6685,7 @@ async fn search_in_dir(
     query: String,
     show_hidden: bool,
     max_results: usize,
-) -> Result<Vec<Entry>, String> {
+) -> Result<Listing, String> {
     tauri::async_runtime::spawn_blocking(move || {
         search_in_dir_blocking(root, query, show_hidden, max_results)
     })
@@ -6411,11 +6698,11 @@ fn search_in_dir_blocking(
     query: String,
     show_hidden: bool,
     max_results: usize,
-) -> Result<Vec<Entry>, String> {
+) -> Result<Listing, String> {
     let p = expand_tilde(&root);
     let q = query.to_lowercase();
     if q.is_empty() {
-        return Ok(vec![]);
+        return Ok(Listing::complete(vec![]));
     }
     let use_glob = q.contains('*') || q.contains('?');
     // Glob ohne Anker -> als Teilstring matchen (umschließe mit *...*)
@@ -6448,7 +6735,18 @@ fn search_in_dir_blocking(
             }
             true
         });
-    for entry in walker.flatten() {
+    let mut skipped = 0usize;
+    for entry in walker {
+        let entry = match entry {
+            Ok(entry) => entry,
+            // Ist schon der Startordner unlesbar, gibt es kein Ergebnis –
+            // das ist ein Fehler, keine leere Trefferliste.
+            Err(e) if e.depth() == 0 => return Err(format!("{}: {}", p.display(), e)),
+            Err(_) => {
+                skipped += 1;
+                continue;
+            }
+        };
         if entry.depth() == 0 {
             continue;
         }
@@ -6464,7 +6762,10 @@ fn search_in_dir_blocking(
         }
         let meta = match entry.metadata() {
             Ok(m) => m,
-            Err(_) => continue,
+            Err(_) => {
+                skipped += 1;
+                continue;
+            }
         };
         let path_buf = entry.path().to_path_buf();
         let is_symlink = std::fs::symlink_metadata(&path_buf)
@@ -6514,19 +6815,74 @@ fn search_in_dir_blocking(
             break;
         }
     }
-    Ok(out)
+    Ok(Listing {
+        entries: out,
+        skipped,
+    })
 }
 
 const ZIP_MAX_ENTRY_COUNT: usize = 100_000;
 const ZIP_MAX_UNCOMPRESSED_BYTES: u64 = 20 * 1024 * 1024 * 1024;
 
 fn zip_create_inner(srcs: Vec<String>, dst: String) -> Result<(), String> {
+    let dst_path = expand_tilde(&dst);
+    // Die Namensprüfung der UI kann inzwischen veraltet sein. Niemals ein
+    // vorhandenes Archiv oder ein Symlink-Ziel abschneiden.
+    if path_occupied_no_follow(&dst_path) {
+        return Err(format!("Ziel existiert bereits: {}", dst_path.display()));
+    }
+    // Das Archiv entsteht zunächst unter einem versteckten Tempnamen und wird
+    // erst nach erfolgreichem Abschluss umbenannt. Ein Fehler hinterlässt so
+    // kein halbfertiges, scheinbar gültiges Archiv.
+    let (temp, file) = create_temp_sibling(&dst_path, |candidate| {
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(candidate)
+    })?;
+    let result = zip_write_archive(file, srcs)
+        .and_then(|()| rename_no_clobber(&temp, &dst_path).map_err(|e| e.to_string()));
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temp);
+    }
+    result
+}
+
+/// Wählt einen freien, versteckten Tempnamen neben `dst` und legt ihn mit
+/// `create` exklusiv an. Das Namensschema entspricht den übrigen
+/// `.inprogress`-Dateien und wird daher von der Oberfläche ausgeblendet.
+fn create_temp_sibling<T>(
+    dst: &Path,
+    create: impl Fn(&Path) -> std::io::Result<T>,
+) -> Result<(PathBuf, T), String> {
+    let parent = dst
+        .parent()
+        .ok_or_else(|| format!("ungültiger Zielpfad: {}", dst.display()))?;
+    let name = dst
+        .file_name()
+        .ok_or_else(|| format!("ungültiger Zielpfad: {}", dst.display()))?
+        .to_string_lossy()
+        .into_owned();
+    static NEXT_TEMP_SIBLING_ID: std::sync::atomic::AtomicU64 =
+        std::sync::atomic::AtomicU64::new(0);
+    let pid = std::process::id();
+    for _ in 0..1000 {
+        let id = NEXT_TEMP_SIBLING_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let candidate = parent.join(format!(".{name}.dualbeam-{pid}-{id}.inprogress"));
+        match create(&candidate) {
+            Ok(value) => return Ok((candidate, value)),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e.to_string()),
+        }
+    }
+    Err("keine freie temporäre Zieldatei gefunden".into())
+}
+
+fn zip_write_archive(file: std::fs::File, srcs: Vec<String>) -> Result<(), String> {
     use std::fs::File;
     use std::io::copy;
     use zip::write::SimpleFileOptions;
 
-    let dst_path = expand_tilde(&dst);
-    let file = File::create(&dst_path).map_err(|e| e.to_string())?;
     let mut zw = zip::ZipWriter::new(file);
     let options: SimpleFileOptions = SimpleFileOptions::default()
         .compression_method(zip::CompressionMethod::Deflated)
@@ -6540,6 +6896,10 @@ fn zip_create_inner(srcs: Vec<String>, dst: String) -> Result<(), String> {
             .to_string_lossy()
             .into_owned();
         if p.is_dir() {
+            // Auch der ausgewählte Wurzelordner selbst muss enthalten sein,
+            // sonst verschwindet ein leerer Ordner vollständig aus dem Archiv.
+            zw.add_directory(format!("{base}/"), options)
+                .map_err(|err| err.to_string())?;
             for entry in WalkDir::new(&p) {
                 let e = entry.map_err(|err| err.to_string())?;
                 let path = e.path();
@@ -6582,14 +6942,32 @@ async fn zip_create(srcs: Vec<String>, dst: String) -> Result<(), String> {
 }
 
 fn zip_extract_inner(src: String, dst_dir: String) -> Result<(), String> {
-    use std::fs::{self, File, OpenOptions};
-    use std::io::copy;
+    use std::fs;
 
     let src_path = expand_tilde(&src);
     let dst_path = expand_tilde(&dst_dir);
-    fs::create_dir_all(&dst_path).map_err(|e| e.to_string())?;
+    if path_occupied_no_follow(&dst_path) {
+        return Err(format!("Ziel existiert bereits: {}", dst_path.display()));
+    }
+    if let Some(parent) = dst_path.parent() {
+        fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    // In einen frischen, versteckten Ordner entpacken und erst nach Erfolg
+    // umbenennen: Ein Fehler hinterlässt keinen halb entpackten Zielordner.
+    let (temp, ()) = create_temp_sibling(&dst_path, |candidate| fs::create_dir(candidate))?;
+    let result = zip_extract_into(&src_path, &temp)
+        .and_then(|()| rename_no_clobber(&temp, &dst_path).map_err(|e| e.to_string()));
+    if result.is_err() {
+        let _ = fs::remove_dir_all(&temp);
+    }
+    result
+}
 
-    let file = File::open(&src_path).map_err(|e| e.to_string())?;
+fn zip_extract_into(src_path: &Path, dst_path: &Path) -> Result<(), String> {
+    use std::fs::{self, File, OpenOptions};
+    use std::io::copy;
+
+    let file = File::open(src_path).map_err(|e| e.to_string())?;
     let mut archive = zip::ZipArchive::new(file).map_err(|e| e.to_string())?;
     if archive.len() > ZIP_MAX_ENTRY_COUNT {
         return Err(format!(
@@ -6624,7 +7002,7 @@ fn zip_extract_inner(src: String, dst_dir: String) -> Result<(), String> {
         }
         let out_path = dst_path.join(&rel);
         // Sicherstellen, dass out_path tatsächlich unterhalb von dst_path liegt.
-        if !out_path.starts_with(&dst_path) {
+        if !out_path.starts_with(dst_path) {
             continue;
         }
         if entry.is_dir() {
@@ -6633,7 +7011,7 @@ fn zip_extract_inner(src: String, dst_dir: String) -> Result<(), String> {
             if let Some(parent) = out_path.parent() {
                 fs::create_dir_all(parent).map_err(|e| e.to_string())?;
             }
-            // Das Zielverzeichnis wird von der UI immer neu angelegt. `create_new`
+            // Das Zielverzeichnis wird immer frisch angelegt. `create_new`
             // verhindert, dass doppelte ZIP-Einträge oder ein zwischenzeitlich
             // angelegter Pfad unbemerkt überschrieben werden.
             let mut out = OpenOptions::new()
@@ -6948,6 +7326,9 @@ struct Properties {
     size: Option<u64>,
     file_count: Option<u64>,
     dir_count: Option<u64>,
+    /// Anzahl der Einträge, die beim Summieren nicht gelesen werden konnten.
+    /// Größe und Zähler sind dann Untergrenzen.
+    unreadable: u64,
     mtime: i64,
     btime: i64,
     atime: i64,
@@ -6957,6 +7338,39 @@ struct Properties {
     gid: u32,
     mode: u32,
     mode_str: String,
+}
+
+#[derive(Debug, Default, PartialEq)]
+struct TreeSummary {
+    size: u64,
+    files: u64,
+    dirs: u64,
+    unreadable: u64,
+}
+
+/// Summiert einen lokalen Baum ohne Links zu folgen. Nicht lesbare Einträge
+/// werden gezählt statt stillschweigend übergangen.
+fn summarize_tree(root: &Path) -> TreeSummary {
+    let mut t = TreeSummary::default();
+    for entry in walkdir::WalkDir::new(root)
+        .follow_links(false)
+        .follow_root_links(false)
+        .min_depth(1)
+    {
+        let Ok(entry) = entry else {
+            t.unreadable += 1;
+            continue;
+        };
+        match entry.metadata() {
+            Ok(m) if m.is_dir() => t.dirs += 1,
+            Ok(m) => {
+                t.files += 1;
+                t.size += m.len();
+            }
+            Err(_) => t.unreadable += 1,
+        }
+    }
+    t
 }
 
 #[tauri::command]
@@ -7008,36 +7422,22 @@ async fn get_properties(path: String) -> Result<Properties, String> {
         let owner = uid_to_name(meta.uid());
         let group = gid_to_name(meta.gid());
 
-        let (size, file_count, dir_count) = if meta.is_dir() && remote::is_remote_mount(&p) {
+        let (size, file_count, dir_count, unreadable) = if is_symlink && meta.is_dir() {
+            // Ein Link auf einen Ordner ist selbst kein Ordnerinhalt. Den
+            // Zielbaum zu summieren wäre teuer und würde Inhalte doppelt
+            // ausweisen, die an anderer Stelle liegen.
+            (None, None, None, 0)
+        } else if meta.is_dir() && remote::is_remote_mount(&p) {
             // SSHFS, WebDAV, FTP/FTPS und die virtuellen Objekt-Speicher
             // müssen für jede Unterebene den Server abfragen. Eigenschaften
             // bleiben deshalb sofort verfügbar und zeigen nur verlässliche
             // Metadaten der gewählten Ebene an.
-            (None, None, None)
+            (None, None, None, 0)
         } else if meta.is_dir() {
-            let mut s: u64 = 0;
-            let mut fc: u64 = 0;
-            let mut dc: u64 = 0;
-            for entry in walkdir::WalkDir::new(&p)
-                .follow_links(false)
-                .into_iter()
-                .filter_map(|e| e.ok())
-            {
-                if entry.path() == p {
-                    continue;
-                }
-                if let Ok(m) = entry.metadata() {
-                    if m.is_dir() {
-                        dc += 1;
-                    } else {
-                        fc += 1;
-                        s += m.len();
-                    }
-                }
-            }
-            (Some(s), Some(fc), Some(dc))
+            let t = summarize_tree(&p);
+            (Some(t.size), Some(t.files), Some(t.dirs), t.unreadable)
         } else {
-            (Some(meta.len()), Some(0), Some(0))
+            (Some(meta.len()), Some(0), Some(0), 0)
         };
 
         Ok(Properties {
@@ -7050,6 +7450,7 @@ async fn get_properties(path: String) -> Result<Properties, String> {
             size,
             file_count,
             dir_count,
+            unreadable,
             mtime,
             btime,
             atime,
@@ -7523,22 +7924,23 @@ pub fn run() {
 #[cfg(all(test, target_os = "macos"))]
 mod copy_tests {
     use super::{
-        bookmark_url_from_mount_source, copy_file_with_metadata, count_delete_entries,
-        delete_error_message, destination_is_within_source, is_dualbeam_inprogress_name,
-        is_network_fstype, is_protected_admin_root, is_retryable_remove_error,
-        is_time_machine_path, is_transient_trunk_path, is_untransferable_file, mount_fs_types,
-        normalize_max_file_size, parse_mount_url, percent_encode_segment, preview_walk_src,
-        remove_source_after_move, replace_file_after_copy, search_in_dir_blocking,
-        should_skip_direct_sync_path, statfs_fstype, sync_preview_inner,
-        sync_two_way_preview_inner, webdav_host_from_url, webdav_http_date_epoch,
-        webdav_propfind_content_length, webdav_propfind_last_modified, webdav_remote_url,
-        zip_extract_inner, CopyOutcome,
+        bookmark_url_from_mount_source, copy_file_data_synchronously, copy_file_with_metadata,
+        count_delete_entries, delete_error_message, destination_is_within_source,
+        is_dualbeam_inprogress_name, is_network_fstype, is_protected_admin_root,
+        is_retryable_remove_error, is_time_machine_path, is_transient_trunk_path,
+        is_untransferable_file, mount_fs_types, normalize_max_file_size, parse_mount_url,
+        percent_encode_segment, preview_walk_src, remove_source_after_move,
+        replace_file_after_copy, search_in_dir_blocking, should_skip_direct_sync_path,
+        statfs_fstype, sync_preview_inner, sync_two_way_preview_inner, webdav_host_from_url,
+        webdav_http_date_epoch, webdav_propfind_content_length, webdav_propfind_last_modified,
+        webdav_remote_url, zip_extract_inner, CopyOutcome, CopyProgressSink, COPY_PROGRESS,
     };
     use std::ffi::CString;
     use std::os::unix::ffi::OsStrExt;
     use std::os::unix::net::UnixDatagram;
     use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+    use std::sync::Arc;
     use std::time::{Duration, Instant};
 
     static TEST_PATH_SEQUENCE: AtomicU64 = AtomicU64::new(0);
@@ -7801,6 +8203,40 @@ mod copy_tests {
         copy_file_with_metadata(&src, &dst).expect("copy sollte bestehende Datei ersetzen");
         assert_eq!(std::fs::read(&dst).unwrap(), b"neuer Inhalt");
 
+        let _ = std::fs::remove_dir_all(src.parent().unwrap());
+    }
+
+    #[test]
+    fn synchronous_copy_reports_transferred_bytes() {
+        let src = tmp_path("progress-source.bin");
+        let dst = src.parent().unwrap().join("progress-destination.bin");
+        let payload = vec![7u8; 3 * 1024 * 1024 + 17];
+        std::fs::write(&src, &payload).unwrap();
+
+        let sink = Arc::new(CopyProgressSink::default());
+        COPY_PROGRESS.with(|slot| *slot.borrow_mut() = Some(sink.clone()));
+        let result = copy_file_data_synchronously(&src, &dst);
+        COPY_PROGRESS.with(|slot| *slot.borrow_mut() = None);
+
+        result.expect("synchrone Kopie sollte gelingen");
+        assert_eq!(sink.bytes_done(), payload.len() as u64);
+        assert_eq!(std::fs::read(&dst).unwrap(), payload);
+        let _ = std::fs::remove_dir_all(src.parent().unwrap());
+    }
+
+    #[test]
+    fn copyfile_progress_probes_destination_size() {
+        let src = tmp_path("probe-source.bin");
+        let dst = src.parent().unwrap().join("probe-destination.bin");
+        std::fs::write(&src, vec![1u8; 4096]).unwrap();
+
+        let sink = Arc::new(CopyProgressSink::default());
+        COPY_PROGRESS.with(|slot| *slot.borrow_mut() = Some(sink.clone()));
+        let result = copy_file_with_metadata(&src, &dst);
+        COPY_PROGRESS.with(|slot| *slot.borrow_mut() = None);
+
+        result.expect("Kopie sollte gelingen");
+        assert_eq!(sink.bytes_done(), 4096);
         let _ = std::fs::remove_dir_all(src.parent().unwrap());
     }
 
@@ -8202,6 +8638,168 @@ mod copy_tests {
     }
 
     #[test]
+    fn undo_delete_rolls_back_partial_restore_and_can_be_retried() {
+        for failure in ["conflict", "missing_source", "dangling_symlink"] {
+            let first = tmp_path("first");
+            let root = first.parent().unwrap();
+            let second = root.join("second");
+            let staged_first = root.join("staging/first");
+            let staged_second = root.join("staging/second");
+            std::fs::create_dir(root.join("staging")).unwrap();
+            std::fs::write(&staged_first, b"first data").unwrap();
+            if failure != "missing_source" {
+                std::fs::write(&staged_second, b"second data").unwrap();
+            }
+            if failure == "conflict" {
+                std::fs::write(&second, b"unrelated file").unwrap();
+            } else if failure == "dangling_symlink" {
+                std::os::unix::fs::symlink(root.join("absent"), &second).unwrap();
+            }
+            let items = vec![
+                super::UndoDeleteItem {
+                    original: first.to_string_lossy().into_owned(),
+                    staged: staged_first.to_string_lossy().into_owned(),
+                },
+                super::UndoDeleteItem {
+                    original: second.to_string_lossy().into_owned(),
+                    staged: staged_second.to_string_lossy().into_owned(),
+                },
+            ];
+            assert!(
+                super::undo_staged_delete_blocking(items.clone()).is_err(),
+                "{failure}"
+            );
+            assert!(
+                !first.exists(),
+                "{failure}: partial restore must be rolled back"
+            );
+            assert_eq!(std::fs::read(&staged_first).unwrap(), b"first data");
+            if failure == "missing_source" {
+                std::fs::write(&staged_second, b"second data").unwrap();
+            } else {
+                if failure == "conflict" {
+                    assert_eq!(std::fs::read(&second).unwrap(), b"unrelated file");
+                } else {
+                    assert!(std::fs::symlink_metadata(&second).unwrap().is_symlink());
+                }
+                std::fs::remove_file(&second).unwrap();
+            }
+            super::undo_staged_delete_blocking(items).unwrap();
+            assert_eq!(std::fs::read(&first).unwrap(), b"first data");
+            assert_eq!(std::fs::read(&second).unwrap(), b"second data");
+            assert!(!root.join("staging").exists());
+            std::fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[test]
+    fn zip_creation_preserves_empty_source_directory() {
+        let source = tmp_path("empty");
+        std::fs::create_dir(&source).unwrap();
+        let archive = source.parent().unwrap().join("empty.zip");
+        super::zip_create_inner(
+            vec![source.to_string_lossy().into_owned()],
+            archive.to_string_lossy().into_owned(),
+        )
+        .unwrap();
+        let mut zip = zip::ZipArchive::new(std::fs::File::open(&archive).unwrap()).unwrap();
+        assert!(zip.by_name("empty/").unwrap().is_dir());
+        std::fs::remove_dir_all(source.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn zip_creation_never_truncates_existing_destination() {
+        let source = tmp_path("source.txt");
+        std::fs::write(&source, b"source data").unwrap();
+        let archive = source.parent().unwrap().join("existing.zip");
+        std::fs::write(&archive, b"keep existing data").unwrap();
+        let result = super::zip_create_inner(
+            vec![source.to_string_lossy().into_owned()],
+            archive.to_string_lossy().into_owned(),
+        );
+        assert!(result.is_err());
+        assert_eq!(std::fs::read(&archive).unwrap(), b"keep existing data");
+        std::fs::remove_dir_all(source.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn failed_zip_creation_leaves_no_archive() {
+        let dir = tmp_path("zip-fail");
+        std::fs::create_dir_all(&dir).unwrap();
+        let source = dir.join("ok.txt");
+        std::fs::write(&source, b"data").unwrap();
+        let archive = dir.join("out.zip");
+        // Der zweite Eintrag hat keinen Dateinamen und bricht den Vorgang ab,
+        // nachdem bereits Daten geschrieben wurden.
+        let result = super::zip_create_inner(
+            vec![source.to_string_lossy().into_owned(), "/".into()],
+            archive.to_string_lossy().into_owned(),
+        );
+        assert!(result.is_err());
+        let names: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names, vec!["ok.txt".to_string()]);
+        std::fs::remove_dir_all(dir.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn failed_zip_extraction_leaves_no_directory() {
+        use std::io::Write;
+        use zip::write::SimpleFileOptions;
+
+        let dir = tmp_path("unzip-fail");
+        std::fs::create_dir_all(&dir).unwrap();
+        let zip_path = dir.join("dup.zip");
+        let mut archive = zip::ZipWriter::new(std::fs::File::create(&zip_path).unwrap());
+        archive
+            .start_file("a.txt", SimpleFileOptions::default())
+            .unwrap();
+        archive.write_all(b"first").unwrap();
+        // Ein Verzeichniseintrag mit demselben Namen wie die Datei lässt das
+        // Entpacken nach dem ersten Eintrag scheitern.
+        archive
+            .add_directory("a.txt/b/", SimpleFileOptions::default())
+            .unwrap();
+        archive.finish().unwrap();
+
+        let out_dir = dir.join("out");
+        assert!(zip_extract_inner(
+            zip_path.to_string_lossy().into_owned(),
+            out_dir.to_string_lossy().into_owned(),
+        )
+        .is_err());
+        let names: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names, vec!["dup.zip".to_string()]);
+        std::fs::remove_dir_all(dir.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn zip_extraction_refuses_existing_destination() {
+        use zip::write::SimpleFileOptions;
+
+        let zip_path = tmp_path("exists.zip");
+        let mut archive = zip::ZipWriter::new(std::fs::File::create(&zip_path).unwrap());
+        archive
+            .start_file("a.txt", SimpleFileOptions::default())
+            .unwrap();
+        archive.finish().unwrap();
+        let out_dir = zip_path.parent().unwrap().join("out");
+        std::fs::create_dir(&out_dir).unwrap();
+        assert!(zip_extract_inner(
+            zip_path.to_string_lossy().into_owned(),
+            out_dir.to_string_lossy().into_owned(),
+        )
+        .is_err());
+        assert_eq!(std::fs::read_dir(&out_dir).unwrap().count(), 0);
+        let _ = std::fs::remove_dir_all(zip_path.parent().unwrap());
+    }
+
+    #[test]
     fn extracts_a_safe_zip_entry() {
         use std::io::Write;
         use zip::write::SimpleFileOptions;
@@ -8297,9 +8895,77 @@ mod copy_tests {
         )
         .expect("recursive search should succeed");
         assert!(results
+            .entries
             .iter()
             .any(|entry| entry.path == needle.to_string_lossy()));
+        assert_eq!(results.skipped, 0);
 
+        let _ = std::fs::remove_dir_all(root.parent().unwrap());
+    }
+
+    #[test]
+    fn search_reports_unreadable_subdirectories() {
+        use std::os::unix::fs::PermissionsExt;
+        // Als root greifen Berechtigungen nicht – dann ist der Test sinnlos.
+        if unsafe { libc::geteuid() } == 0 {
+            return;
+        }
+        let root = tmp_path("search-locked");
+        let locked = root.join("locked");
+        std::fs::create_dir_all(&locked).unwrap();
+        std::fs::write(locked.join("needle.txt"), b"x").unwrap();
+        std::fs::write(root.join("needle-visible.txt"), b"x").unwrap();
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+        let results = search_in_dir_blocking(
+            root.to_string_lossy().into_owned(),
+            "needle".into(),
+            false,
+            10,
+        );
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let results = results.expect("search should succeed");
+        assert_eq!(results.entries.len(), 1);
+        assert_eq!(results.skipped, 1);
+
+        let _ = std::fs::remove_dir_all(root.parent().unwrap());
+    }
+
+    #[test]
+    fn tree_summary_counts_unreadable_and_skips_links() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = tmp_path("summary");
+        let sub = root.join("sub");
+        std::fs::create_dir_all(&sub).unwrap();
+        std::fs::write(root.join("a"), b"12345").unwrap();
+        std::fs::write(sub.join("b"), b"123").unwrap();
+        let target = root.parent().unwrap().join("big");
+        std::fs::create_dir(&target).unwrap();
+        std::fs::write(target.join("huge"), vec![0u8; 1000]).unwrap();
+        std::os::unix::fs::symlink(&target, root.join("link")).unwrap();
+
+        let t = super::summarize_tree(&root);
+        assert_eq!(t.dirs, 1);
+        assert_eq!(t.files, 3); // a, sub/b und der Link selbst
+        assert_eq!(t.unreadable, 0);
+        assert!(t.size < 1000);
+
+        if unsafe { libc::geteuid() } != 0 {
+            std::fs::set_permissions(&sub, std::fs::Permissions::from_mode(0o000)).unwrap();
+            let t = super::summarize_tree(&root);
+            std::fs::set_permissions(&sub, std::fs::Permissions::from_mode(0o755)).unwrap();
+            assert_eq!(t.unreadable, 1);
+        }
+        let _ = std::fs::remove_dir_all(root.parent().unwrap());
+    }
+
+    #[test]
+    fn search_fails_for_missing_root() {
+        let root = tmp_path("search-missing");
+        assert!(
+            search_in_dir_blocking(root.to_string_lossy().into_owned(), "x".into(), false, 10)
+                .is_err()
+        );
         let _ = std::fs::remove_dir_all(root.parent().unwrap());
     }
 
@@ -8337,6 +9003,36 @@ mod copy_tests {
         let missing = statfs_fstype(Path::new("/dualbeam-gibt-es-nicht/auch-nicht"))
             .expect("Rückfall auf die Wurzel erwartet");
         assert_eq!(root, missing);
+    }
+
+    #[test]
+    fn expand_tilde_only_expands_home_prefix() {
+        let home = dirs::home_dir().unwrap();
+        assert_eq!(super::expand_tilde("~"), home);
+        assert_eq!(super::expand_tilde("~/a/b"), home.join("a/b"));
+        assert_eq!(
+            super::expand_tilde("~backup/file"),
+            std::path::PathBuf::from("~backup/file")
+        );
+    }
+
+    #[test]
+    fn nobrowse_mounts_are_hidden_from_volume_list() {
+        // /System/Volumes/Data ist auf jedem aktuellen macOS `nobrowse`.
+        assert!(super::is_nobrowse_mount(Path::new("/System/Volumes/Data")));
+        // Ein gewöhnlicher Ordner auf diesem Volume ist selbst kein Mountpoint.
+        assert!(!super::is_nobrowse_mount(Path::new(
+            "/System/Volumes/Data/Users"
+        )));
+        assert!(!super::is_nobrowse_mount(Path::new("/")));
+        let listed = super::list_volumes_blocking().unwrap();
+        for volume in listed {
+            assert!(
+                !super::is_nobrowse_mount(Path::new(&volume.path)),
+                "{} ist nobrowse und darf nicht erscheinen",
+                volume.path
+            );
+        }
     }
 
     // statfs liefert kleingeschrieben; is_network_fstype vergleicht exakt.
@@ -8662,8 +9358,9 @@ mod webdav_listing_tests {
         }
 
         let start = std::time::Instant::now();
-        let eintraege =
-            list_dir_blocking(verzeichnis.to_string_lossy().into_owned(), true).expect("Listing");
+        let eintraege = list_dir_blocking(verzeichnis.to_string_lossy().into_owned(), true)
+            .expect("Listing")
+            .entries;
         let dauer = start.elapsed();
 
         let dateien: Vec<_> = eintraege
@@ -8720,8 +9417,10 @@ mod webdav_listing_tests {
         // Zwei getrennte Abfragen statt einer Kopie: `Entry` soll nicht allein
         // für diese Prüfung klonbar werden müssen.
         let pfad = verzeichnis.to_string_lossy().into_owned();
-        let echt = list_dir_blocking(pfad.clone(), true).expect("Listing");
-        let mut beschaedigt = list_dir_blocking(pfad, true).expect("Listing");
+        let echt = list_dir_blocking(pfad.clone(), true)
+            .expect("Listing")
+            .entries;
+        let mut beschaedigt = list_dir_blocking(pfad, true).expect("Listing").entries;
         for eintrag in beschaedigt.iter_mut() {
             if !eintrag.is_dir && !eintrag.is_symlink {
                 eintrag.size = 0;

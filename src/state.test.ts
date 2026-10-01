@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Entry } from "./types";
+import type { Listing } from "./ipc";
 
 const ipc = vi.hoisted(() => ({
   listDir: vi.fn(),
@@ -38,6 +39,10 @@ function entry(path: string): Entry {
   };
 }
 
+function listing(entries: Entry[]): Listing {
+  return { entries, skipped: 0 };
+}
+
 function deferred<T>() {
   let resolve!: (value: T) => void;
   const promise = new Promise<T>((r) => { resolve = r; });
@@ -71,9 +76,11 @@ describe("loadPane", () => {
   });
 
   it("verwirft das Ergebnis einer älteren, langsameren Navigation", async () => {
-    const slow = deferred<Entry[]>();
+    const slow = deferred<Listing>();
     ipc.listDir.mockImplementation((path: string) =>
-      path === "/slow" ? slow.promise : Promise.resolve([entry("/fast/file.txt")]),
+      path === "/slow"
+        ? slow.promise
+        : Promise.resolve(listing([entry("/fast/file.txt")])),
     );
 
     const first = loadPane("left", "/slow");
@@ -82,7 +89,7 @@ describe("loadPane", () => {
     const second = loadPane("left", "/fast");
     await second;
 
-    slow.resolve([entry("/slow/old.txt")]);
+    slow.resolve(listing([entry("/slow/old.txt")]));
     await first;
 
     expect(state.left.cwd).toBe("/fast");
@@ -92,7 +99,7 @@ describe("loadPane", () => {
   it("entfernt bestätigte WebDAV-Löschungen sofort aus beiden Panes und ihrer Auswahl", async () => {
     const deleted = entry("/pcloud-immediate/delete.txt");
     const kept = entry("/pcloud-immediate/keep.txt");
-    ipc.listDir.mockResolvedValue([deleted, kept]);
+    ipc.listDir.mockResolvedValue(listing([deleted, kept]));
     await loadPane("left", "/pcloud-immediate");
     await loadPane("right", "/pcloud-immediate");
     for (const pane of ["left", "right"] as const) {
@@ -116,12 +123,12 @@ describe("loadPane", () => {
     const deleted = entry("/pcloud-race/delete.txt");
     const kept = entry("/pcloud-race/keep.txt");
     ipc.pathIsNetwork.mockResolvedValue(true);
-    const slow = deferred<Entry[]>();
-    ipc.listDir.mockReturnValueOnce(slow.promise).mockResolvedValue([deleted, kept]);
+    const slow = deferred<Listing>();
+    ipc.listDir.mockReturnValueOnce(slow.promise).mockResolvedValue(listing([deleted, kept]));
     const loading = loadPane("left", "/pcloud-race");
     await vi.waitFor(() => expect(ipc.listDir).toHaveBeenCalledTimes(1));
     confirmDeletedNetworkPaths([deleted.path]);
-    slow.resolve([deleted, kept]);
+    slow.resolve(listing([deleted, kept]));
     await loading;
     expect(ipc.listDir).toHaveBeenCalledTimes(2);
     expect(state.left.entries).toEqual([kept]);
@@ -174,7 +181,7 @@ describe("Folgemodus (followMode)", () => {
     ipc.pathIsNetwork.mockResolvedValue(false);
     ipc.homeDir.mockResolvedValue("/Users/test");
     ipc.watchPath.mockResolvedValue(undefined);
-    ipc.listDir.mockResolvedValue([]);
+    ipc.listDir.mockResolvedValue(listing([]));
     _set("active", "left");
     _set("followMode", false);
     resetPane("left", [dirEntry("/left/sub")]);

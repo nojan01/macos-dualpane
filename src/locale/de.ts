@@ -54,6 +54,9 @@ export const de: Record<string, string> = {
   "jobbar.items": "{done} / {total} Einträge",
   "jobbar.itemsDeleted": "{count} Einträge gelöscht",
   "jobbar.filesCopied": "{count} Dateien kopiert",
+  "jobbar.fileBytes": "{done} / {total} ({percent} %)",
+  "jobbar.elapsed": "läuft seit {time}",
+  "jobbar.active": "Übertragung läuft",
 
   "rdp.connectTitle": "RDP-Sitzung zu {target} in RemoteDeskRDP öffnen",
   "rdp.connecting": "Verbindung wird aufgebaut …",
@@ -129,6 +132,7 @@ export const de: Record<string, string> = {
   "pane.error.permission":
     "Zugriff verweigert. Der App fehlt vermutlich die Berechtigung für diesen Ordner.",
   "pane.error.openSettings": "Systemeinstellungen öffnen",
+  "pane.skipped": "{count} Einträge konnten nicht gelesen werden und fehlen in der Liste.",
 
   // Preview
   "preview.title": "Vorschau",
@@ -147,6 +151,7 @@ export const de: Record<string, string> = {
   "props.size": "Größe",
   "props.content": "Inhalt",
   "props.contentCounts": "{files} Dateien, {dirs} Ordner",
+  "props.unreadable": "{count} Einträge nicht lesbar – Werte sind unvollständig",
   "props.created": "Erstellt",
   "props.modified": "Geändert",
   "props.accessed": "Zugriff",
@@ -229,6 +234,7 @@ export const de: Record<string, string> = {
   "search.searching": "Suche läuft …",
   "search.hits": "{count} Treffer",
   "search.hitsMax": "{count} Treffer (max)",
+  "search.skipped": "{count} nicht lesbar übersprungen",
 
   // Sidebar
   "sidebar.favorites": "Favoriten",

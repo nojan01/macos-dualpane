@@ -13,6 +13,42 @@ static uint64_t g_next_id = 1;
 
 void db_set_drop_callback(db_drop_callback cb) { g_callback = cb; }
 
+// Kopiert zuerst in eine temporäre Datei neben dem Ziel und ersetzt das Ziel
+// erst nach erfolgreicher Kopie. Schlägt die Kopie fehl, bleibt das
+// bestehende Ziel unverändert erhalten.
+static BOOL db_copy_replacing(NSString *src, NSString *dest, NSError **err) {
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSString *dir = [dest stringByDeletingLastPathComponent];
+    NSString *tmpName = [NSString stringWithFormat:@".dualbeam-%@-%@",
+                         [[NSUUID UUID] UUIDString], [dest lastPathComponent]];
+    NSString *tmp = [dir stringByAppendingPathComponent:tmpName];
+    if (![fm copyItemAtPath:src toPath:tmp error:err]) {
+        [fm removeItemAtPath:tmp error:nil];
+        return NO;
+    }
+    NSURL *destURL = [NSURL fileURLWithPath:dest];
+    NSURL *tmpURL = [NSURL fileURLWithPath:tmp];
+    BOOL ok;
+    if ([fm fileExistsAtPath:dest] || [fm destinationOfSymbolicLinkAtPath:dest error:nil] != nil) {
+        ok = [fm replaceItemAtURL:destURL withItemAtURL:tmpURL backupItemName:nil
+                          options:0 resultingItemURL:nil error:err];
+        if (!ok) {
+            // replaceItemAtURL scheitert z. B. bei Datei <-> Ordner. Dann
+            // klassisch ersetzen – die neue Kopie liegt bereits vollständig vor.
+            NSError *rmErr = nil;
+            if ([fm removeItemAtPath:dest error:&rmErr]) {
+                ok = [fm moveItemAtPath:tmp toPath:dest error:err];
+            } else if (err) {
+                *err = rmErr;
+            }
+        }
+    } else {
+        ok = [fm moveItemAtPath:tmp toPath:dest error:err];
+    }
+    if (!ok) [fm removeItemAtPath:tmp error:nil];
+    return ok;
+}
+
 static void ensure_globals(void) {
     if (g_completions == nil) g_completions = [NSMutableDictionary dictionary];
     if (g_sources == nil) g_sources = [NSMutableDictionary dictionary];
@@ -50,10 +86,7 @@ static void ensure_globals(void) {
     }
     // Fallback: no callback registered — copy directly.
     NSError *err = nil;
-    [[NSFileManager defaultManager] removeItemAtURL:url error:nil];
-    [[NSFileManager defaultManager] copyItemAtPath:self.sourcePath
-                                            toPath:[url path]
-                                             error:&err];
+    db_copy_replacing(self.sourcePath, [url path], &err);
     completionHandler(err);
     @synchronized (g_completions) {
         [g_completions removeObjectForKey:@(dropId)];
@@ -264,8 +297,7 @@ int db_resolve_promise(uint64_t dropId, int action, const char **out_err) {
 
         if (action == 0) {
             // overwrite
-            [[NSFileManager defaultManager] removeItemAtPath:destPath error:nil];
-            [[NSFileManager defaultManager] copyItemAtPath:srcPath toPath:destPath error:&err];
+            db_copy_replacing(srcPath, destPath, &err);
         } else if (action == 2) {
             // keep both: find a non-colliding name in same directory.
             NSString *finalPath = destPath;
@@ -289,7 +321,13 @@ int db_resolve_promise(uint64_t dropId, int action, const char **out_err) {
                     i++;
                 }
             }
-            [[NSFileManager defaultManager] copyItemAtPath:srcPath toPath:finalPath error:&err];
+            if ([[NSFileManager defaultManager] fileExistsAtPath:finalPath]) {
+                err = [NSError errorWithDomain:@"DualBeam"
+                                          code:3
+                                      userInfo:@{NSLocalizedDescriptionKey: @"No free file name available"}];
+            } else {
+                [[NSFileManager defaultManager] copyItemAtPath:srcPath toPath:finalPath error:&err];
+            }
         } else {
             // unknown action: treat as cancel
             NSError *cancelErr = [NSError errorWithDomain:@"DualBeam"

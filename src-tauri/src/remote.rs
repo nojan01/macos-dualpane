@@ -1250,12 +1250,8 @@ fn mount_blocking(
 
     let rclone = rclone_executable()?;
     let obscured = obscure(&rclone, &password)?;
-    if let Err(error) = verify_rclone_connection(
-        &rclone,
-        &spec,
-        &obscured,
-        known_hosts.as_deref(),
-    ) {
+    if let Err(error) = verify_rclone_connection(&rclone, &spec, &obscured, known_hosts.as_deref())
+    {
         if !may_continue_after_verification_error(spec.protocol, &error) {
             let _ = std::fs::remove_dir(&mount_dir);
             return Err(error);
@@ -2261,8 +2257,8 @@ pub fn copy_rclone_storage(
     // Der Mount wird erneut gegen die aktive Registrierung geprüft. Damit kann
     // ein von außen gelieferter Pfad keinen fremden Zugang ansprechen.
     let expected = spec.descriptor();
-    let real_mount = std::fs::canonicalize(&context.mount_path)
-        .unwrap_or_else(|_| context.mount_path.clone());
+    let real_mount =
+        std::fs::canonicalize(&context.mount_path).unwrap_or_else(|_| context.mount_path.clone());
     let verified = registry()
         .lock()
         .ok()
@@ -2278,9 +2274,17 @@ pub fn copy_rclone_storage(
         return Err("err.remote.notOurs".into());
     }
 
-    let remote_side = if source_is_remote { source } else { destination };
+    let remote_side = if source_is_remote {
+        source
+    } else {
+        destination
+    };
     let remote_path = rclone_transfer_target(remote_side, &context.mount_path, spec)?;
-    let local_side = if source_is_remote { destination } else { source };
+    let local_side = if source_is_remote {
+        destination
+    } else {
+        source
+    };
 
     // Die Art des Quellobjekts entscheidet über `copy` (Ordner) oder `copyto`
     // (Einzeldatei). Bei einer entfernten Quelle liefert der Mount die Auskunft
@@ -2599,8 +2603,7 @@ pub fn rclone_path_exists(path: &Path) -> Option<Result<bool, String>> {
     if real_path == real_mount {
         return Some(Ok(true));
     }
-    let Some(name) = real_path.file_name().map(|name| name.to_os_string())
-    else {
+    let Some(name) = real_path.file_name().map(|name| name.to_os_string()) else {
         return Some(Ok(true));
     };
     let parent = real_path.parent().unwrap_or(&context.mount_path);
@@ -4909,11 +4912,7 @@ pub fn cleanup_stale() {
         for entry in entries.flatten() {
             // `file_type()` stammt aus dem Verzeichniseintrag selbst und loest
             // deshalb - anders als `is_dir()` - keinen Zugriff auf das Ziel aus.
-            if !entry
-                .file_type()
-                .map(|kind| kind.is_dir())
-                .unwrap_or(false)
-            {
+            if !entry.file_type().map(|kind| kind.is_dir()).unwrap_or(false) {
                 continue;
             }
             let path = entry.path();
@@ -5372,7 +5371,11 @@ mod tests {
             "access denied",
             "invalid credentials",
         ] {
-            assert_eq!(rclone_failure_message(message), "err.remote.auth", "{message}");
+            assert_eq!(
+                rclone_failure_message(message),
+                "err.remote.auth",
+                "{message}"
+            );
         }
     }
 
