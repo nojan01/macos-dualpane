@@ -59,7 +59,7 @@ import {
   type JobProgress,
   type PaneChanged,
 } from "./ipc";
-import { attachKeymap } from "./keymap";
+import { attachKeymap, detachKeymap } from "./keymap";
 import {
   setHoverTarget,
   setDragEffect,
@@ -235,6 +235,7 @@ export function App() {
 
   onMount(async () => {
     attachKeymap();
+    onCleanup(detachKeymap);
     void attachWindowState();
     void attachPromiseDropHandler();
     void cleanupUndoBuffer().catch(() => {});
@@ -307,6 +308,7 @@ export function App() {
             filesDone: p.filesDone,
             transferPercent: p.transferPercent,
             indeterminate: p.indeterminate,
+            fileProgress: p.fileProgress,
             current: p.current,
           });
         }

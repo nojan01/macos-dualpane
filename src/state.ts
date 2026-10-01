@@ -1,6 +1,7 @@
 import { createSignal } from "solid-js";
 import { createStore, type SetStoreFunction } from "solid-js/store";
 import type { Entry, PaneId, SortKey, SortDir } from "./types";
+import type { FileProgress } from "./ipc";
 import {
   listDir,
   watchPath,
@@ -28,6 +29,8 @@ export type PaneState = {
   navigationRoot?: string;
   loading: boolean;
   error: string | null;
+  /** Einträge, die beim letzten Listing nicht gelesen werden konnten. */
+  skipped: number;
   sortKey: SortKey;
   sortDir: SortDir;
   filter: string; // Substring-Filter (case-insensitive)
@@ -68,6 +71,7 @@ export type AppState = {
     filesDone: number;
     transferPercent?: number;
     indeterminate?: boolean;
+    fileProgress?: FileProgress;
     current: string;
   } | null;
 };
@@ -84,6 +88,7 @@ const emptyPane = (): PaneState => ({
   isNetwork: false,
   loading: false,
   error: null,
+  skipped: 0,
   sortKey: "name",
   sortDir: "asc",
   filter: "",
@@ -369,7 +374,8 @@ export async function loadPane(
   try {
     const deletionSnapshot = networkDeletes.beginListing();
     const showHidden = state.showHidden;
-    const raw = await listDir(target, showHidden);
+    const listing = await listDir(target, showHidden);
+    const raw = listing.entries;
     if (!isCurrent()) return;
     const reconciled = networkDeletes.reconcile(target, raw, deletionSnapshot, showHidden);
     if (reconciled === null) {
@@ -389,6 +395,7 @@ export async function loadPane(
       anchor: null,
       navigationRoot: root,
       loading: false,
+      skipped: listing.skipped,
     });
     if (options.historyIndex !== undefined) {
       setState(pane, "historyIndex", options.historyIndex);
@@ -417,6 +424,7 @@ export async function loadPane(
         anchor: null,
         navigationRoot: root,
         loading: false,
+        skipped: 0,
         error: errMsg(e),
       });
       syncActiveTab(pane);
@@ -435,7 +443,7 @@ export async function loadPane(
         }
       } catch {}
     }
-    setState(pane, { loading: false, error: errMsg(e) });
+    setState(pane, { loading: false, skipped: 0, error: errMsg(e) });
   }
 }
 

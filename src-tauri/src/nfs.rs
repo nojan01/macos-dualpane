@@ -336,6 +336,9 @@ pub fn mount(spec: NfsSpec) -> Result<remote::RemoteMountInfo, String> {
     };
 
     let Some(status) = status else {
+        if remote::is_mount_point(&dir) {
+            let _ = remote::unmount_owned(&dir);
+        }
         let _ = std::fs::remove_dir(&dir);
         return Err("err.nfs.timeout".to_string());
     };
@@ -347,6 +350,9 @@ pub fn mount(spec: NfsSpec) -> Result<remote::RemoteMountInfo, String> {
     }
 
     if !status.success() || !remote::is_mount_point(&dir) {
+        if remote::is_mount_point(&dir) {
+            let _ = remote::unmount_owned(&dir);
+        }
         let _ = std::fs::remove_dir(&dir);
         return Err(explain_failure(&message));
     }

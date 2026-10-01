@@ -180,11 +180,11 @@ function applyOp(base: string, ext: string, op: Op, index: number): { base: stri
         const f = escapeRegExp(op.find);
         if (op.mode === "start") {
           const re = new RegExp("^" + f, op.caseSensitive ? "" : "i");
-          return { v: target.replace(re, repl) };
+          return { v: target.replace(re, () => repl) };
         }
         if (op.mode === "end") {
           const re = new RegExp(f + "$", op.caseSensitive ? "" : "i");
-          return { v: target.replace(re, repl) };
+          return { v: target.replace(re, () => repl) };
         }
         if (op.mode === "last") {
           const hay = op.caseSensitive ? target : target.toLowerCase();
@@ -195,7 +195,7 @@ function applyOp(base: string, ext: string, op: Op, index: number): { base: stri
         }
         const flags = (op.mode === "all" ? "g" : "") + (op.caseSensitive ? "" : "i");
         const re = new RegExp(f, flags);
-        return { v: target.replace(re, repl) };
+        return { v: target.replace(re, () => repl) };
       } catch (e) {
         return { v: target, err: `Regex: ${errMsg(e)}` };
       }
@@ -291,7 +291,8 @@ export async function applyRename(): Promise<{ ok: boolean; message?: string }> 
   const stamp = Date.now();
 
   // Bei einem Fehler mitten im Vorgang alles auf die Ursprungsnamen zurückdrehen.
-  // Die Originalnamen sind dabei immer frei, weil nur von ihnen weg umbenannt wurde.
+  // Jeden erfolgreichen Einzelschritt rückwärts ausführen: zuerst zurück auf
+  // temporäre Namen, dann auf Originalnamen. Das löst auch Namenszyklen auf.
   const rollback = async (moves: { from: string; to: string }[]) => {
     for (const m of moves.reverse()) {
       try {
@@ -304,7 +305,7 @@ export async function applyRename(): Promise<{ ok: boolean; message?: string }> 
 
   try {
     if (needsTwoPhase) {
-      const tempPaths: { tmp: string; finalName: string; orig: string }[] = [];
+      const tempPaths: { tmp: string; finalName: string }[] = [];
       const undo: { from: string; to: string }[] = [];
       try {
         for (let i = 0; i < targets.length; i++) {
@@ -312,12 +313,12 @@ export async function applyRename(): Promise<{ ok: boolean; message?: string }> 
           const tmp = joinPath(sess.dir, `.__rn_${stamp}_${i}__`);
           await renamePath(p.src.path, tmp);
           undo.push({ from: tmp, to: p.src.path });
-          tempPaths.push({ tmp, finalName: p.newName, orig: p.src.path });
+          tempPaths.push({ tmp, finalName: p.newName });
         }
         for (const t of tempPaths) {
           const dst = joinPath(sess.dir, t.finalName);
           await renamePath(t.tmp, dst);
-          undo[undo.findIndex((u) => u.from === t.tmp)] = { from: dst, to: t.orig };
+          undo.push({ from: dst, to: t.tmp });
         }
       } catch (err) {
         await rollback(undo);

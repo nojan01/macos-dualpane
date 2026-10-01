@@ -100,8 +100,16 @@ export function modalIsOpen(): boolean {
   return document.querySelector(MODAL_SELECTOR) !== null;
 }
 
+let keydownHandler: ((ev: KeyboardEvent) => Promise<void>) | null = null;
+
+/**
+ * Registriert die globalen Tastenkürzel. Idempotent: ein zuvor registrierter
+ * Listener wird entfernt, damit Kürzel nach einem Neuaufbau der Oberfläche
+ * nicht doppelt auslösen.
+ */
 export function attachKeymap() {
-  window.addEventListener("keydown", async (ev) => {
+  detachKeymap();
+  keydownHandler = async (ev: KeyboardEvent) => {
     // Eingaben in Inputs nicht abfangen
     const t = ev.target as HTMLElement | null;
     if (
@@ -350,5 +358,15 @@ export function attachKeymap() {
       typeAhead(pane, ev.key);
       return;
     }
-  });
+  };
+  window.addEventListener("keydown", keydownHandler);
+  return detachKeymap;
+}
+
+/** Entfernt den globalen Tastatur-Listener (z. B. bei HMR/Neuaufbau). */
+export function detachKeymap() {
+  if (keydownHandler) {
+    window.removeEventListener("keydown", keydownHandler);
+    keydownHandler = null;
+  }
 }

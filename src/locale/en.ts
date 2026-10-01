@@ -53,6 +53,9 @@ export const en: Record<string, string> = {
   "jobbar.items": "{done} / {total} entries",
   "jobbar.itemsDeleted": "{count} entries deleted",
   "jobbar.filesCopied": "{count} files copied",
+  "jobbar.fileBytes": "{done} / {total} ({percent} %)",
+  "jobbar.elapsed": "running for {time}",
+  "jobbar.active": "Transfer in progress",
 
   "rdp.connectTitle": "Open an RDP session to {target} in RemoteDeskRDP",
   "rdp.connecting": "Connecting …",
@@ -128,6 +131,7 @@ export const en: Record<string, string> = {
   "pane.error.permission":
     "Access denied. The app likely lacks permission for this folder.",
   "pane.error.openSettings": "Open System Settings",
+  "pane.skipped": "{count} entries could not be read and are missing from the list.",
 
   // Preview
   "preview.title": "Preview",
@@ -146,6 +150,7 @@ export const en: Record<string, string> = {
   "props.size": "Size",
   "props.content": "Contents",
   "props.contentCounts": "{files} files, {dirs} folders",
+  "props.unreadable": "{count} entries unreadable – values are incomplete",
   "props.created": "Created",
   "props.modified": "Modified",
   "props.accessed": "Accessed",
@@ -227,6 +232,7 @@ export const en: Record<string, string> = {
   "search.searching": "Searching …",
   "search.hits": "{count} hits",
   "search.hitsMax": "{count} hits (max)",
+  "search.skipped": "{count} unreadable skipped",
 
   // Sidebar
   "sidebar.favorites": "Favorites",

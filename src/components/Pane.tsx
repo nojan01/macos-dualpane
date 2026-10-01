@@ -754,6 +754,11 @@ export function Pane(props: { id: PaneId }) {
               })()}
             </div>
           </Show>
+          <Show when={!pane().error && pane().skipped > 0}>
+            <div class="pane-warning">
+              {t("pane.skipped", { count: pane().skipped })}
+            </div>
+          </Show>
           <Show when={virt().enabled}>
             <div
               class="virt-pad"

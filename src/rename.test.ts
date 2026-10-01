@@ -61,3 +61,16 @@ describe("computePreviews", () => {
     expect(res[0].newName).toBe("HELLO.TXT");
   });
 });
+
+
+describe("literal replacement", () => {
+  it.each(["all", "first", "start", "end", "last"] as const)("keeps dollar tokens literal in %s mode", (mode) => {
+    const op = { ...defaultOpReplace(), find: "file", replace: "$&$$$1", mode };
+    expect(computePreviews([entry("file")], { ops: [op] })[0].newName).toBe("$&$$$1");
+  });
+
+  it("still expands capture groups in regex mode", () => {
+    const op = { ...defaultOpReplace(), find: "(file)", replace: "$1-new", regex: true };
+    expect(computePreviews([entry("file")], { ops: [op] })[0].newName).toBe("file-new");
+  });
+});

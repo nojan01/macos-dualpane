@@ -2,11 +2,14 @@ import { invoke } from "@tauri-apps/api/core";
 import type { Entry } from "./types";
 import type { ObjectStorageProfile } from "./objectStorageProfiles";
 
+/** `skipped` zählt Einträge, die nicht gelesen werden konnten. */
+export type Listing = { entries: Entry[]; skipped: number };
+
 export async function listDir(
   path: string,
   showHidden: boolean,
-): Promise<Entry[]> {
-  return invoke<Entry[]>("list_dir", { path, showHidden });
+): Promise<Listing> {
+  return invoke<Listing>("list_dir", { path, showHidden });
 }
 
 export async function openDefault(path: string): Promise<void> {
@@ -404,6 +407,13 @@ export async function syncTwoWayPreview(
   });
 }
 
+export type FileProgress = {
+  /** Fehlt, wenn der Übertragungsweg keinen Bytezähler liefert (WebDAV). */
+  bytesDone?: number;
+  bytesTotal: number;
+  elapsedMs: number;
+};
+
 export type JobProgress = {
   jobId: string;
   done: number;
@@ -413,6 +423,8 @@ export type JobProgress = {
   transferPercent?: number;
   /** Serveroperation läuft, ihre Einzelobjekte sind jedoch nicht zählbar. */
   indeterminate: boolean;
+  /** Zwischenstand der gerade laufenden Einzeldatei (große/langsame Kopien). */
+  fileProgress?: FileProgress;
   current: string;
   finished: boolean;
   cancelled: boolean;
@@ -432,8 +444,8 @@ export async function searchInDir(
   query: string,
   showHidden: boolean,
   maxResults = 1000,
-): Promise<Entry[]> {
-  return invoke<Entry[]>("search_in_dir", {
+): Promise<Listing> {
+  return invoke<Listing>("search_in_dir", {
     root,
     query,
     showHidden,
@@ -549,6 +561,8 @@ export type Properties = {
   size: number | null;
   fileCount: number | null;
   dirCount: number | null;
+  /** Nicht lesbare Einträge; Größe und Zähler sind dann Untergrenzen. */
+  unreadable: number;
   mtime: number;
   btime: number;
   atime: number;

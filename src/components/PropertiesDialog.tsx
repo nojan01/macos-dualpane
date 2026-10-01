@@ -115,6 +115,9 @@ export function PropertiesDialog() {
                       <Show when={p.isDir}>
                         <tr><th>{t("props.content")}</th><td>{p.fileCount === null || p.dirCount === null ? "—" : t("props.contentCounts", { files: p.fileCount, dirs: p.dirCount })}</td></tr>
                       </Show>
+                      <Show when={p.unreadable > 0}>
+                        <tr><th></th><td class="props-warning">{t("props.unreadable", { count: p.unreadable })}</td></tr>
+                      </Show>
                       <tr><th>{t("props.created")}</th><td class="mono">{fmtDate(p.btime)}</td></tr>
                       <tr><th>{t("props.modified")}</th><td class="mono">{fmtDate(p.mtime)}</td></tr>
                       <tr><th>{t("props.accessed")}</th><td class="mono">{fmtDate(p.atime)}</td></tr>
