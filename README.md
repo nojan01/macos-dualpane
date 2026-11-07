@@ -47,6 +47,7 @@ Abschnitt, nicht zu einem Fehler.
 ## Doku
 
 - [docs/SPEC.md](docs/SPEC.md) — vollständige Spezifikation
+- [docs/LINUX_PORT.md](docs/LINUX_PORT.md) — Roadmap für eine Linux-Portierung
 
 ## Stack
 
