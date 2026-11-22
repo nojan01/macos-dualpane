@@ -1,0 +1,15 @@
+{
+  "version": "v1.76.0-dualbeam.1",
+  "sourceVersion": "v1.76.0",
+  "sourceSum": "h1:Gabl7KmhxyOXyMtFNA/s6wZ3LZ/2x0NP7xZLNEW3Guo=",
+  "goVersion": "go1.27.4",
+  "goArchiveSha256": {
+    "arm64": "91a44a2b8a716600ad94a4f143e156116620db8828086a6e3602291be9bd0bb4",
+    "amd64": "2b799377704ef12db39bd254995d5c348c9cc8d86562ca817724390e56c38f43"
+  },
+  "binarySha256": {
+    "arm64": "ae922f986304cecea80dd746e489a12b25e9d7d2c6a1b294cc03397bd5353dfa",
+    "amd64": "83997fc865410ef077f21bbe8dc014e1b90436b9b22d2b01dfc5d1cc3a3c1017"
+  },
+  "licenseSha256": "8cd2e9e750b90a04b7d82dbbca3930c696ae0309d7c10464f90a44f45754cd04"
+}

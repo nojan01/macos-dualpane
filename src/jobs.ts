@@ -196,7 +196,7 @@ export async function transferEntries(
     const remoteStorage = kind === "copy" ? await remoteStorageTransferTarget(items) : undefined;
     await runJob(id, kind, items, objectStorage, remoteStorage);
   } catch (e) {
-    await notifyError(t("common.error", { msg: errMsg(e) }));
+    if (String(e) !== "JOB_CANCELLED") await notifyError(t("common.error", { msg: errMsg(e) }));
   } finally {
     setState("job", null);
     for (const p of refreshPanes) await refreshPane(p);

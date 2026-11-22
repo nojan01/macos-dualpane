@@ -1,6 +1,6 @@
 # Verwendete Fremdkomponenten und deren Lizenzen — DualBeam
 
-Stand: 1. August 2026, DualBeam 0.4.0
+Stand: 22. November 2026, Entwicklungsstand nach Sicherheitsaktualisierung
 
 DualBeam selbst steht unter der [MIT-Lizenz](LICENSE). Für die hier aufgeführten
 Fremdkomponenten gelten zusätzlich deren eigene Lizenzen.
@@ -13,16 +13,18 @@ Genau ein fremdes Programm wird als Datei mitgeliefert:
 
 | Komponente | Version | Lizenz | Urheber |
 | --- | --- | --- | --- |
-| [rclone](https://rclone.org) | 1.74.4 | MIT | Nick Craig-Wood und Mitwirkende |
+| [rclone](https://rclone.org) | 1.76.0-dualbeam.1 | MIT | Nick Craig-Wood und Mitwirkende |
 
 rclone liegt im Programmpaket unter `DualBeam.app/Contents/MacOS/rclone` und
-stellt SFTP- und FTPS-Verbindungen als Laufwerk bereit. Der vollständige
+stellt unter anderem SMB-, FTPS- und Objekt-Speicher-Verbindungen bereit. Der vollständige
 Lizenztext liegt bei (`RCLONE-LICENSE.txt`).
 
 > rclone ist in Go geschrieben und enthält seinerseits zahlreiche
 > Open-Source-Bibliotheken unter eigenen Lizenzen. Deren Auflistung ist Teil des
-> rclone-Projekts und dort einsehbar; sie werden durch die Weitergabe der
-> unveränderten rclone-Binärdatei nicht berührt.
+> rclone-Projekts. DualBeam erstellt rclone 1.76.0 mit Go 1.27.4 und aktualisierten
+> Sicherheitsabhängigkeiten selbst. Die genaue Modulliste und Prüfsummen stehen
+> in `scripts/rclone/go.mod`, `go.sum` und `build.json`; die jeweiligen
+> Lizenzbedingungen gelten auch für diesen Build.
 
 ## 2. Bibliotheken, aus denen DualBeam erstellt wurde
 
@@ -33,21 +35,22 @@ verlangen, dass Urhebervermerk und Lizenztext der Weitergabe beiliegen.
 
 | Kiste | Version | Lizenz |
 | --- | --- | --- |
-| tauri | 2.11.2 | Apache-2.0 ODER MIT |
+| tauri | 2.12.7 | Apache-2.0 ODER MIT |
 | tauri-plugin-drag | 2.1.1 | Apache-2.0 ODER MIT |
-| serde | 1.0.228 | MIT ODER Apache-2.0 |
-| serde_json | 1.0.149 | MIT ODER Apache-2.0 |
+| serde | 1.0.229 | MIT ODER Apache-2.0 |
+| serde_json | 1.0.154 | MIT ODER Apache-2.0 |
 | dirs | 5.0.1 | MIT ODER Apache-2.0 |
-| walkdir | 2.5.0 | Unlicense ODER MIT |
-| trash | 5.2.6 | MIT |
+| walkdir | 2.5.1 | Unlicense ODER MIT |
+| trash | 5.4.0 | MIT |
 | notify | 6.1.1 | CC0-1.0 |
 | notify-debouncer-mini | 0.4.1 | MIT ODER Apache-2.0 |
-| zip | 2.4.2 | MIT |
-| libc | 0.2.186 | MIT ODER Apache-2.0 |
-| url | 2.5.8 | MIT ODER Apache-2.0 |
+| zip | 9.8.1 | MIT |
+| libc | 0.2.191 | MIT ODER Apache-2.0 |
+| url | 2.5.9 | MIT ODER Apache-2.0 |
 | sha2 | 0.10.9 | MIT ODER Apache-2.0 |
 | security-framework | 3.7.0 | MIT ODER Apache-2.0 |
-| objc2 | 0.6.4 | MIT |
+| time | 0.3.55 | MIT ODER Apache-2.0 |
+| tauri-plugin-updater | 2.14.1 | Apache-2.0 ODER MIT |
 
 Die Angaben stammen aus dem `license`-Feld der jeweiligen `Cargo.toml` in der
 lokalen Registry, nicht aus zweiter Hand. Mit den mittelbaren Abhängigkeiten
@@ -55,7 +58,7 @@ sind es einige Hundert Kisten; sie stehen mit wenigen Ausnahmen ebenfalls unter
 MIT oder Apache-2.0. Die vollständige Liste lässt sich jederzeit erzeugen:
 
 ```sh
-cargo tree --prefix none --format '{p} {l}' | sort -u
+cargo tree --manifest-path src-tauri/Cargo.toml --prefix none --format '{p} {l}' | sort -u
 ```
 
 ### Weboberfläche

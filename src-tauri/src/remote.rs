@@ -19,6 +19,10 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::object_storage::{ObjectStorageProfile, ObjectStorageProtocol};
 
+#[cfg(test)]
+#[path = "remote_live_tests.rs"]
+mod live_tests;
+
 /// Schlüsselbund-Dienst für die Kennwörter der Netzlaufwerke.
 const KEYCHAIN_SERVICE: &str = "com.nojan.dualbeam.remote";
 
@@ -450,13 +454,50 @@ fn rclone_executable() -> Result<PathBuf, String> {
 /// rclone-NFS-Adapter spricht er direkt SSH/SFTP und stellt die entfernte
 /// Wurzel als FUSE-Dateisystem bereit.
 fn sshfs_executable() -> Result<PathBuf, String> {
-    [
+    let mut found = false;
+    for path in [
         PathBuf::from("/usr/local/bin/sshfs"),
         PathBuf::from("/opt/homebrew/bin/sshfs"),
-    ]
-    .into_iter()
-    .find(|path| path.is_file())
-    .ok_or_else(|| "SSHFS ist nicht installiert. Bitte SSHFS für macFUSE installieren.".to_string())
+    ] {
+        if !path.is_file() {
+            continue;
+        }
+        found = true;
+        let child = Command::new(&path)
+            .arg("--version")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|_| "SSHFS-Version konnte nicht sicher geprüft werden".to_string())?;
+        if let Ok(output) = run_with_timeout(child, Duration::from_secs(5)) {
+            if output.status.success()
+                && sshfs_version_is_safe(&String::from_utf8_lossy(&output.stdout))
+            {
+                return Ok(path);
+            }
+        }
+    }
+    Err(if found {
+        "Unsichere oder unbekannte SSHFS-Version. SFTP-Mounts benötigen SSHFS ab 3.7.6 mit Symlink-Schutz (CVE-2026-47187). Bitte eine kompatible macFUSE-Version von SSHFS aktualisieren."
+    } else {
+        "SSHFS ist nicht installiert. Bitte SSHFS ab 3.7.6 für macFUSE installieren."
+    }.into())
+}
+
+fn sshfs_version_is_safe(output: &str) -> bool {
+    let Some(version) = output
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("SSHFS version "))
+    else {
+        return false;
+    };
+    let parts: Option<Vec<u32>> = version
+        .trim()
+        .split('.')
+        .map(|part| part.parse().ok())
+        .collect();
+    matches!(parts.as_deref(), Some([major, minor, patch]) if (*major, *minor, *patch) >= (3, 7, 6))
 }
 
 /// Der SSHFS-Quellbezeichner bewahrt absichtlich die Schreibweise des
@@ -537,29 +578,67 @@ fn create_sftp_batch_file(script: &str) -> Result<PathBuf, String> {
 // Hostschlüssel
 // ---------------------------------------------------------------------------
 
-fn run_with_timeout(mut child: Child, limit: Duration) -> Result<std::process::Output, String> {
-    let deadline = Instant::now() + limit;
-    loop {
-        match child.try_wait() {
-            Ok(Some(_)) => {
-                return child
-                    .wait_with_output()
-                    .map_err(|_| "err.remote.keyscan".to_string())
+fn run_with_timeout(child: Child, limit: Duration) -> Result<std::process::Output, String> {
+    run_with_timeout_and_cancel(child, limit, None)
+}
+
+fn run_with_timeout_and_cancel(
+    mut child: Child,
+    limit: Duration,
+    cancel: Option<&AtomicBool>,
+) -> Result<std::process::Output, String> {
+    // Drain pipes while the child runs; otherwise a full pipe prevents exit.
+    let stdout = child.stdout.take();
+    let stderr = child.stderr.take();
+    let read = |stream: Option<Box<dyn Read + Send>>| {
+        std::thread::spawn(move || {
+            let mut bytes = Vec::new();
+            if let Some(mut stream) = stream {
+                stream.read_to_end(&mut bytes)?;
             }
+            Ok::<_, std::io::Error>(bytes)
+        })
+    };
+    let stdout = read(stdout.map(|s| Box::new(s) as Box<dyn Read + Send>));
+    let stderr = read(stderr.map(|s| Box::new(s) as Box<dyn Read + Send>));
+    let deadline = Instant::now() + limit;
+    let result = loop {
+        if cancel.is_some_and(|c| c.load(Ordering::SeqCst))
+            || crate::check_sync_preview_cancelled().is_err()
+        {
+            let _ = child.kill();
+            let _ = child.wait();
+            break Err("JOB_CANCELLED".to_string());
+        }
+        match child.try_wait() {
+            Ok(Some(status)) => break Ok(status),
             Ok(None) => {}
             Err(_) => {
                 let _ = child.kill();
                 let _ = child.wait();
-                return Err("err.remote.keyscan".into());
+                break Err("err.remote.keyscan".to_string());
             }
         }
         if Instant::now() >= deadline {
             let _ = child.kill();
             let _ = child.wait();
-            return Err("err.remote.keyscanTimeout".into());
+            break Err("err.remote.keyscanTimeout".to_string());
         }
         std::thread::sleep(Duration::from_millis(50));
-    }
+    };
+    let stdout = stdout
+        .join()
+        .map_err(|_| "err.remote.keyscan".to_string())?
+        .map_err(|_| "err.remote.keyscan".to_string())?;
+    let stderr = stderr
+        .join()
+        .map_err(|_| "err.remote.keyscan".to_string())?
+        .map_err(|_| "err.remote.keyscan".to_string())?;
+    Ok(std::process::Output {
+        status: result?,
+        stdout,
+        stderr,
+    })
 }
 
 /// Holt sämtliche Hostschlüssel des Servers.
@@ -722,13 +801,20 @@ pub async fn remote_host_keys(host: String, port: Option<u16>) -> Result<HostKey
 
 /// Übernimmt die Schlüssel des Servers in die Liste der bekannten Hosts.
 #[tauri::command]
-pub async fn remote_trust_host(host: String, port: Option<u16>) -> Result<(), String> {
+pub async fn remote_trust_host(
+    host: String,
+    port: Option<u16>,
+    expected_fingerprints: Vec<String>,
+) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
         if !valid_host(&host) {
             return Err("err.remote.host".into());
         }
         let port = port.unwrap_or(22);
         let lines = scan_host_keys(&host, port)?;
+        if !confirmed_fingerprints_match(&expected_fingerprints, &fingerprints(&lines)) {
+            return Err("err.remote.hostKeyChanged".into());
+        }
         let file = known_hosts_file()?;
         let existing = std::fs::read_to_string(&file).unwrap_or_default();
         // Ein früherer Eintrag desselben Servers muss weichen, sonst stünden
@@ -763,6 +849,12 @@ pub async fn remote_trust_host(host: String, port: Option<u16>) -> Result<(), St
     })
     .await
     .map_err(|_| "err.remote.keyscan".to_string())?
+}
+
+fn confirmed_fingerprints_match(expected: &[String], actual: &[String]) -> bool {
+    let expected: std::collections::BTreeSet<_> = expected.iter().collect();
+    let actual: std::collections::BTreeSet<_> = actual.iter().collect();
+    !expected.is_empty() && expected == actual
 }
 
 // ---------------------------------------------------------------------------
@@ -862,28 +954,35 @@ fn obscure(rclone: &Path, password: &str) -> Result<String, String> {
 
 /// Ist dieser Pfad gerade ein Einhängepunkt?
 ///
-/// Der Vergleich der Geräte-IDs mit dem übergeordneten Ordner ist zuverlässiger
-/// als das Durchsuchen der Ausgabe von `mount`: Er kommt ohne Textzerlegung aus
-/// und funktioniert auch bei Namen mit Leerzeichen.
+/// Auf macOS ausschließlich aus der gecachten Kernel-Tabelle lesen: Selbst
+/// stat() auf dem Mountpunkt kann bei einem ausgefallenen Server blockieren.
 pub(crate) fn is_mount_point(path: &Path) -> bool {
-    use std::os::unix::fs::MetadataExt;
-    let here = match std::fs::metadata(path) {
-        Ok(meta) => meta.dev(),
-        Err(_) => return false,
-    };
-    match path.parent().and_then(|p| std::fs::metadata(p).ok()) {
-        Some(parent) => parent.dev() != here,
-        None => false,
+    #[cfg(target_os = "macos")]
+    {
+        // stat/read_dir can wait indefinitely on an offline NFS mount. The
+        // kernel's cached mount table needs no access to the remote server.
+        kernel_mount_points().contains(path)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let here = match std::fs::metadata(path) {
+            Ok(meta) => meta.dev(),
+            Err(_) => return false,
+        };
+        match path.parent().and_then(|p| std::fs::metadata(p).ok()) {
+            Some(parent) => parent.dev() != here,
+            None => false,
+        }
     }
 }
 
-/// Ein NFS-Mountpunkt kann bereits im Kernel erscheinen, obwohl rclone den
-/// ersten Verzeichniszugriff noch nicht bedienen kann. Die Oberfläche würde
-/// dann den frisch gemeldeten Mount öffnen, `read_dir` bekäme EIO und fiele
-/// auf das Home-Verzeichnis zurück. Erst ein erfolgreicher Root-Listing-Zugriff
-/// macht das Laufwerk für die Navigation wirklich bereit.
+/// Die Anmeldung wird vor dem Mount direkt geprüft. Anschließend genügt der
+/// Kernel-Eintrag; das Dateifenster liest rclone-Verzeichnisse direkt vom Server.
 fn is_mount_ready(path: &Path) -> bool {
-    is_mount_point(path) && std::fs::read_dir(path).is_ok()
+    // Authentication/listing was checked directly before mounting. Never
+    // touch the mounted filesystem here: a kernel call has no Rust timeout.
+    is_mount_point(path)
 }
 
 /// Prüft Zugang und gewählten Startpfad unmittelbar mit rclone, bevor der
@@ -921,37 +1020,22 @@ fn verify_rclone_connection(
     for (key, value) in rclone_env(spec, obscured_password, known_hosts) {
         command.env(key, value);
     }
-    let mut child = command
+    let child = command
         .spawn()
         .map_err(|_| "err.remote.mountFailed".to_string())?;
-    let deadline = Instant::now() + REMOTE_VERIFY_TIMEOUT;
-    loop {
-        match child.try_wait() {
-            Ok(Some(_)) => {
-                let output = child
-                    .wait_with_output()
-                    .map_err(|_| "err.remote.mountFailed".to_string())?;
-                return if output.status.success() {
-                    Ok(())
-                } else {
-                    Err(rclone_failure_message(&String::from_utf8_lossy(
-                        &output.stderr,
-                    )))
-                };
-            }
-            Ok(None) => {}
-            Err(_) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err("err.remote.mountFailed".into());
-            }
+    let output = run_with_timeout(child, REMOTE_VERIFY_TIMEOUT).map_err(|error| {
+        if error == "err.remote.keyscanTimeout" {
+            "err.remote.mountTimeout".to_string()
+        } else {
+            "err.remote.mountFailed".to_string()
         }
-        if Instant::now() >= deadline {
-            let _ = child.kill();
-            let _ = child.wait();
-            return Err("err.remote.mountTimeout".into());
-        }
-        std::thread::sleep(Duration::from_millis(50));
+    })?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(rclone_failure_message(&String::from_utf8_lossy(
+            &output.stderr,
+        )))
     }
 }
 
@@ -1153,6 +1237,12 @@ fn mount_blocking(
     })
     .ok_or_else(|| "err.remote.label".to_string())?;
 
+    // Reject unsafe SSHFS before creating a mount directory or askpass helper.
+    let sshfs = if spec.protocol == RemoteProtocol::Sftp {
+        Some(sshfs_executable()?)
+    } else {
+        None
+    };
     let (mount_dir, final_label) = unique_mount_dir(&label)?;
     // Der Name enthält den Anzeigenamen, weil er innerhalb des Ordners eindeutig
     // ist. Sonst würden sich mehrere gleichzeitige Einhängungen gegenseitig ins
@@ -1164,13 +1254,15 @@ fn mount_blocking(
         .map_err(|_| "err.remote.mountFailed".to_string())?;
 
     if spec.protocol == RemoteProtocol::Sftp {
-        let sshfs = sshfs_executable()?;
+        let sshfs = sshfs
+            .as_ref()
+            .expect("SFTP version checked before mounting");
         let askpass = create_sshfs_askpass()?;
         let source = sshfs_source(&spec);
         let known_hosts = known_hosts
             .as_ref()
             .expect("SFTP besitzt nach der Host-Key-Prüfung eine known_hosts-Datei");
-        let mut command = Command::new(&sshfs);
+        let mut command = Command::new(sshfs);
         command
             // Im Vordergrund bleibt der Kindprozess der App zugeordnet und
             // wird beim Aushängen zuverlässig beendet.
@@ -1179,6 +1271,8 @@ fn mount_blocking(
             .arg(&mount_dir)
             .args(["-p", &spec.port_or_default().to_string()])
             .args(["-o", "StrictHostKeyChecking=yes"])
+            // A compromised SFTP server must not expose local paths via links.
+            .args(["-o", "contain_symlinks"])
             .args([
                 "-o",
                 &format!("UserKnownHostsFile={}", ssh_option_path(known_hosts)),
@@ -1665,7 +1759,7 @@ pub fn copy_object_storage(
     ));
     if cancel.load(std::sync::atomic::Ordering::SeqCst) {
         object_storage_copy_log("cancelled before rclone start");
-        return Ok(());
+        return Err("JOB_CANCELLED".into());
     }
     let expected = format!(
         "{}://{}",
@@ -1744,6 +1838,17 @@ pub fn copy_object_storage(
     );
     let secret = crate::object_storage::object_storage_secret(&profile.id)?;
     let rclone = rclone_executable()?;
+    if !source_is_object_storage {
+        ensure_direct_transfer_supported(source)?;
+    }
+    let source_is_dir = if source_is_object_storage {
+        object_storage_path_is_dir(source)
+            .ok_or_else(|| "Objekt-Speicherquelle fehlt".to_string())??
+    } else {
+        std::fs::symlink_metadata(source)
+            .map_err(|e| e.to_string())?
+            .is_dir()
+    };
     let (from, to) = if source_is_object_storage {
         (remote_path, destination.to_string_lossy().into_owned())
     } else {
@@ -1752,7 +1857,7 @@ pub fn copy_object_storage(
     object_storage_copy_log(&format!("rclone copyto from={from} to={to}"));
     let mut command = Command::new(&rclone);
     command
-        .arg("copyto")
+        .arg(if source_is_dir { "copy" } else { "copyto" })
         .arg(from)
         .arg(to)
         .args([
@@ -1769,7 +1874,7 @@ pub fn copy_object_storage(
             // Eine vom Benutzer ausgelöste Kopie ist ein bewusster Auftrag,
             // kein inkrementeller Sync. rclone darf sie daher nicht wegen
             // zufällig gleicher Größe/Zeitstempel still überspringen.
-            "--ignore-times",
+            // The overwrite policy is applied below for files AND subtrees.
         ])
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -1779,67 +1884,33 @@ pub fn copy_object_storage(
     // damit ist der Schalter wirksam, ohne WebDAV mit vielen Prüfungen zu
     // belasten (die Checkers bleiben bewusst bei 1).
     command.args(["--transfers", &profile.parallel_transfers.to_string()]);
-    // Beim Herunterladen auf ein WebDAV-Laufwerk darf rclone nicht erst in
-    // eine temporäre Datei schreiben und diese anschließend umbenennen. Das
-    // macOS-WebDAV-Dateisystem verweigert diesen zweiten Schritt je nach
-    // Server mit einem generischen Fehler. Der Inhalt wird daher direkt in
-    // die Zieldatei geschrieben. Eine abgebrochene Übertragung kann nur diese
-    // eine Datei unvollständig hinterlassen, nie eine vorhandene Datei still
-    // durch einen leeren Platzhalter ersetzen.
-    if source_is_object_storage {
-        command.arg("--inplace");
-    }
-    let _ = force_overwrite; // Teil der stabilen IPC-Form für Kopierjobs.
+    // Downloads use rclone's temporary destination, not --inplace: cancelling
+    // an overwrite must preserve the previous complete destination file.
+    apply_overwrite_policy(&mut command, force_overwrite);
     for (key, value) in object_storage_env(&profile, &secret) {
         command.env(key, value);
     }
-    let mut child = command.spawn().map_err(|error| {
-        object_storage_copy_log(&format!("could not start rclone: {error}"));
-        "Objekt-Speicher-Kopie konnte nicht gestartet werden".to_string()
-    })?;
-    loop {
-        match child.try_wait() {
-            Ok(Some(status)) => {
-                let output = child.wait_with_output().map_err(|error| {
-                    object_storage_copy_log(&format!("could not collect rclone output: {error}"));
-                    "Objekt-Speicher-Kopie fehlgeschlagen".to_string()
-                })?;
-                if status.success() {
-                    object_storage_copy_log("rclone reported success; verifying destination");
-                    // Für einen nachträglich wiederhergestellten S3-Mount
-                    // zeigt `source` bzw. `destination` noch auf dessen alte
-                    // lokale Kennung. Die Bestätigung muss dagegen immer den
-                    // tatsächlich aktiven Objekt-Speicherpfad abfragen.
-                    let verified = if source_is_object_storage {
-                        verify_object_storage_copy(true, &active.real_path, destination)
-                    } else {
-                        verify_object_storage_copy(false, source, &active.real_path)
-                    };
-                    match &verified {
-                        Ok(()) => object_storage_copy_log("copy completed and verified"),
-                        Err(error) => {
-                            object_storage_copy_log(&format!("verification failed: {error}"))
-                        }
-                    }
-                    return verified;
-                }
-                let error = object_storage_copy_error(&output.stderr, &secret);
-                object_storage_copy_log(&format!("rclone failed ({status}): {error}"));
-                return Err(error);
-            }
-            Ok(None) if cancel.load(std::sync::atomic::Ordering::SeqCst) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                object_storage_copy_log("cancelled while rclone was running");
-                return Ok(());
-            }
-            Ok(None) => std::thread::sleep(Duration::from_millis(50)),
-            Err(error) => {
-                object_storage_copy_log(&format!("could not query rclone status: {error}"));
-                return Err("Objekt-Speicher-Kopie fehlgeschlagen".into());
-            }
+    let child = command
+        .spawn()
+        .map_err(|_| "Objekt-Speicher-Kopie konnte nicht gestartet werden".to_string())?;
+    let output = run_with_timeout_and_cancel(child, Duration::from_secs(86400), Some(cancel))?;
+    if !output.status.success() {
+        return Err(object_storage_copy_error(&output.stderr, &secret));
+    }
+    if cancel.load(Ordering::SeqCst) {
+        return Err("JOB_CANCELLED".into());
+    }
+    // When overwrite is false, existing files are intentionally skipped.
+    // Moves always perform their independent full-content check before deletion.
+    if force_overwrite {
+        if source_is_object_storage {
+            verify_object_storage_copy(true, &active.real_path, destination)?;
+        } else {
+            verify_object_storage_copy(false, source, &active.real_path)?;
         }
     }
+    object_storage_copy_log("copy completed");
+    Ok(())
 }
 
 /// Protokolliert ausschließlich Diagnoseinformationen zu direkten S3-/Swift-
@@ -2162,29 +2233,30 @@ fn is_rclone_transfer_candidate(
 }
 
 pub fn rclone_transfer_context(path: &Path) -> Option<RcloneTransferContext> {
-    let list = registry().lock().ok()?;
-    // Ohne ein passendes Laufwerk ist der Pfadabgleich zwecklos.
-    if !list.iter().any(|entry| {
-        is_rclone_transfer_candidate(entry.object_profile.as_ref(), entry.remote_spec.as_ref())
-    }) {
-        return None;
-    }
-    let real_path = canonicalize_with_missing_suffix(path);
-    list.iter()
+    let candidates: Vec<_> = registry()
+        .lock()
+        .ok()?
+        .iter()
         .filter_map(|entry| {
             let spec = entry.remote_spec.as_ref()?;
-            is_rclone_transfer_candidate(entry.object_profile.as_ref(), Some(spec))
-                .then_some((entry, spec))
-        })
-        .filter_map(|(entry, spec)| {
-            let mount = canonicalize_with_missing_suffix(&entry.path);
-            real_path
-                .starts_with(&mount)
-                .then_some(RcloneTransferContext {
+            is_rclone_transfer_candidate(entry.object_profile.as_ref(), Some(spec)).then(|| {
+                RcloneTransferContext {
                     mount_path: entry.path.clone(),
                     spec: spec.clone(),
                     obscured_password: entry.obscured_password.clone(),
-                })
+                }
+            })
+        })
+        .collect();
+    if candidates.is_empty() {
+        return None;
+    }
+    let real_path = canonicalize_with_missing_suffix(path);
+    candidates
+        .into_iter()
+        .filter(|context| {
+            let mount = canonicalize_with_missing_suffix(&context.mount_path);
+            real_path.starts_with(&mount)
         })
         // Bei verschachtelten Mounts gewinnt der spezifischste.
         .max_by_key(|context| context.mount_path.as_os_str().len())
@@ -2252,20 +2324,18 @@ pub fn copy_rclone_storage(
     // bestätigt wurde. Ein Profil allein darf keinen direkten Netzaufruf lösen.
     validate(spec, true)?;
     if cancel.load(std::sync::atomic::Ordering::SeqCst) {
-        return Ok(());
+        return Err("JOB_CANCELLED".into());
     }
     // Der Mount wird erneut gegen die aktive Registrierung geprüft. Damit kann
     // ein von außen gelieferter Pfad keinen fremden Zugang ansprechen.
     let expected = spec.descriptor();
-    let real_mount =
-        std::fs::canonicalize(&context.mount_path).unwrap_or_else(|_| context.mount_path.clone());
+    let real_mount = canonicalize_with_missing_suffix(&context.mount_path);
     let verified = registry()
         .lock()
         .ok()
         .map(|list| {
             list.iter().any(|entry| {
-                let entry_mount =
-                    std::fs::canonicalize(&entry.path).unwrap_or_else(|_| entry.path.clone());
+                let entry_mount = canonicalize_with_missing_suffix(&entry.path);
                 entry_mount == real_mount && entry.descriptor == expected
             })
         })
@@ -2285,13 +2355,16 @@ pub fn copy_rclone_storage(
     } else {
         source
     };
-
-    // Die Art des Quellobjekts entscheidet über `copy` (Ordner) oder `copyto`
-    // (Einzeldatei). Bei einer entfernten Quelle liefert der Mount die Auskunft
-    // zuverlässig, weil Lesen aus dem Zwischenspeicher unkritisch ist.
-    let source_is_dir = std::fs::symlink_metadata(source)
-        .map(|meta| meta.is_dir() && !meta.file_type().is_symlink())
-        .unwrap_or(false);
+    // A just-uploaded source may not yet exist in the NFS cache. Both type
+    // detection and transfers must use the server, never walk a stale mount.
+    let source_is_dir = if source_is_remote {
+        rclone_path_is_dir(source).ok_or_else(|| "err.remote.notOurs".to_string())??
+    } else {
+        ensure_direct_transfer_supported(source)?;
+        std::fs::symlink_metadata(source)
+            .map_err(|e| e.to_string())?
+            .is_dir()
+    };
 
     // Wie beim Lesen: Das beim Einhängen abgelegte Kennwort hat Vorrang, damit
     // ein fehlender Schlüsselbund-Eintrag die Übertragung nicht verhindert.
@@ -2350,9 +2423,7 @@ pub fn copy_rclone_storage(
         .stderr(Stdio::piped());
     // Eine bewusste Kopie darf bei bestehendem Ziel nicht wegen gleicher
     // Zeitstempel ausgelassen werden.
-    if force_overwrite {
-        command.arg("--ignore-times");
-    }
+    apply_overwrite_policy(&mut command, force_overwrite);
     for (key, value) in rclone_env(spec, &obscured, None) {
         command.env(key, value);
     }
@@ -2403,11 +2474,211 @@ pub fn copy_rclone_storage(
                 let _ = child.kill();
                 let _ = child.wait();
                 let _ = log_reader.join();
-                return Ok(());
+                return Err("JOB_CANCELLED".into());
             }
             Ok(None) => std::thread::sleep(Duration::from_millis(50)),
             Err(_) => return Err("Übertragung fehlgeschlagen".into()),
         }
+    }
+}
+
+// rclone silently skips symlinks and special files by default. Refuse an
+// unsupported tree before writing anything, especially before a later move
+// can remove its source. No implicit dereferencing of links outside the tree.
+pub(crate) fn ensure_direct_transfer_supported(source: &Path) -> Result<(), String> {
+    for entry in walkdir::WalkDir::new(source).follow_links(false) {
+        let entry = entry.map_err(|e| e.to_string())?;
+        let kind = entry.file_type();
+        if !kind.is_file() && !kind.is_dir() {
+            return Err(format!("{}: Symbolische Links und Spezialdateien werden bei diesem direkten Transfer nicht unterstützt; die Quelle bleibt erhalten", entry.path().display()));
+        }
+    }
+    Ok(())
+}
+
+fn apply_overwrite_policy(command: &mut Command, overwrite: bool) {
+    command.arg(if overwrite {
+        "--ignore-times"
+    } else {
+        "--ignore-existing"
+    });
+}
+
+#[cfg(test)]
+mod transfer_safety_tests {
+    use super::*;
+
+    #[test]
+    fn sshfs_requires_a_patched_stable_version() {
+        for version in ["3.7.6", "3.8.0", "4.0.0"] {
+            assert!(sshfs_version_is_safe(&format!(
+                "SSHFS version {version}\nFUSE library version 3.18.2"
+            )));
+        }
+        for output in [
+            "SSHFS version 3.7.5",
+            "SSHFS version 2.10.0",
+            "SSHFS version 3.7.6-rc1",
+            "SSHFS version 3.7",
+            "SSHFS version broken",
+            "FUSE library version 99.0.0",
+            "",
+        ] {
+            assert!(!sshfs_version_is_safe(output));
+        }
+    }
+
+    #[test]
+    fn virtual_storage_moves_use_the_same_adapter_as_copies() {
+        let root =
+            std::env::temp_dir().join(format!("dualbeam-virtual-routing-{}", std::process::id()));
+        std::fs::create_dir(&root).unwrap();
+        let profile: ObjectStorageProfile = serde_json::from_value(serde_json::json!({
+            "id": "isolated-test", "name": "test", "protocol": "s3", "endpoint": "https://invalid.example"
+        })).unwrap();
+        registry().lock().unwrap().push(ActiveMount {
+            path: root.clone(),
+            object_home: Some(root.clone()),
+            label: "test".into(),
+            descriptor: "s3://isolated-test".into(),
+            rc_socket: root.join("socket"),
+            child: None,
+            log: root.join("log"),
+            remote_spec: None,
+            object_profile: Some(profile),
+            obscured_password: None,
+            sshfs_askpass: None,
+        });
+        let items = vec![crate::JobItem {
+            src: "/local-file".into(),
+            dst: root.join("file").to_string_lossy().into_owned(),
+            overwrite: false,
+            directory_only: false,
+        }];
+        let copied = crate::infer_object_storage_request("copy", &items);
+        let moved = crate::infer_object_storage_request("move", &items);
+        registry()
+            .lock()
+            .unwrap()
+            .retain(|entry| entry.path != root);
+        std::fs::remove_dir(root).unwrap();
+        assert!(copied.is_some());
+        assert!(moved.is_some_and(|request| !request.source_is_object_storage));
+    }
+
+    #[test]
+    fn bundled_rclone_preserves_existing_files_when_overwrite_is_disabled() {
+        let root =
+            std::env::temp_dir().join(format!("dualbeam-rclone-policy-{}", std::process::id()));
+        std::fs::create_dir(&root).unwrap();
+        let src = root.join("src");
+        let dst = root.join("dst");
+        std::fs::write(&src, b"replacement").unwrap();
+        std::fs::write(&dst, b"original").unwrap();
+        let triple = if cfg!(target_arch = "aarch64") {
+            "aarch64"
+        } else {
+            "x86_64"
+        };
+        let binary = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join(format!("binaries/rclone-{triple}-apple-darwin"));
+        let mut command = Command::new(binary);
+        command
+            .args(["copyto", "--config", "/dev/null"])
+            .arg(&src)
+            .arg(&dst);
+        apply_overwrite_policy(&mut command, false);
+        let result = command.output().unwrap();
+        let bytes = std::fs::read(&dst).unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+        assert!(result.status.success());
+        assert_eq!(bytes, b"original");
+    }
+
+    #[test]
+    fn drains_large_output_before_waiting_for_process_exit() {
+        let child = Command::new("/usr/bin/head")
+            .args(["-c", "1048576", "/dev/zero"])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let output = run_with_timeout(child, Duration::from_secs(3)).unwrap();
+        assert!(output.status.success());
+        assert_eq!(output.stdout.len(), 1048576);
+    }
+
+    #[test]
+    fn cancelled_process_never_reports_success() {
+        let child = Command::new("/bin/sleep")
+            .arg("10")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        assert_eq!(
+            run_with_timeout_and_cancel(
+                child,
+                Duration::from_secs(3),
+                Some(&AtomicBool::new(true))
+            )
+            .unwrap_err(),
+            "JOB_CANCELLED"
+        );
+    }
+
+    #[test]
+    fn trust_requires_exactly_the_confirmed_key_set() {
+        let confirmed = vec!["ED25519 SHA256:approved".into()];
+        assert!(confirmed_fingerprints_match(&confirmed, &confirmed));
+        assert!(!confirmed_fingerprints_match(
+            &confirmed,
+            &["ED25519 SHA256:changed".into()]
+        ));
+        assert!(!confirmed_fingerprints_match(&[], &[]));
+        assert!(!confirmed_fingerprints_match(
+            &confirmed,
+            &[confirmed[0].clone(), "RSA SHA256:extra".into()]
+        ));
+    }
+
+    #[test]
+    fn overwrite_policy_is_explicit_in_both_directions() {
+        for overwrite in [false, true] {
+            let mut cmd = Command::new("rclone");
+            apply_overwrite_policy(&mut cmd, overwrite);
+            let args: Vec<_> = cmd.get_args().map(|arg| arg.to_str().unwrap()).collect();
+            assert_eq!(
+                args,
+                vec![if overwrite {
+                    "--ignore-times"
+                } else {
+                    "--ignore-existing"
+                }]
+            );
+        }
+    }
+
+    #[test]
+    fn sftp_does_not_upload_existing_children_without_overwrite() {
+        let root =
+            std::env::temp_dir().join(format!("dualbeam-sftp-policy-{}", std::process::id()));
+        std::fs::create_dir(&root).unwrap();
+        let src = root.join("src");
+        let dst = root.join("dst");
+        std::fs::create_dir(&src).unwrap();
+        std::fs::create_dir(&dst).unwrap();
+        std::fs::write(src.join("file"), b"new").unwrap();
+        std::fs::write(dst.join("file"), b"old").unwrap();
+        let mut script = String::new();
+        let mut uploads = Vec::new();
+        append_sftp_uploads(&mut script, &src, "remote", &dst, false, &mut uploads).unwrap();
+        assert!(uploads.is_empty());
+        assert!(!script.contains("put "));
+        std::os::unix::fs::symlink("file", src.join("link")).unwrap();
+        assert!(ensure_direct_transfer_supported(&src).is_err());
+        assert_eq!(std::fs::read(dst.join("file")).unwrap(), b"old");
+        std::fs::remove_dir_all(root).unwrap();
     }
 }
 
@@ -2452,6 +2723,91 @@ fn direct_rclone_command(
     command
         .output()
         .map_err(|_| "Das Netzlaufwerk konnte nicht abgefragt werden".to_string())
+}
+
+// Resolve a virtual path to a configured command. Never hand a virtual path
+// to a local filesystem operation when its adapter cannot handle it.
+fn direct_path_command(path: &Path) -> Option<Result<(Command, String), String>> {
+    if let Some(context) = object_storage_mount_context(path) {
+        return Some((|| {
+            let secret = crate::object_storage::object_storage_secret(&context.profile.id)?;
+            let mut cmd = Command::new(rclone_executable()?);
+            cmd.envs(object_storage_env(&context.profile, &secret));
+            Ok((cmd, object_storage_target(&context)?))
+        })());
+    }
+    let context = rclone_transfer_context(path)?;
+    Some((|| {
+        let rclone = rclone_executable()?;
+        let password = match context.obscured_password.as_ref() {
+            Some(password) => password.clone(),
+            None => obscure(
+                &rclone,
+                &remote_password(&context.spec)?
+                    .ok_or_else(|| "err.remote.emptyPassword".to_string())?,
+            )?,
+        };
+        let mut cmd = Command::new(rclone);
+        cmd.envs(rclone_env(&context.spec, &password, None));
+        let target = rclone_transfer_target(path, &context.mount_path, &context.spec)?;
+        Ok((cmd, target))
+    })())
+}
+
+pub fn create_direct_directory(path: &Path) -> Option<Result<(), String>> {
+    let command = direct_path_command(path)?;
+    Some((|| {
+        let (mut cmd, target) = command?;
+        let child = cmd
+            .args(["mkdir", "--contimeout", "15s", "--timeout", "2m", &target])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|e| e.to_string())?;
+        let output = run_with_timeout(child, Duration::from_secs(180))?;
+        if !output.status.success() {
+            return Err("Zielordner konnte nicht angelegt werden".into());
+        }
+        remember_object_directory(path);
+        Ok(())
+    })())
+}
+
+pub fn sha256_path(path: &Path) -> Option<Result<String, String>> {
+    let command = direct_path_command(path)?;
+    Some((|| {
+        let (mut cmd, target) = command?;
+        // --download also works for providers without server-side SHA-256.
+        let child = cmd
+            .args([
+                "hashsum",
+                "sha256",
+                "--download",
+                "--contimeout",
+                "15s",
+                "--timeout",
+                "2m",
+                "--retries",
+                "1",
+                &target,
+            ])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|e| e.to_string())?;
+        let output = run_with_timeout(child, Duration::from_secs(86400))?;
+        if !output.status.success() {
+            return Err("Prüfsumme am Server konnte nicht gelesen werden".into());
+        }
+        let text = String::from_utf8_lossy(&output.stdout);
+        let hash = text.split_whitespace().next().unwrap_or("");
+        if hash.len() != 64 || !hash.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return Err("Server lieferte keine gültige SHA-256-Prüfsumme".into());
+        }
+        Ok(hash.to_ascii_lowercase())
+    })())
 }
 
 /// Liest ein Verzeichnis eines rclone-Laufwerks direkt vom Server.
@@ -2611,6 +2967,21 @@ pub fn rclone_path_exists(path: &Path) -> Option<Result<bool, String>> {
         entries
             .iter()
             .any(|entry| entry.name == name.to_string_lossy())
+    }))
+}
+
+pub fn rclone_path_is_dir(path: &Path) -> Option<Result<bool, String>> {
+    let context = rclone_transfer_context(path)?;
+    let real_path = canonicalize_with_missing_suffix(path);
+    if real_path == canonicalize_with_missing_suffix(&context.mount_path) {
+        return Some(Ok(true));
+    }
+    let name = real_path.file_name()?.to_string_lossy().into_owned();
+    let parent = real_path.parent()?;
+    Some(list_rclone_dir_direct(parent, &context).map(|entries| {
+        entries
+            .into_iter()
+            .any(|entry| entry.name == name && entry.is_dir)
     }))
 }
 
@@ -2777,18 +3148,22 @@ pub fn purge_remote_storage(
         return Ok(());
     }
     let expected = spec.descriptor();
-    let mounted = registry()
-        .lock()
-        .ok()
-        .map(|list| {
-            list.iter()
-                .any(|entry| entry.path == mount_path && entry.descriptor == expected)
-        })
-        .unwrap_or(false);
-    if !mounted {
-        return Err("err.remote.notOurs".into());
-    }
-    let password = remote_password(spec)?.ok_or_else(|| "err.remote.emptyPassword".to_string())?;
+    let mounted = registry().lock().ok().and_then(|list| {
+        list.iter()
+            .find(|entry| entry.path == mount_path && entry.descriptor == expected)
+            .and_then(|entry| {
+                entry
+                    .remote_spec
+                    .clone()
+                    .map(|spec| (spec, entry.obscured_password.clone()))
+            })
+    });
+    let (active_spec, cached_password) = mounted.ok_or_else(|| "err.remote.notOurs".to_string())?;
+    let spec = &active_spec;
+    let password = match cached_password.as_deref() {
+        Some(value) if !value.is_empty() => String::new(),
+        _ => remote_password(spec)?.ok_or_else(|| "err.remote.emptyPassword".to_string())?,
+    };
     let rclone = rclone_executable()?;
     let known_hosts = if spec.protocol == RemoteProtocol::Sftp {
         let port = spec.port_or_default();
@@ -2799,7 +3174,10 @@ pub fn purge_remote_storage(
     } else {
         None
     };
-    let obscured = obscure(&rclone, &password)?;
+    let obscured = match cached_password {
+        Some(value) if !value.is_empty() => value,
+        _ => obscure(&rclone, &password)?,
+    };
     let base = remote_argument(spec);
     let mut targets: Vec<(PathBuf, String, bool)> = Vec::new();
     for path in paths {
@@ -2826,9 +3204,7 @@ pub fn purge_remote_storage(
             return Err("Das Stammverzeichnis des Netzlaufwerks kann nicht gelöscht werden".into());
         }
         let target = format!("{}/{}", base.trim_end_matches('/'), parts.join("/"));
-        let is_dir = std::fs::symlink_metadata(path)
-            .map(|meta| meta.is_dir() && !meta.file_type().is_symlink())
-            .unwrap_or(false);
+        let is_dir = rclone_path_is_dir(path).ok_or_else(|| "err.remote.notOurs".to_string())??;
         if targets
             .iter()
             .any(|(selected, _, selected_is_dir)| *selected_is_dir && path.starts_with(selected))
@@ -3165,7 +3541,13 @@ fn rclone_failure_message(text: &str) -> String {
     {
         return "err.remote.auth".into();
     }
-    if lower.contains("no such host") || lower.contains("connection refused") {
+    if lower.contains("no such host")
+        || lower.contains("connection refused")
+        || lower.contains("no route to host")
+        || lower.contains("network is unreachable")
+        || lower.contains("host is down")
+        || lower.contains("network is down")
+    {
         return "err.remote.unreachable".into();
     }
     if lower.contains("i/o timeout") || lower.contains("timed out") {
@@ -3177,8 +3559,8 @@ fn rclone_failure_message(text: &str) -> String {
     "err.remote.mountFailed".into()
 }
 
-/// Prüft die Anmeldung, bevor ein S3-Bucket oder Swift-Container als NFS-Laufwerk
-/// sichtbar wird. `lsd` löst nur eine Metadatenabfrage aus und verändert weder
+/// Prüft die Anmeldung, bevor ein S3-Bucket oder Swift-Container sichtbar
+/// wird. `lsd` löst nur eine Metadatenabfrage aus und verändert weder
 /// Dateien noch Container.
 fn verify_object_storage_connection(
     rclone: &Path,
@@ -3203,9 +3585,16 @@ fn verify_object_storage_connection(
     for (key, value) in env {
         command.env(key, value);
     }
-    let output = command
-        .output()
+    let child = command
+        .spawn()
         .map_err(|_| "err.remote.mountFailed".to_string())?;
+    let output = run_with_timeout(child, Duration::from_secs(30)).map_err(|error| {
+        if error == "err.remote.keyscanTimeout" {
+            "err.remote.mountTimeout".to_string()
+        } else {
+            error
+        }
+    })?;
     if output.status.success() {
         return Ok(());
     }
@@ -3223,14 +3612,13 @@ fn verify_object_storage_connection(
 /// `canonicalize` geschickt hat. Unter macOS zeigt `/Users` auf
 /// `/System/Volumes/Data/Users`; ein reiner Textvergleich ginge dann daneben.
 pub fn is_remote_mount(path: &Path) -> bool {
-    let real_path = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let real_path = canonicalize_with_missing_suffix(path);
     // Die Registrierung ist die zuverlässigste Quelle für eigene Mounts. Der
     // generische Pfadvergleich darunter bleibt als Fallback für den Fall, dass
     // ein Eintrag unmittelbar nach dem Aushängen geprüft wird.
     if let Ok(list) = registry().lock() {
         if list.iter().any(|entry| {
-            let mount_path =
-                std::fs::canonicalize(&entry.path).unwrap_or_else(|_| entry.path.clone());
+            let mount_path = canonicalize_with_missing_suffix(&entry.path);
             real_path.starts_with(mount_path)
         }) {
             return true;
@@ -3331,10 +3719,11 @@ pub fn object_storage_mount_root(path: &Path) -> Option<PathBuf> {
     };
     list.iter()
         .find(|entry| {
-            let entry_mount =
-                std::fs::canonicalize(&entry.path).unwrap_or_else(|_| entry.path.clone());
-            entry.object_profile.is_some()
-                && entry_mount == context.mount_path
+            if entry.object_profile.is_none() {
+                return false;
+            }
+            let entry_mount = canonicalize_with_missing_suffix(&entry.path);
+            entry_mount == context.mount_path
                 && entry.object_home.as_ref().is_some_and(|home| {
                     let home = std::fs::canonicalize(home).unwrap_or_else(|_| home.clone());
                     context.real_path.starts_with(home)
@@ -3681,6 +4070,7 @@ fn append_sftp_uploads(
     script: &mut String,
     source: &Path,
     target: &str,
+    mounted_target: &Path,
     overwrite: bool,
     uploads: &mut Vec<NativeSftpUpload>,
 ) -> Result<(), String> {
@@ -3715,6 +4105,9 @@ fn append_sftp_uploads(
                 continue;
             }
             let index = uploads.len();
+            if !overwrite && destination_exists(&mounted_target.join(relative))? {
+                continue;
+            }
             append_sftp_put(script, &local.to_string_lossy(), &remote, index, overwrite)?;
             uploads.push(NativeSftpUpload {
                 path: local.to_string_lossy().into_owned(),
@@ -3732,6 +4125,9 @@ fn append_sftp_uploads(
             }
         }
         let index = uploads.len();
+        if !overwrite && destination_exists(mounted_target)? {
+            return Ok(());
+        }
         append_sftp_put(script, &source.to_string_lossy(), target, index, overwrite)?;
         uploads.push(NativeSftpUpload {
             path: source.to_string_lossy().into_owned(),
@@ -3741,6 +4137,14 @@ fn append_sftp_uploads(
         });
     }
     Ok(())
+}
+
+fn destination_exists(path: &Path) -> Result<bool, String> {
+    match std::fs::symlink_metadata(path) {
+        Ok(_) => Ok(true),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(e) => Err(e.to_string()),
+    }
 }
 
 fn sftp_client_error(stderr: &[u8], password: &str) -> String {
@@ -3814,6 +4218,7 @@ pub fn upload_to_sftp_mount(
     cancel: &AtomicBool,
     progress: &mut dyn FnMut(SftpCopyProgress),
 ) -> Result<Vec<String>, String> {
+    ensure_direct_transfer_supported(source)?;
     let context = sftp_mount_context(destination)
         .ok_or_else(|| "Dieser Ordner wurde nicht von DualBeam eingehängt.".to_string())?;
     let target = sftp_relative_path(destination, &context.mount_path)?;
@@ -3836,7 +4241,14 @@ pub fn upload_to_sftp_mount(
             script.push('\n');
         }
         let mut uploads = Vec::new();
-        append_sftp_uploads(&mut script, source, &target, overwrite, &mut uploads)?;
+        append_sftp_uploads(
+            &mut script,
+            source,
+            &target,
+            destination,
+            overwrite,
+            &mut uploads,
+        )?;
         if uploads.is_empty() {
             return Ok(Vec::new());
         }
@@ -4062,29 +4474,43 @@ pub fn upload_to_sftp_mount(
 }
 
 fn object_storage_mount_context(path: &Path) -> Option<ObjectStorageMountContext> {
-    let Ok(list) = registry().lock() else {
-        return None;
-    };
+    let candidates: Vec<_> = registry()
+        .lock()
+        .ok()?
+        .iter()
+        .filter_map(|entry| {
+            entry.object_profile.as_ref().map(|profile| {
+                (
+                    entry.path.clone(),
+                    entry.descriptor.clone(),
+                    profile.clone(),
+                )
+            })
+        })
+        .collect();
     // Erst prüfen, ob überhaupt ein Objekt-Speicher eingehängt ist. `canonicalize`
     // löst ein `lstat` aus; zeigt der Pfad auf eine lastende Netz-Einhängung,
     // wartet das bis zum Mount-Timeout. Ohne S3/Swift gäbe es hier ohnehin
     // nichts zu finden — dieses Warten wäre also vollständig umsonst.
-    if !list.iter().any(|entry| entry.object_profile.is_some()) {
+    if candidates.is_empty() {
         return None;
     }
-    let real_path = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
-    list.iter().find_map(|entry| {
-        let profile = entry.object_profile.as_ref()?;
-        let mount_path = std::fs::canonicalize(&entry.path).unwrap_or_else(|_| entry.path.clone());
-        real_path
-            .starts_with(&mount_path)
-            .then(|| ObjectStorageMountContext {
-                descriptor: entry.descriptor.clone(),
-                mount_path,
-                real_path: real_path.clone(),
-                profile: profile.clone(),
-            })
-    })
+    // Virtual children do not exist locally. Resolve their existing ancestor
+    // before appending the missing suffix (e.g. /var -> /private/var).
+    let real_path = canonicalize_with_missing_suffix(path);
+    candidates
+        .into_iter()
+        .find_map(|(path, descriptor, profile)| {
+            let mount_path = canonicalize_with_missing_suffix(&path);
+            real_path
+                .starts_with(&mount_path)
+                .then(|| ObjectStorageMountContext {
+                    descriptor,
+                    mount_path,
+                    real_path: real_path.clone(),
+                    profile,
+                })
+        })
 }
 
 /// Stellt ausschließlich für S3 die flüchtige Registrierung eines noch
@@ -4167,6 +4593,25 @@ fn reconnect_s3_copy_context(
 /// Das wird für direkte S3- und SFTP-Uploads benötigt: Das Ziel kann beim
 /// Start der Übertragung naturgemäß noch nicht im lokalen Dateisystem liegen.
 fn canonicalize_with_missing_suffix(path: &Path) -> PathBuf {
+    // Remote paths are identifiers for direct protocol operations. Resolving
+    // them with realpath triggers statfs on macOS, even for the mount root.
+    // Resolve only the local parent of an owned kernel mount; never enter it.
+    // Virtual S3/Swift paths and ordinary local paths keep ancestor resolution.
+    if let Ok(root) = mount_root() {
+        let mounted = kernel_mount_points();
+        if let Some(mount) = mounted
+            .iter()
+            .filter(|mount| mount.starts_with(&root) && path.starts_with(mount))
+            .max_by_key(|mount| mount.as_os_str().len())
+        {
+            if let (Some(parent), Some(name), Ok(relative)) =
+                (mount.parent(), mount.file_name(), path.strip_prefix(mount))
+            {
+                let parent = std::fs::canonicalize(parent).unwrap_or_else(|_| parent.to_path_buf());
+                return parent.join(name).join(relative);
+            }
+        }
+    }
     let mut current = path;
     let mut missing = Vec::new();
     loop {
@@ -4207,8 +4652,10 @@ struct RcloneListEntry {
 /// Dateiansicht ein unbekanntes Änderungsdatum.
 fn rclone_list_mtime(value: Option<&str>) -> i64 {
     value
-        .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
-        .map(|time| time.timestamp())
+        .and_then(|value| {
+            time::OffsetDateTime::parse(value, &time::format_description::well_known::Rfc3339).ok()
+        })
+        .map(|time| time.unix_timestamp())
         .unwrap_or(0)
 }
 
@@ -4769,10 +5216,8 @@ fn release(path: &Path) {
     // Der Aufrufer hat den Pfad möglicherweise schon aufgelöst, in der Liste
     // steht dagegen die ursprüngliche Schreibweise. Deshalb beide Seiten
     // vergleichbar machen.
-    let wanted = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
-    let same = |candidate: &Path| {
-        std::fs::canonicalize(candidate).unwrap_or_else(|_| candidate.to_path_buf()) == wanted
-    };
+    let wanted = canonicalize_with_missing_suffix(path);
+    let same = |candidate: &Path| canonicalize_with_missing_suffix(candidate) == wanted;
     let Some(index) = list.iter().position(|entry| same(&entry.path)) else {
         // Nicht in der Liste: dann bleibt nur der leere Ordner zu entfernen.
         let _ = std::fs::remove_dir(path);
@@ -5397,6 +5842,38 @@ mod tests {
             RemoteProtocol::Webdav,
             "err.remote.mountFailed"
         ));
+    }
+
+    #[test]
+    fn offline_network_errors_never_fall_through_to_smb_mount() {
+        for message in [
+            "dial tcp 192.0.2.1:445: connect: no route to host",
+            "network is unreachable",
+            "host is down",
+            "network is down",
+            "connect: connection refused",
+            "i/o timeout",
+        ] {
+            let error = rclone_failure_message(message);
+            assert_eq!(error, "err.remote.unreachable", "{message}");
+            assert!(!may_continue_after_verification_error(
+                RemoteProtocol::Smb,
+                &error
+            ));
+        }
+    }
+
+    #[test]
+    #[ignore = "Read-only check of an explicitly supplied existing offline test mount"]
+    fn offline_mount_identity_does_not_contact_server() {
+        let path = PathBuf::from(std::env::var("DUALBEAM_OFFLINE_TEST_MOUNT").unwrap());
+        assert!(path.starts_with(mount_root().unwrap()));
+        let start = Instant::now();
+        assert!(is_mount_point(&path));
+        assert_eq!(canonicalize_with_missing_suffix(&path), path);
+        let child = path.join("not-created-by-test");
+        assert_eq!(canonicalize_with_missing_suffix(&child), child);
+        assert!(start.elapsed() < Duration::from_secs(2));
     }
 
     #[test]

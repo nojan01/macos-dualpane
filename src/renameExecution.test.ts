@@ -5,8 +5,8 @@ vi.mock("./state", () => ({
   setState: vi.fn(), refreshPane: vi.fn(async () => {}),
 }));
 vi.mock("./jobs", () => ({ selectedEntries: vi.fn() }));
-vi.mock("./ipc", () => ({ renamePath: vi.fn(), pathExists: vi.fn() }));
-import { renamePath, pathExists } from "./ipc";
+vi.mock("./ipc", () => ({ renamePath: vi.fn(), pathExists: vi.fn(), samePathEntry: vi.fn(async () => false) }));
+import { renamePath, pathExists, samePathEntry } from "./ipc";
 import { applyRename, setRenameSession, setRenameOptions, defaultOpReplace } from "./rename";
 import type { Entry } from "./types";
 
@@ -36,4 +36,16 @@ describe("rename rollback", () => {
     expect((await applyRename()).ok).toBe(false);
     expect(files).toEqual(original);
   });
+});
+
+it("renames case-only aliases through an exclusive temporary name", async () => {
+  vi.mocked(pathExists).mockResolvedValue(true);
+  vi.mocked(samePathEntry).mockResolvedValue(true);
+  vi.mocked(renamePath).mockResolvedValue(undefined);
+  vi.mocked(renamePath).mockClear();
+  setRenameSession({ pane: "left", dir: "/test", items: [entry("file.txt")] });
+  setRenameOptions({ ops: [{ kind: "case", scope: "base", caseMode: "upper" }] });
+  expect((await applyRename()).ok).toBe(true);
+  expect(renamePath).toHaveBeenCalledTimes(2);
+  expect(vi.mocked(renamePath).mock.calls[1][1]).toBe("/test/FILE.txt");
 });

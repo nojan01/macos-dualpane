@@ -121,6 +121,10 @@ export async function pathExists(path: string): Promise<boolean> {
   return invoke<boolean>("path_exists", { path });
 }
 
+export async function samePathEntry(first: string, second: string): Promise<boolean> {
+  return invoke<boolean>("same_path_entry", { first, second });
+}
+
 /** Sichtbare Obergrenze eines WebDAV-, S3/Swift- bzw. SFTP-Laufwerks. */
 export async function navigationRoot(path: string): Promise<string | null> {
   return invoke<string | null>("navigation_root", { path });
@@ -246,9 +250,10 @@ export async function remoteHostKeys(
 
 export async function remoteTrustHost(
   host: string,
-  port?: number | null,
+  port: number | null,
+  expectedFingerprints: string[],
 ): Promise<void> {
-  return invoke<void>("remote_trust_host", { host, port: port ?? null });
+  return invoke<void>("remote_trust_host", { host, port, expectedFingerprints });
 }
 
 export async function saveRemotePassword(
@@ -337,7 +342,7 @@ export async function quickLook(path: string): Promise<void> {
   return invoke<void>("quick_look", { path });
 }
 
-export type JobItem = { src: string; dst: string; overwrite: boolean };
+export type JobItem = { src: string; dst: string; overwrite: boolean; directoryOnly?: boolean };
 export type JobKind = "copy" | "move";
 
 export async function checkConflicts(items: JobItem[]): Promise<string[]> {

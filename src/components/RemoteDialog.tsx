@@ -217,7 +217,7 @@ export function RemoteDialog() {
     if (!current || current.busy) return;
     update({ busy: true, error: null, fingerprints: null });
     try {
-      await remoteTrustHost(current.host.trim(), effectivePort(current));
+      await remoteTrustHost(current.host.trim(), effectivePort(current), current.fingerprints ?? []);
       await connect();
     } catch (error) {
       update({ busy: false, error: errMsg(error) });

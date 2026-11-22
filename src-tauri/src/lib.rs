@@ -8,10 +8,13 @@ use std::process::{Command, Stdio};
 
 mod nfs;
 mod nfs_delete;
+mod nfs_metadata;
 mod object_storage;
 mod promise_drag;
 mod rdp;
 mod remote;
+#[cfg(test)]
+mod safety_tests;
 use notify_debouncer_mini::notify::RecommendedWatcher;
 use notify_debouncer_mini::{new_debouncer, notify::RecursiveMode, Debouncer};
 use std::path::{Path, PathBuf};
@@ -735,6 +738,9 @@ fn rename_path(old_path: String, new_path: String) -> Result<(), String> {
     if a == b {
         return Ok(());
     }
+    if same_directory_entry(&a, &b)? {
+        return rename_case_only(&a, &b);
+    }
     if let Some(result) = remote::object_storage_path_exists(&a) {
         if !result? {
             return Err(format!("{}: Quelle nicht gefunden", a.display()));
@@ -754,6 +760,67 @@ fn rename_path(old_path: String, new_path: String) -> Result<(), String> {
         }
         Err(e) => Err(e.to_string()),
     }
+}
+
+fn same_directory_entry(a: &Path, b: &Path) -> Result<bool, String> {
+    use std::os::unix::fs::MetadataExt;
+    let (Some(ap), Some(bp)) = (a.parent(), b.parent()) else {
+        return Ok(false);
+    };
+    let (Ok(am), Ok(bm)) = (std::fs::symlink_metadata(a), std::fs::symlink_metadata(b)) else {
+        return Ok(false);
+    };
+    if am.dev() != bm.dev()
+        || am.ino() != bm.ino()
+        || std::fs::canonicalize(ap).ok() != std::fs::canonicalize(bp).ok()
+    {
+        return Ok(false);
+    }
+    // Distinct hard-link names may have the same inode, but are not aliases.
+    let mut names = 0;
+    for entry in std::fs::read_dir(ap).map_err(|e| e.to_string())? {
+        let name = entry.map_err(|e| e.to_string())?.file_name();
+        if Some(name.as_os_str()) == a.file_name() || Some(name.as_os_str()) == b.file_name() {
+            names += 1;
+        }
+    }
+    Ok(names == 1)
+}
+
+#[tauri::command]
+fn same_path_entry(first: String, second: String) -> Result<bool, String> {
+    same_directory_entry(&expand_tilde(&first), &expand_tilde(&second))
+}
+
+fn rename_case_only(a: &Path, b: &Path) -> Result<(), String> {
+    let parent = a
+        .parent()
+        .ok_or_else(|| "Ungültiger Quellpfad".to_string())?;
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    for _ in 0..1000 {
+        let tmp = parent.join(format!(
+            ".dualbeam-rename-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        match rename_no_clobber(a, &tmp) {
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e.to_string()),
+            Ok(()) => {
+                if let Err(error) = rename_no_clobber(&tmp, b) {
+                    if let Err(rollback) = rename_no_clobber(&tmp, a) {
+                        return Err(format!(
+                            "{error}; Rücknahme fehlgeschlagen: {rollback}; Datei liegt unter {}",
+                            tmp.display()
+                        ));
+                    }
+                    return Err(error.to_string());
+                }
+                return Ok(());
+            }
+        }
+    }
+    Err("Kein freier Zwischenname gefunden".into())
 }
 
 /// Mountpoints registrierter Time-Machine-Ziele (canonicalize'd) für schnelle
@@ -1452,10 +1519,52 @@ fn statfs_fstype(path: &Path) -> Option<String> {
                 let name = unsafe { std::ffi::CStr::from_ptr(info.f_fstypename.as_ptr()) };
                 return name.to_str().ok().map(|s| s.to_ascii_lowercase());
             }
+            // An inaccessible/stale NFS mount must not inherit APFS from its
+            // parent. getfsstat(MNT_NOWAIT) reads the kernel table without I/O.
+            let error = std::io::Error::last_os_error();
+            if let Some(kind) = kernel_path_fstype(current) {
+                return Some(kind);
+            }
+            if !matches!(
+                error.raw_os_error(),
+                Some(libc::ENOENT) | Some(libc::ENOTDIR)
+            ) {
+                return None;
+            }
         }
         candidate = current.parent();
     }
     None
+}
+
+fn kernel_path_fstype(path: &Path) -> Option<String> {
+    let count = unsafe { libc::getfsstat(std::ptr::null_mut(), 0, libc::MNT_NOWAIT) };
+    if count <= 0 {
+        return None;
+    }
+    let mut entries: Vec<libc::statfs> = (0..count + 8)
+        .map(|_| unsafe { std::mem::zeroed() })
+        .collect();
+    let bytes = (entries.len() * std::mem::size_of::<libc::statfs>()) as i32;
+    let filled = unsafe { libc::getfsstat(entries.as_mut_ptr(), bytes, libc::MNT_NOWAIT) };
+    if filled < 0 {
+        return None;
+    }
+    entries
+        .iter()
+        .take(filled as usize)
+        .filter_map(|entry| {
+            let mount = unsafe { std::ffi::CStr::from_ptr(entry.f_mntonname.as_ptr()) }
+                .to_str()
+                .ok()?;
+            let kind = unsafe { std::ffi::CStr::from_ptr(entry.f_fstypename.as_ptr()) }
+                .to_str()
+                .ok()?;
+            path.starts_with(mount)
+                .then(|| (mount.len(), kind.to_ascii_lowercase()))
+        })
+        .max_by_key(|(len, _)| *len)
+        .map(|(_, kind)| kind)
 }
 
 // Mounts mit `nobrowse` (z.B. Recovery, Preboot, Disk-Images von Installern)
@@ -1998,10 +2107,10 @@ async fn mount_network_url(url: String, allow_insecure_local: bool) -> Result<St
     .map_err(|_| "err.mount.failed".to_string())?
 }
 
-/// Gibt die in Cargo.toml gepflegte App-Version zurück (für den Über-Dialog).
+/// Verwendet die gebaute Tauri-Version, einschließlich lokaler Test-Overrides.
 #[tauri::command]
-fn app_version() -> String {
-    env!("CARGO_PKG_VERSION").to_string()
+fn app_version(app: AppHandle) -> String {
+    app.package_info().version.to_string()
 }
 
 #[tauri::command]
@@ -2307,6 +2416,8 @@ struct JobItem {
     src: String,
     dst: String,
     overwrite: bool,
+    #[serde(default)]
+    directory_only: bool,
 }
 
 #[derive(Serialize, Clone)]
@@ -3379,9 +3490,9 @@ struct WebDavFileMetadata {
 /// `getlastmodified` – einen ISO-8601-Zeitstempel.
 fn webdav_propfind_created(response: &str) -> Option<i64> {
     let value = webdav_propfind_tag_value(response, "creationdate")?;
-    chrono::DateTime::parse_from_rfc3339(value)
+    time::OffsetDateTime::parse(value, &time::format_description::well_known::Rfc3339)
         .ok()
-        .map(|time| time.timestamp())
+        .map(|time| time.unix_timestamp())
 }
 
 /// Wertet ein `Depth: 1`-Listing aus und ordnet jedem Dateinamen die vom
@@ -4758,7 +4869,14 @@ enum CopyOutcome {
     Skipped,
 }
 
-fn remove_source_after_move(src: &Path, outcome: CopyOutcome) -> Result<(), String> {
+fn remove_source_after_move(
+    src: &Path,
+    outcome: CopyOutcome,
+    cancel: &AtomicBool,
+) -> Result<(), String> {
+    if cancel.load(Ordering::SeqCst) {
+        return Err("JOB_CANCELLED".into());
+    }
     if outcome == CopyOutcome::Skipped {
         return Err(format!(
             "{}: Verschieben abgebrochen, weil nicht alle Einträge kopiert wurden; die Quelle wurde nicht gelöscht",
@@ -4772,6 +4890,57 @@ fn remove_source_after_move(src: &Path, outcome: CopyOutcome) -> Result<(), Stri
             e
         )
     })
+}
+
+/// Before deleting a source after a direct transfer, verify every source file
+/// against the real destination, not against a cached/virtual mount directory.
+fn verify_move_copy(src: &Path, dst: &Path) -> Result<(), String> {
+    check_sync_preview_cancelled()?;
+    let source_is_dir = if let Some(result) =
+        remote::object_storage_path_is_dir(src).or_else(|| remote::rclone_path_is_dir(src))
+    {
+        result?
+    } else {
+        remote::ensure_direct_transfer_supported(src)?;
+        std::fs::symlink_metadata(src)
+            .map_err(|e| e.to_string())?
+            .is_dir()
+    };
+    if !source_is_dir {
+        if content_sha256(src)? != content_sha256(dst)? {
+            return Err("Verschieben abgebrochen: Zielinhalt stimmt nicht mit der Quelle überein; Quelle bleibt erhalten".into());
+        }
+        return Ok(());
+    }
+    let source = collect_direct_sync_tree(src, &[])?;
+    let destination = collect_direct_sync_tree(dst, &[])?;
+    for (rel, info) in source {
+        check_sync_preview_cancelled()?;
+        let target = destination.get(&rel).ok_or_else(|| {
+            format!("Verschieben unvollständig: {rel} fehlt im Ziel; Quelle bleibt erhalten")
+        })?;
+        if info.is_dir != target.is_dir
+            || (!info.is_dir
+                && (info.size != target.size
+                    || content_sha256(&src.join(&rel))? != content_sha256(&dst.join(&rel))?))
+        {
+            return Err(format!(
+                "Verschieben unvollständig: {rel} unterscheidet sich; Quelle bleibt erhalten"
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn create_sync_directory(dst: &Path, ctx: &JobCtx<'_>) -> Result<(), String> {
+    if let Some(result) = remote::create_direct_directory(dst) {
+        return result;
+    }
+    if ensure_copy_target_directory(dst, true, ctx).map_err(|e| e.to_string())? {
+        Ok(())
+    } else {
+        Err("Zielordner konnte nicht angelegt werden".into())
+    }
 }
 
 /// Stellt sicher, dass `dst` ein echtes Verzeichnis ist – ohne Symlinks zu folgen.
@@ -5247,6 +5416,42 @@ fn rclone_direct_plan(src: &Path, dst: &Path) -> Option<(remote::RcloneTransferC
     }
 }
 
+fn infer_object_storage_request(
+    kind: &str,
+    items: &[JobItem],
+) -> Option<ObjectStorageTransferRequest> {
+    if !matches!(kind, "copy" | "move") {
+        return None;
+    }
+    if items.is_empty() {
+        None
+    } else {
+        let contexts: Option<Vec<_>> = items
+            .iter()
+            .map(|item| {
+                let source = expand_tilde(&item.src);
+                let destination = expand_tilde(&item.dst);
+                remote::object_storage_transfer_context(&source, &destination)
+            })
+            .collect();
+        contexts.and_then(|contexts| {
+            let first = contexts.first()?;
+            contexts
+                .iter()
+                .all(|context| {
+                    context.profile.id == first.profile.id
+                        && context.mount_path == first.mount_path
+                        && context.source_is_object_storage == first.source_is_object_storage
+                })
+                .then(|| ObjectStorageTransferRequest {
+                    profile: first.profile.clone(),
+                    mount_path: first.mount_path.to_string_lossy().into_owned(),
+                    source_is_object_storage: first.source_is_object_storage,
+                })
+        })
+    }
+}
+
 #[tauri::command]
 async fn run_job(
     app: AppHandle,
@@ -5297,7 +5502,7 @@ async fn run_job(
             last_reported_done: Cell::new(u64::MAX),
         };
         ctx.emit("");
-        if kind == "copy" {
+        if kind == "copy" || kind == "move" {
             // Die Oberfläche liefert die Objekt-Speicher-Zuordnung aus
             // Komfortgründen mit. Verbindlich ist jedoch die aktive
             // Backend-Registrierung: virtuelle S3-/Swift-Pfade können nach
@@ -5305,34 +5510,7 @@ async fn run_job(
             // dadurch bislang gelegentlich als gewöhnliche leere Ordner
             // kopiert. Erkennen wir für alle Elemente genau denselben aktiven
             // Objekt-Speicher, hat diese Zuordnung Vorrang.
-            let inferred_object_storage = if items.is_empty() {
-                None
-            } else {
-                let contexts: Option<Vec<_>> = items
-                    .iter()
-                    .map(|item| {
-                        let source = expand_tilde(&item.src);
-                        let destination = expand_tilde(&item.dst);
-                        remote::object_storage_transfer_context(&source, &destination)
-                    })
-                    .collect();
-                contexts.and_then(|contexts| {
-                    let first = contexts.first()?;
-                    contexts
-                        .iter()
-                        .all(|context| {
-                            context.profile.id == first.profile.id
-                                && context.mount_path == first.mount_path
-                                && context.source_is_object_storage
-                                    == first.source_is_object_storage
-                        })
-                        .then(|| ObjectStorageTransferRequest {
-                            profile: first.profile.clone(),
-                            mount_path: first.mount_path.to_string_lossy().into_owned(),
-                            source_is_object_storage: first.source_is_object_storage,
-                        })
-                })
-            };
+            let inferred_object_storage = infer_object_storage_request(&kind, &items);
             let object_storage = inferred_object_storage.or(object_storage);
             if let Some(request) = object_storage {
                 let ObjectStorageTransferRequest {
@@ -5347,6 +5525,18 @@ async fn run_job(
                     }
                     let src = expand_tilde(&it.src);
                     let dst = expand_tilde(&it.dst);
+                    if it.directory_only {
+                        if kind != "copy" {
+                            return Err("Ungültiger Verzeichnisauftrag".into());
+                        }
+                        ctx.webdav_target = best_webdav_mount(&mounted_webdav, &dst);
+                        run_cancellable_preview(cancel2.clone(), || {
+                            create_sync_directory(&dst, &ctx)
+                        })?;
+                        ctx.done += 1;
+                        ctx.emit(&it.dst);
+                        continue;
+                    }
                     // Ein Objekt-Speicher darf nicht mittels rclone in einen
                     // macOS-WebDAV-Mount schreiben. Der Mount-Treiber erzeugt
                     // dabei unter Last 0-Byte-Platzhalter bzw. EMFILE. Für
@@ -5392,6 +5582,30 @@ async fn run_job(
                         ));
                         return Err(error);
                     }
+                    if kind == "move" {
+                        run_cancellable_preview(cancel2.clone(), || verify_move_copy(&src, &dst))?;
+                        if cancel2.load(Ordering::SeqCst) {
+                            return Err("JOB_CANCELLED".into());
+                        }
+                        if source_is_object_storage {
+                            let dirs = if remote::object_storage_path_is_dir(&src)
+                                .ok_or_else(|| "Objekt-Speicherquelle fehlt".to_string())??
+                            {
+                                vec![src.clone()]
+                            } else {
+                                Vec::new()
+                            };
+                            remote::purge_object_storage(
+                                &profile,
+                                &mount_path,
+                                std::slice::from_ref(&src),
+                                &dirs,
+                                &cancel2,
+                            )?;
+                        } else {
+                            remove_source_after_move(&src, CopyOutcome::Copied, &cancel2)?;
+                        }
+                    }
                     if !cancel2.load(Ordering::SeqCst) {
                         ctx.done += 1;
                         // Der lokale WebDAV-Zwischenschritt zählt seine
@@ -5416,8 +5630,20 @@ async fn run_job(
             }
             let src = expand_tilde(&it.src);
             let dst = expand_tilde(&it.dst);
+            if remote::is_object_storage_mount(&src) || remote::is_object_storage_mount(&dst) {
+                return Err("Dieser Transfer zwischen virtuellen Objekt-Speichern wird nicht unterstützt; es wurden keine lokalen Platzhalter verwendet".into());
+            }
             ctx.webdav_target = best_webdav_mount(&mounted_webdav, &dst);
             ctx.target_is_webdav = ctx.webdav_target.is_some();
+            if it.directory_only {
+                if kind != "copy" {
+                    return Err("Ungültiger Verzeichnisauftrag".into());
+                }
+                run_cancellable_preview(cancel2.clone(), || create_sync_directory(&dst, &ctx))?;
+                ctx.done += 1;
+                ctx.emit(&it.dst);
+                continue;
+            }
             if destination_is_within_source(&src, &dst)
                 .map_err(|e| format!("{}: Zielpfad prüfen fehlgeschlagen: {}", src.display(), e))?
             {
@@ -5433,7 +5659,8 @@ async fn run_job(
                     copy_to_sftp_mount_with_native_client(&mut ctx, &src, &dst, it.overwrite)
                         .map_err(|error| format!("{}: {error}", src.display()))?;
                 if is_move {
-                    remove_source_after_move(&src, outcome)?;
+                    run_cancellable_preview(cancel2.clone(), || verify_move_copy(&src, &dst))?;
+                    remove_source_after_move(&src, outcome, &cancel2)?;
                 }
                 ctx.done += 1;
                 ctx.emit(&it.src);
@@ -5457,7 +5684,8 @@ async fn run_job(
                 )
                 .map_err(|error| format!("{}: {error}", src.display()))?;
                 if is_move {
-                    remove_source_after_move(&src, outcome)?;
+                    run_cancellable_preview(cancel2.clone(), || verify_move_copy(&src, &dst))?;
+                    remove_source_after_move(&src, outcome, &cancel2)?;
                 }
                 ctx.done += 1;
                 ctx.emit(&it.src);
@@ -5483,7 +5711,7 @@ async fn run_job(
                     }
                     Ok(outcome) => {
                         if is_move {
-                            remove_source_after_move(&src, outcome)?;
+                            remove_source_after_move(&src, outcome, &cancel2)?;
                         }
                         ctx.done += 1;
                         ctx.emit(&it.src);
@@ -5500,6 +5728,11 @@ async fn run_job(
         lock_safe(&mgr.cancels).remove(&job_id);
     }
     let cancelled = cancel.load(Ordering::SeqCst);
+    let res = if cancelled {
+        Err("JOB_CANCELLED".to_string())
+    } else {
+        res
+    };
     let error = res.as_ref().err().cloned();
     let _ = app.emit(
         "job-progress",
@@ -5574,6 +5807,25 @@ fn effective_src_mtime_secs(meta: &std::fs::Metadata) -> i64 {
 /// eigene Zeit. Ohne Toleranz würden gleichnamige Dateien sonst bei jedem
 /// Durchlauf fälschlich als „geändert" erscheinen.
 const MTIME_TOLERANCE_SECS: i64 = 2;
+
+fn content_sha256(path: &Path) -> Result<String, String> {
+    check_sync_preview_cancelled()?;
+    if let Some(result) = remote::sha256_path(path) {
+        return result;
+    }
+    let mut file = std::fs::File::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let mut hash = Sha256::new();
+    let mut buffer = [0u8; 128 * 1024];
+    loop {
+        check_sync_preview_cancelled()?;
+        let n = file.read(&mut buffer).map_err(|e| e.to_string())?;
+        if n == 0 {
+            break;
+        }
+        hash.update(&buffer[..n]);
+    }
+    Ok(format!("{:x}", hash.finalize()))
+}
 
 /// Vergleicht zwei reguläre Dateien in festen Blöcken per SHA-256. Fehler beim
 /// Lesen gelten bewusst als „ungleich“, damit eine angeforderte Verifikation
@@ -5820,7 +6072,7 @@ fn preview_compare_file(
             out.push(SyncEntry {
                 rel: rel_str,
                 action: "copy".into(),
-                is_dir: f.is_dir(),
+                is_dir: f.is_dir() && !is_symlink,
                 size: if f.is_dir() { 0 } else { f.len() },
             });
         }
@@ -5899,16 +6151,6 @@ fn normalize_max_file_size(value: Option<u64>) -> Option<u64> {
     value.filter(|v| *v > 0)
 }
 
-/// Prüft, ob ein Verzeichnis keinerlei Einträge enthält. Lesefehler gelten als
-/// „nicht leer“, damit im Zweifel der bisherige Weg (Teilbaum als Einheit)
-/// gewählt wird und nichts stillschweigend unter den Tisch fällt.
-fn dir_is_empty(dir: &Path) -> bool {
-    match std::fs::read_dir(dir) {
-        Ok(mut it) => it.next().is_none(),
-        Err(_) => false,
-    }
-}
-
 // Acht Parameter: Pfade, Zaehler und Abbruchsignal des Vorschaudurchlaufs.
 #[allow(clippy::too_many_arguments)]
 fn preview_walk_src(
@@ -5922,167 +6164,58 @@ fn preview_walk_src(
     out: &mut Vec<SyncEntry>,
 ) -> Result<(), String> {
     check_sync_preview_cancelled()?;
-    let entries = read_dir_retry(cur).map_err(|e| format!("Quelle lesen fehlgeschlagen: {e}"))?;
-    for entry in entries {
+    for entry in read_dir_retry(cur).map_err(|e| format!("Quelle lesen fehlgeschlagen: {e}"))? {
         check_sync_preview_cancelled()?;
         let p = entry.path();
-        let rel = match p.strip_prefix(src_root) {
-            Ok(r) => r,
-            Err(_) => continue,
-        };
-        if is_transient_trunk_path(rel) || is_ignored_sync_path(rel, ignore_patterns) {
+        let rel = p.strip_prefix(src_root).map_err(|e| e.to_string())?;
+        if should_skip_direct_sync_path(rel, ignore_patterns) {
             continue;
         }
-        let rel_str = rel.to_string_lossy().into_owned();
+        let meta = std::fs::symlink_metadata(&p).map_err(|e| format!("{}: {e}", p.display()))?;
+        if is_untransferable_file(&meta) {
+            continue;
+        }
         let dst_path = dst_root.join(rel);
-        let link_meta = match std::fs::symlink_metadata(&p) {
-            Ok(m) => m,
-            Err(_) => continue,
-        };
-
-        // Lokale IPC-Sockets (z. B. `.git/fsmonitor--daemon.ipc`), FIFOs und
-        // Geräte sind Laufzeitobjekte und lassen sich nicht sinnvoll kopieren.
-        if is_untransferable_file(&link_meta) {
-            continue;
-        }
-
-        if link_meta.file_type().is_symlink() {
+        if meta.is_dir() {
+            let target_exists = if let Some(context) = webdav_target {
+                webdav_server_path_exists(context, &dst_path).map_err(|e| e.to_string())?
+            } else {
+                match symlink_metadata_retry(&dst_path) {
+                    Ok(m) => m.is_dir() && !m.file_type().is_symlink(),
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
+                    Err(e) => return Err(e.to_string()),
+                }
+            };
+            if !target_exists {
+                // A sync directory is always a shallow mkdir, never an unfiltered copy.
+                out.push(SyncEntry {
+                    rel: rel.to_string_lossy().into_owned(),
+                    action: "copy".into(),
+                    is_dir: true,
+                    size: 0,
+                });
+            }
+            preview_walk_src(
+                src_root,
+                dst_root,
+                &p,
+                ignore_patterns,
+                webdav_target,
+                verify_checksums,
+                max_file_size,
+                out,
+            )?;
+        } else if !meta.is_file() || !max_file_size.is_some_and(|limit| meta.len() > limit) {
             preview_compare_file(
-                rel_str,
+                rel.to_string_lossy().into_owned(),
                 &p,
                 &dst_path,
-                &link_meta,
+                &meta,
                 webdav_target,
                 verify_checksums,
                 out,
             )?;
-            continue;
         }
-        if link_meta.is_dir() {
-            if let Some(context) = webdav_target {
-                let target_exists =
-                    webdav_server_path_exists(context, &dst_path).map_err(|error| {
-                        format!("WebDAV-Ziel am Server prüfen fehlgeschlagen: {error}")
-                    })?;
-                if target_exists {
-                    // Der Server kennt den Ordner, auch wenn der lokale
-                    // webdavfs-Cache ihn noch nicht aufgelistet hat. Die
-                    // Kinder werden ihrerseits direkt am Server verglichen.
-                    preview_walk_src(
-                        src_root,
-                        dst_root,
-                        &p,
-                        ignore_patterns,
-                        webdav_target,
-                        verify_checksums,
-                        max_file_size,
-                        out,
-                    )?;
-                } else if is_trunk_root(rel) || (max_file_size.is_some() && !dir_is_empty(&p)) {
-                    preview_walk_src(
-                        src_root,
-                        dst_root,
-                        &p,
-                        ignore_patterns,
-                        webdav_target,
-                        verify_checksums,
-                        max_file_size,
-                        out,
-                    )?;
-                } else {
-                    out.push(SyncEntry {
-                        rel: rel_str,
-                        action: "copy".into(),
-                        is_dir: true,
-                        size: 0,
-                    });
-                }
-                continue;
-            }
-            match symlink_metadata_retry(&dst_path) {
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound && is_trunk_root(rel) => {
-                    preview_walk_src(
-                        src_root,
-                        dst_root,
-                        &p,
-                        ignore_patterns,
-                        webdav_target,
-                        verify_checksums,
-                        max_file_size,
-                        out,
-                    )?;
-                }
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                    // Ganzer Teilbaum ist neu → als Einheit melden, nicht rekursieren.
-                    //
-                    // Ausnahme bei aktiver Größengrenze: Ein Verzeichniseintrag wird
-                    // vom Kopierjob rekursiv übertragen – übergroße Dateien darin
-                    // kämen also trotz Grenze mit. Deshalb wird hier einzeln
-                    // aufgelöst. Ein leeres Quellverzeichnis hat keine Dateien, die
-                    // der Rekursion Einträge liefern könnten; es wird weiterhin als
-                    // Einheit gemeldet, damit es am Ziel angelegt wird.
-                    if max_file_size.is_some() && !dir_is_empty(&p) {
-                        preview_walk_src(
-                            src_root,
-                            dst_root,
-                            &p,
-                            ignore_patterns,
-                            webdav_target,
-                            verify_checksums,
-                            max_file_size,
-                            out,
-                        )?;
-                    } else {
-                        out.push(SyncEntry {
-                            rel: rel_str,
-                            action: "copy".into(),
-                            is_dir: true,
-                            size: 0,
-                        });
-                    }
-                }
-                Err(e) => return Err(format!("Ziel-Metadaten lesen fehlgeschlagen: {e}")),
-                Ok(d) if d.is_dir() => preview_walk_src(
-                    src_root,
-                    dst_root,
-                    &p,
-                    ignore_patterns,
-                    webdav_target,
-                    verify_checksums,
-                    max_file_size,
-                    out,
-                )?,
-                Ok(_) => {
-                    // Ziel existiert, ist aber kein Verzeichnis (z. B. Datei) →
-                    // Teilbaum als Einheit kopieren (überschreiben), nicht rekursieren.
-                    out.push(SyncEntry {
-                        rel: rel_str,
-                        action: "copy".into(),
-                        is_dir: true,
-                        size: 0,
-                    });
-                }
-            }
-            continue;
-        }
-        // Reguläre Datei. Übergroße Dateien werden auf Wunsch ausgelassen: Bei
-        // langsamen Zielen (WebDAV, SMB) blockiert eine einzelne Riesendatei den
-        // gesamten Abgleich. Die Grenze wirkt nur auf reguläre Dateien – Symlinks
-        // tragen keine sinnvolle Größe.
-        if let Some(limit) = max_file_size {
-            if link_meta.len() > limit {
-                continue;
-            }
-        }
-        preview_compare_file(
-            rel_str,
-            &p,
-            &dst_path,
-            &link_meta,
-            webdav_target,
-            verify_checksums,
-            out,
-        )?;
     }
     Ok(())
 }
@@ -6098,49 +6231,56 @@ fn preview_walk_dst(
     ignore_patterns: &[String],
     out: &mut Vec<SyncEntry>,
 ) -> Result<(), String> {
-    check_sync_preview_cancelled()?;
-    let entries = read_dir_retry(cur).map_err(|e| format!("Ziel lesen fehlgeschlagen: {e}"))?;
-    for entry in entries {
+    preview_walk_dst_preserving(src_root, dst_root, cur, ignore_patterns, out).map(|_| ())
+}
+
+// True means content must remain in this directory (including excluded descendants).
+fn preview_walk_dst_preserving(
+    src_root: &Path,
+    dst_root: &Path,
+    cur: &Path,
+    ignore_patterns: &[String],
+    out: &mut Vec<SyncEntry>,
+) -> Result<bool, String> {
+    let mut retained = false;
+    for entry in read_dir_retry(cur).map_err(|e| format!("Ziel lesen fehlgeschlagen: {e}"))? {
         check_sync_preview_cancelled()?;
         let p = entry.path();
-        let rel = match p.strip_prefix(dst_root) {
-            Ok(r) => r,
-            Err(_) => continue,
-        };
-        if is_transient_trunk_path(rel) || is_ignored_sync_path(rel, ignore_patterns) {
+        let rel = p.strip_prefix(dst_root).map_err(|e| e.to_string())?;
+        if should_skip_direct_sync_path(rel, ignore_patterns) {
+            retained = true;
             continue;
         }
-
-        let dmeta = match symlink_metadata_retry(&p) {
-            Ok(m) => m,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(e) => return Err(format!("Ziel-Metadaten lesen fehlgeschlagen: {e}")),
-        };
-        // Sonderdateien sind Laufzeitobjekte und werden weder synchronisiert
-        // noch als überzählige Zieldateien zum Löschen vorgeschlagen.
-        if is_untransferable_file(&dmeta) {
+        let meta = symlink_metadata_retry(&p).map_err(|e| e.to_string())?;
+        if is_untransferable_file(&meta) {
+            retained = true;
             continue;
         }
-        let is_dir = dmeta.is_dir() && !dmeta.file_type().is_symlink();
-        // Präsenz in der Quelle OHNE Symlink-Auflösung prüfen: ein hängender
-        // Symlink in der Quelle ist trotzdem ein Eintrag – sein Ziel-Gegenstück
-        // darf nicht fälschlich zum Löschen vorgeschlagen werden.
-        let src_present = path_occupied_no_follow(&src_root.join(rel));
-        if !src_present && is_dir && is_trunk_root(rel) {
-            preview_walk_dst(src_root, dst_root, &p, ignore_patterns, out)?;
-        } else if !src_present {
+        let src_present = match symlink_metadata_retry(&src_root.join(rel)) {
+            Ok(_) => true,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
+            Err(e) => return Err(format!("Quelle prüfen fehlgeschlagen: {e}")),
+        };
+        let is_dir = meta.is_dir() && !meta.file_type().is_symlink();
+        let before = out.len();
+        let protected_children = if is_dir {
+            preview_walk_dst_preserving(src_root, dst_root, &p, ignore_patterns, out)?
+        } else {
+            false
+        };
+        if !src_present && !protected_children && !is_trunk_root(rel) {
+            out.truncate(before);
             out.push(SyncEntry {
                 rel: rel.to_string_lossy().into_owned(),
                 action: "delete".into(),
                 is_dir,
-                size: dmeta.len(),
+                size: meta.len(),
             });
-            // Ganzer Teilbaum wird gelöscht → nicht weiter absteigen.
-        } else if is_dir {
-            preview_walk_dst(src_root, dst_root, &p, ignore_patterns, out)?;
+        } else {
+            retained = true;
         }
     }
-    Ok(())
+    Ok(retained)
 }
 
 #[derive(Clone)]
@@ -6160,7 +6300,7 @@ fn should_skip_direct_sync_path(rel: &Path, ignore_patterns: &[String]) -> bool 
 
 fn collect_filesystem_sync_tree(
     root: &Path,
-    ignore_patterns: &[String],
+    _ignore_patterns: &[String],
 ) -> Result<HashMap<String, DirectSyncPathInfo>, String> {
     let mut entries = HashMap::new();
     for entry in walkdir::WalkDir::new(root).follow_links(false) {
@@ -6174,12 +6314,6 @@ fn collect_filesystem_sync_tree(
             Ok(relative) => relative,
             Err(_) => continue,
         };
-        if should_skip_direct_sync_path(relative, ignore_patterns) {
-            if entry.file_type().is_dir() {
-                continue;
-            }
-            continue;
-        }
         let metadata = entry
             .metadata()
             .map_err(|error| format!("Metadaten lesen fehlgeschlagen: {error}"))?;
@@ -6210,9 +6344,7 @@ fn collect_direct_sync_tree(
         for entry in result? {
             check_sync_preview_cancelled()?;
             let relative = PathBuf::from(&entry.name);
-            if relative.as_os_str().is_empty()
-                || should_skip_direct_sync_path(&relative, ignore_patterns)
-            {
+            if relative.as_os_str().is_empty() {
                 continue;
             }
             entries.insert(
@@ -6239,92 +6371,84 @@ fn direct_object_storage_sync_preview(
     delete_extra: bool,
     ignore_patterns: &[String],
     max_file_size: Option<u64>,
+    verify_checksums: bool,
 ) -> Result<Vec<SyncEntry>, String> {
-    let source = collect_direct_sync_tree(src_root, ignore_patterns)?;
-    let destination = collect_direct_sync_tree(dst_root, ignore_patterns)?;
+    // Keep excluded entries in the inventory: their parents must not be purged.
+    let source = collect_direct_sync_tree(src_root, &[])?;
+    let destination = collect_direct_sync_tree(dst_root, &[])?;
     let mut out = Vec::new();
-    let mut source_paths: Vec<_> = source.keys().cloned().collect();
-    source_paths.sort_by_key(|path| (path.matches('/').count(), path.clone()));
-    let mut copied_directories: Vec<String> = Vec::new();
-    for relative in source_paths {
+    let mut paths: Vec<_> = source.keys().cloned().collect();
+    paths.sort_by_key(|p| (p.matches('/').count(), p.clone()));
+    for rel in paths {
         check_sync_preview_cancelled()?;
-        if copied_directories.iter().any(|directory| {
-            relative.starts_with(directory)
-                && relative.as_bytes().get(directory.len()) == Some(&b'/')
-        }) {
+        if should_skip_direct_sync_path(Path::new(&rel), ignore_patterns) {
             continue;
         }
-        let source_info = &source[&relative];
-        let target = destination.get(&relative);
-        if source_info.is_dir {
+        let info = &source[&rel];
+        let target = destination.get(&rel);
+        let action = if info.is_dir {
             match target {
-                None => {
-                    // Ein fehlender Teilbaum wird als ein Kopierauftrag gezeigt.
-                    // Bei einer Dateigröße-Grenze lösen wir ihn einzeln auf,
-                    // damit große Dateien nicht versehentlich mitkommen.
-                    if max_file_size.is_none() {
-                        copied_directories.push(relative.clone());
-                        out.push(SyncEntry {
-                            rel: relative,
-                            action: "copy".into(),
-                            is_dir: true,
-                            size: 0,
-                        });
-                    }
+                None => Some("copy"),
+                Some(t) if !t.is_dir => Some("update"),
+                _ => None,
+            }
+        } else if max_file_size.is_some_and(|limit| info.size > limit) {
+            None
+        } else {
+            match target {
+                None => Some("copy"),
+                Some(t)
+                    if t.is_dir
+                        || t.size != info.size
+                        || info.mtime > t.mtime + MTIME_TOLERANCE_SECS =>
+                {
+                    Some("update")
                 }
-                Some(target) if !target.is_dir => out.push(SyncEntry {
-                    rel: relative,
-                    action: "update".into(),
-                    is_dir: true,
-                    size: 0,
-                }),
-                Some(_) => {}
+                Some(_)
+                    if verify_checksums
+                        && content_sha256(&src_root.join(&rel))?
+                            != content_sha256(&dst_root.join(&rel))? =>
+                {
+                    Some("update")
+                }
+                _ => None,
             }
-            continue;
-        }
-        if max_file_size.is_some_and(|limit| source_info.size > limit) {
-            continue;
-        }
-        let action = match target {
-            None => Some("copy"),
-            Some(target)
-                if target.is_dir
-                    || source_info.size != target.size
-                    || source_info.mtime > target.mtime + MTIME_TOLERANCE_SECS =>
-            {
-                Some("update")
-            }
-            Some(_) => None,
         };
         if let Some(action) = action {
             out.push(SyncEntry {
-                rel: relative,
+                rel,
                 action: action.into(),
-                is_dir: false,
-                size: source_info.size,
+                is_dir: info.is_dir,
+                size: info.size,
             });
         }
     }
     if delete_extra {
-        let mut destination_paths: Vec<_> = destination.keys().cloned().collect();
-        destination_paths.sort_by_key(|path| (path.matches('/').count(), path.clone()));
-        let mut deleted_directories: Vec<String> = Vec::new();
-        for relative in destination_paths {
+        let mut paths: Vec<_> = destination.keys().cloned().collect();
+        paths.sort_by_key(|p| (p.matches('/').count(), p.clone()));
+        let mut deleted = Vec::<String>::new();
+        for rel in paths {
             check_sync_preview_cancelled()?;
-            if source.contains_key(&relative)
-                || deleted_directories.iter().any(|directory| {
-                    relative.starts_with(directory)
-                        && relative.as_bytes().get(directory.len()) == Some(&b'/')
-                })
+            if source.contains_key(&rel)
+                || should_skip_direct_sync_path(Path::new(&rel), ignore_patterns)
+                || deleted.iter().any(|p| rel.starts_with(&format!("{p}/")))
             {
                 continue;
             }
-            let info = &destination[&relative];
+            let info = &destination[&rel];
             if info.is_dir {
-                deleted_directories.push(relative.clone());
+                let prefix = format!("{rel}/");
+                if destination.keys().any(|child| {
+                    child.starts_with(&prefix)
+                        && (source.contains_key(child)
+                            || should_skip_direct_sync_path(Path::new(child), ignore_patterns))
+                }) {
+                    continue;
+                }
+                deleted.push(rel.clone());
             }
             out.push(SyncEntry {
-                rel: relative,
+                rel,
                 action: "delete".into(),
                 is_dir: info.is_dir,
                 size: info.size,
@@ -6405,13 +6529,16 @@ fn sync_preview_inner(
         || remote::rclone_transfer_context(&dst_root).is_some()
     {
         let ignore_patterns = sync_ignore_patterns(&src_root, extra_ignore_patterns);
-        return direct_object_storage_sync_preview(
+        let mut out = direct_object_storage_sync_preview(
             &src_root,
             &dst_root,
             delete_extra,
             &ignore_patterns,
             max_file_size,
-        );
+            verify_checksums,
+        )?;
+        protect_nfs_sync_metadata(&dst_root, &mut out)?;
+        return Ok(out);
     }
     if !src_root.is_dir() {
         return Err(format!(
@@ -6452,7 +6579,63 @@ fn sync_preview_inner(
         preview_walk_dst(&src_root, &dst_root, &dst_root, &ignore_patterns, &mut out)?;
     }
 
+    protect_nfs_sync_metadata(&dst_root, &mut out)?;
     Ok(out)
+}
+
+/// macOS materializes extended attributes as AppleDouble sidecars on NFS.
+/// Decide after planning all deletions: a companion belongs to its surviving
+/// owner, but must not prevent deletion of that owner or an obsolete subtree.
+fn protect_nfs_sync_metadata(dst_root: &Path, out: &mut Vec<SyncEntry>) -> Result<(), String> {
+    if out.iter().any(|entry| {
+        entry.action == "delete"
+            && !entry.is_dir
+            && nfs_metadata::companion_owner(Path::new(&entry.rel)).is_some()
+    }) && statfs_fstype(dst_root).as_deref() == Some("nfs")
+    {
+        protect_appledouble_sync_metadata(dst_root, out)?;
+    }
+    Ok(())
+}
+
+fn protect_appledouble_sync_metadata(
+    dst_root: &Path,
+    out: &mut Vec<SyncEntry>,
+) -> Result<(), String> {
+    let deleted: std::collections::HashSet<_> = out
+        .iter()
+        .filter(|entry| entry.action == "delete")
+        .map(|entry| PathBuf::from(&entry.rel))
+        .collect();
+    let mut protected = std::collections::HashSet::new();
+    for entry in out
+        .iter()
+        .filter(|entry| entry.action == "delete" && !entry.is_dir)
+    {
+        check_sync_preview_cancelled()?;
+        let Some(owner) = nfs_metadata::companion_owner(Path::new(&entry.rel)) else {
+            continue;
+        };
+        if owner.ancestors().any(|path| deleted.contains(path)) {
+            continue;
+        }
+        match symlink_metadata_retry(&dst_root.join(&owner)) {
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                return Err(format!(
+                    "Metadaten-Zuordnung prüfen fehlgeschlagen: {error}"
+                ))
+            }
+        }
+        if nfs_metadata::is_macos_appledouble(&dst_root.join(&entry.rel))
+            .map_err(|error| format!("NFS-Metadaten prüfen fehlgeschlagen: {error}"))?
+        {
+            protected.insert(entry.rel.clone());
+        }
+    }
+    out.retain(|entry| entry.action != "delete" || !protected.contains(&entry.rel));
+    Ok(())
 }
 
 /// Vorschau für einen konfliktbewussten Zwei-Wege-Sync. Änderungen, die nur
@@ -6879,55 +7062,46 @@ fn create_temp_sibling<T>(
 }
 
 fn zip_write_archive(file: std::fs::File, srcs: Vec<String>) -> Result<(), String> {
-    use std::fs::File;
-    use std::io::copy;
+    use std::os::unix::fs::PermissionsExt;
     use zip::write::SimpleFileOptions;
-
     let mut zw = zip::ZipWriter::new(file);
-    let options: SimpleFileOptions = SimpleFileOptions::default()
-        .compression_method(zip::CompressionMethod::Deflated)
-        .unix_permissions(0o644);
-
     for src in srcs {
-        let p = expand_tilde(&src);
-        let base = p
+        let root = expand_tilde(&src);
+        let base = root
             .file_name()
-            .ok_or_else(|| format!("ungültiger Pfad: {}", src))?
-            .to_string_lossy()
-            .into_owned();
-        if p.is_dir() {
-            // Auch der ausgewählte Wurzelordner selbst muss enthalten sein,
-            // sonst verschwindet ein leerer Ordner vollständig aus dem Archiv.
-            zw.add_directory(format!("{base}/"), options)
-                .map_err(|err| err.to_string())?;
-            for entry in WalkDir::new(&p) {
-                let e = entry.map_err(|err| err.to_string())?;
-                let path = e.path();
-                let rel = path.strip_prefix(&p).map_err(|err| err.to_string())?;
-                if rel.as_os_str().is_empty() {
-                    continue;
-                }
-                let mut name = base.clone();
-                name.push('/');
-                name.push_str(&rel.to_string_lossy());
-                if e.file_type().is_dir() {
-                    if !name.ends_with('/') {
-                        name.push('/');
-                    }
-                    zw.add_directory(name, options)
-                        .map_err(|err| err.to_string())?;
-                } else if e.file_type().is_file() {
-                    zw.start_file(name, options)
-                        .map_err(|err| err.to_string())?;
-                    let mut f = File::open(path).map_err(|err| err.to_string())?;
-                    copy(&mut f, &mut zw).map_err(|err| err.to_string())?;
-                }
+            .ok_or_else(|| "Ungültiger ZIP-Quellpfad".to_string())?;
+        for entry in WalkDir::new(&root)
+            .follow_links(false)
+            .follow_root_links(false)
+        {
+            let entry = entry.map_err(|e| e.to_string())?;
+            let path = entry.path();
+            let rel = path.strip_prefix(&root).map_err(|e| e.to_string())?;
+            let name = Path::new(base).join(rel).to_string_lossy().into_owned();
+            let meta = std::fs::symlink_metadata(path).map_err(|e| e.to_string())?;
+            let options = SimpleFileOptions::default()
+                .compression_method(zip::CompressionMethod::Deflated)
+                .unix_permissions(meta.permissions().mode() & 0o777);
+            if meta.file_type().is_symlink() {
+                let target = std::fs::read_link(path).map_err(|e| e.to_string())?;
+                let target = target
+                    .to_str()
+                    .ok_or_else(|| "ZIP-Linkziel ist nicht UTF-8".to_string())?;
+                zw.add_symlink(name, target, options)
+                    .map_err(|e| e.to_string())?;
+            } else if meta.is_dir() {
+                zw.add_directory(format!("{}/", name.trim_end_matches('/')), options)
+                    .map_err(|e| e.to_string())?;
+            } else if meta.is_file() {
+                zw.start_file(name, options).map_err(|e| e.to_string())?;
+                let mut file = std::fs::File::open(path).map_err(|e| e.to_string())?;
+                std::io::copy(&mut file, &mut zw).map_err(|e| e.to_string())?;
+            } else {
+                return Err(format!(
+                    "{}: Spezialdatei kann nicht archiviert werden",
+                    path.display()
+                ));
             }
-        } else if p.is_file() {
-            zw.start_file(base, options)
-                .map_err(|err| err.to_string())?;
-            let mut f = File::open(&p).map_err(|err| err.to_string())?;
-            copy(&mut f, &mut zw).map_err(|err| err.to_string())?;
         }
     }
     zw.finish().map_err(|e| e.to_string())?;
@@ -6966,6 +7140,7 @@ fn zip_extract_inner(src: String, dst_dir: String) -> Result<(), String> {
 fn zip_extract_into(src_path: &Path, dst_path: &Path) -> Result<(), String> {
     use std::fs::{self, File, OpenOptions};
     use std::io::copy;
+    use std::os::unix::fs::{symlink, PermissionsExt};
 
     let file = File::open(src_path).map_err(|e| e.to_string())?;
     let mut archive = zip::ZipArchive::new(file).map_err(|e| e.to_string())?;
@@ -6976,6 +7151,8 @@ fn zip_extract_into(src_path: &Path, dst_path: &Path) -> Result<(), String> {
     }
 
     let mut total_uncompressed = 0u64;
+    let mut links = Vec::new();
+    let mut directory_modes = Vec::new();
     for i in 0..archive.len() {
         let mut entry = archive.by_index(i).map_err(|e| e.to_string())?;
         total_uncompressed = total_uncompressed
@@ -7005,8 +7182,24 @@ fn zip_extract_into(src_path: &Path, dst_path: &Path) -> Result<(), String> {
         if !out_path.starts_with(dst_path) {
             continue;
         }
-        if entry.is_dir() {
+        let mode = entry.unix_mode();
+        if mode.is_some_and(|mode| mode & 0o170000 == 0o120000) {
+            if entry.size() > 16384 {
+                return Err("ZIP-Linkziel ist zu lang".into());
+            }
+            let mut target = String::new();
+            entry
+                .read_to_string(&mut target)
+                .map_err(|e| e.to_string())?;
+            if target.is_empty() || target.contains('\0') {
+                return Err("Ungültiges ZIP-Linkziel".into());
+            }
+            links.push((out_path, target));
+        } else if entry.is_dir() {
             fs::create_dir_all(&out_path).map_err(|e| e.to_string())?;
+            if let Some(mode) = mode {
+                directory_modes.push((out_path, mode & 0o777));
+            }
         } else {
             if let Some(parent) = out_path.parent() {
                 fs::create_dir_all(parent).map_err(|e| e.to_string())?;
@@ -7020,7 +7213,36 @@ fn zip_extract_into(src_path: &Path, dst_path: &Path) -> Result<(), String> {
                 .open(&out_path)
                 .map_err(|e| e.to_string())?;
             copy(&mut entry, &mut out).map_err(|e| e.to_string())?;
+            if let Some(mode) = mode {
+                out.set_permissions(fs::Permissions::from_mode(mode & 0o777))
+                    .map_err(|e| e.to_string())?;
+            }
         }
+    }
+    // Links are created last: an archive must never redirect extraction
+    // through a symlink into an external directory (ZIP symlink traversal).
+    for (path, target) in links {
+        let parent = path
+            .parent()
+            .ok_or_else(|| "Ungültiger ZIP-Pfad".to_string())?;
+        let rel = parent.strip_prefix(dst_path).map_err(|e| e.to_string())?;
+        let mut current = dst_path.to_path_buf();
+        for component in rel.components() {
+            current.push(component);
+            match fs::symlink_metadata(&current) {
+                Ok(meta) if meta.is_dir() && !meta.file_type().is_symlink() => {}
+                Ok(_) => return Err("ZIP-Link hat keinen sicheren Elternordner".into()),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    fs::create_dir(&current).map_err(|e| e.to_string())?
+                }
+                Err(e) => return Err(e.to_string()),
+            }
+        }
+        symlink(target, path).map_err(|e| e.to_string())?;
+    }
+    directory_modes.sort_by_key(|(path, _)| std::cmp::Reverse(path.components().count()));
+    for (path, mode) in directory_modes {
+        fs::set_permissions(path, fs::Permissions::from_mode(mode)).map_err(|e| e.to_string())?;
     }
     Ok(())
 }
@@ -7618,7 +7840,7 @@ fn build_and_set_menu(app: &tauri::AppHandle, lang: &str) -> tauri::Result<()> {
 
     let about_meta = AboutMetadataBuilder::new()
         .name(Some("DualBeam"))
-        .version(Some(env!("CARGO_PKG_VERSION").to_string()))
+        .version(Some(app.package_info().version.to_string()))
         .copyright(Some("Copyright © 2026 N.J. — MIT License"))
         .authors(Some(vec!["N.J.".to_string()]))
         .license(Some("MIT"))
@@ -7830,6 +8052,7 @@ pub fn run() {
             create_symlink,
             create_finder_alias,
             rename_path,
+            same_path_entry,
             move_to_trash,
             run_network_delete,
             stage_delete_for_undo,
@@ -8526,8 +8749,8 @@ mod copy_tests {
         .unwrap();
         assert!(entries.iter().any(|entry| entry.rel == "neu/klein.txt"));
         assert!(!entries.iter().any(|entry| entry.rel == "neu/gross.bin"));
-        // Kein gebündelter Verzeichniseintrag, der die große Datei mitnähme.
-        assert!(!entries
+        // Directory entries are shallow mkdir operations; children are filtered separately.
+        assert!(entries
             .iter()
             .any(|entry| entry.rel == "neu" && entry.is_dir));
 
@@ -8832,7 +9055,9 @@ mod copy_tests {
         let src = tmp_path("move-source.txt");
         std::fs::write(&src, b"keep me").unwrap();
 
-        assert!(remove_source_after_move(&src, CopyOutcome::Skipped).is_err());
+        assert!(
+            remove_source_after_move(&src, CopyOutcome::Skipped, &AtomicBool::new(false)).is_err()
+        );
         assert!(src.exists());
 
         let _ = std::fs::remove_dir_all(src.parent().unwrap());

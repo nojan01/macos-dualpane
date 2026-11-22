@@ -633,6 +633,7 @@ export async function confirmSync() {
           src: joinPath(s.src, entry.rel),
           dst: joinPath(s.dst, entry.rel),
           overwrite: true,
+          directoryOnly: entry.isDir,
         }));
         await runJob(
           id,
@@ -655,6 +656,7 @@ export async function confirmSync() {
           src: joinPath(s.dst, entry.rel),
           dst: joinPath(s.src, entry.rel),
           overwrite: true,
+          directoryOnly: entry.isDir,
         }));
         await runJob(
           id,
@@ -665,7 +667,7 @@ export async function confirmSync() {
         );
       }
     } catch (e) {
-      await notifyError(t("common.error", { msg: errMsg(e) }));
+      if (String(e) !== "JOB_CANCELLED") await notifyError(t("common.error", { msg: errMsg(e) }));
     } finally {
       setState("job", null);
       await refreshPane("left");
@@ -695,6 +697,7 @@ export async function confirmSync() {
         // melden. `overwrite: true` lädt deshalb zunächst unter einem
         // temporären Namen hoch und ersetzt das Ziel anschließend sicher.
         overwrite: true,
+        directoryOnly: e.isDir,
       }));
       setState("job", {
         id,
@@ -752,6 +755,7 @@ export async function confirmSync() {
     }
   } catch (e) {
     const raw = errMsg(e);
+    if (String(e) === "JOB_CANCELLED") return;
     // Time-Machine-Ziele sind auch beim Sync-Löschen geschützt.
     if (!(await reportKnownDeleteError(raw))) {
       await notifyError(t("common.error", { msg: raw }));

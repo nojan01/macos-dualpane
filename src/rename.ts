@@ -2,7 +2,7 @@
 import { createSignal, createEffect } from "solid-js";
 import { state, setState, refreshPane } from "./state";
 import type { Entry, PaneId } from "./types";
-import { renamePath, pathExists } from "./ipc";
+import { renamePath, pathExists, samePathEntry } from "./ipc";
 import { selectedEntries } from "./jobs";
 import { t, errMsg } from "./i18n";
 
@@ -279,15 +279,17 @@ export async function applyRename(): Promise<{ ok: boolean; message?: string }> 
   if (targets.length === 0) return { ok: true };
 
   const srcSet = new Set(sess.items.map((e) => e.path));
+  let caseOnlyRename = false;
   for (const p of targets) {
     const dst = joinPath(sess.dir, p.newName);
     if (srcSet.has(dst)) continue;
     if (await pathExists(dst)) {
+      if (await samePathEntry(p.src.path, dst)) { caseOnlyRename = true; continue; }
       return { ok: false, message: t("rn.err.exists", { name: p.newName }) };
     }
   }
 
-  const needsTwoPhase = targets.some((p) => srcSet.has(joinPath(sess.dir, p.newName)));
+  const needsTwoPhase = caseOnlyRename || targets.some((p) => srcSet.has(joinPath(sess.dir, p.newName)));
   const stamp = Date.now();
 
   // Bei einem Fehler mitten im Vorgang alles auf die Ursprungsnamen zurückdrehen.
