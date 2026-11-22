@@ -18,7 +18,12 @@ jobs:
           node-version: 22
           cache: npm
 
+      # Match the Rust toolchain used to build and validate the macOS release.
+      # Floating stable can introduce new deny-warnings lints after validation.
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.98.0
+          components: rustfmt, clippy
 
       - name: Install frontend dependencies
         run: |
